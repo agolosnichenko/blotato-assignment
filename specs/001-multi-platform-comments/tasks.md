@@ -364,28 +364,28 @@ one comment on the platform and one row locally.
 
 ### Implementation for User Story 2
 
-- [ ] T056 [US2] Extend `src/modules/comments/infrastructure/comment-repository.ts` with the write
+- [X] T056 [US2] Extend `src/modules/comments/infrastructure/comment-repository.ts` with the write
       side: `insertQueued` (incrementing the parent's `reply_count` and the root's `last_activity_at`
       in the same transaction), `findByIdempotencyKey`, and the conditional transitions
       `markProcessing`, `markPosted`, `markFailed`, `markQueuedForRetry` — each an
       `UPDATE ... WHERE status = <expected>` whose affected-row count decides the next step (R-10)
-- [ ] T057 [P] [US2] Create `src/modules/comments/infrastructure/contact-quota.ts` implementing the
+- [X] T057 [P] [US2] Create `src/modules/comments/infrastructure/contact-quota.ts` implementing the
       `ContactQuota` port: `pg_advisory_xact_lock` on `(workspace_id, period)` inside the inserting
       transaction, then the `contact_quota_usage` insert and the count check against
       `workspaces.contact_limit_monthly` read through the port, plus `release` on final failure
       (R-08, D16, A8)
-- [ ] T058 [US2] Create `src/modules/comments/application/create-reply.ts` implementing §7.1 steps
+- [X] T058 [US2] Create `src/modules/comments/application/create-reply.ts` implementing §7.1 steps
       1–4: load the parent inside the workspace scope (otherwise `404`); check platform capability,
       depth, text length, `status = posted` and account `active`; resolve idempotency by comparing
       the request hash; one transaction doing `ContactQuota.reserve` (only when the parent's author
       is not the account) → insert `comments(status=queued, is_own=true, source=api)` → `reply_count`
       and `last_activity_at` → outbox write; enqueue `comment-publish` with `jobId = comment.id`
       **after commit**
-- [ ] T059 [P] [US2] Create `src/modules/comments/application/create-top-level-comment.ts` — the same
+- [X] T059 [P] [US2] Create `src/modules/comments/application/create-top-level-comment.ts` — the same
       pre-flight and transaction for a top-level comment on an internally published post. A post with
       no internal id is unreachable by construction because the route is keyed by `postId` (FR-015,
       A7, D13)
-- [ ] T060 [US2] Create `src/modules/comments/application/publish-comment.ts` implementing §7.1 steps
+- [X] T060 [US2] Create `src/modules/comments/application/publish-comment.ts` implementing §7.1 steps
       5–6: conditional `queued → processing` recording `last_attempt_started_at`, call
       `adapter.publishComment`, then branch on the typed error — success → `posted` +
       `platform_comment_id` + outbox `comment.posted`; `RetryableError` → back to `queued` with
@@ -394,16 +394,16 @@ one comment on the platform and one row locally.
       for the account stops and its state is recorded through `account-health.ts` (T023a) plus outbox
       `account.auth_failed` — **never** an `UPDATE` on the `social_accounts` projection; the
       `Accounts` port then reports the account disconnected (D30, A19, Principle II)
-- [ ] T060a [US2] Re-check the parent in `src/modules/comments/application/publish-comment.ts`
+- [X] T060a [US2] Re-check the parent in `src/modules/comments/application/publish-comment.ts`
       before calling the adapter: a parent that became `deleted` after the child was queued settles
       the child as `failed` with `PARENT_DELETED`, releasing the quota reservation and emitting
       outbox `comment.failed` — the pre-flight check of §7.1 step 1 ran at acceptance time and cannot
       cover a deletion that happened since (spec.md Edge Cases, contracts/rest-api.md §Error codes)
-- [ ] T061 [US2] Create `src/modules/comments/application/reconcile-comment.ts`: on
+- [X] T061 [US2] Create `src/modules/comments/application/reconcile-comment.ts`: on
       `OutcomeUnknownError`, call `adapter.findPublishedComment` with our author, the same text and a
       window opening at `last_attempt_started_at − 2 min`; found → `posted`; not found → treat as
       retryable. **No retry path may bypass this** (FR-011, SC-001, D14)
-- [ ] T062 [US2] Handle the webhook-echo race in
+- [X] T062 [US2] Handle the webhook-echo race in
       `src/modules/comments/application/publish-comment.ts` (§7.1 step 7): when the `posted` update
       collides with `UNIQUE (social_account_id, platform_comment_id)` because ingestion already
       inserted our own comment, delete the ingested duplicate and promote the API-created comment to
@@ -412,10 +412,10 @@ one comment on the platform and one row locally.
       names is about to stop existing, so relaying it would tell consumers about a comment they can
       never read. If the relay already published it, leave it and let `comment.posted` follow —
       consumers de-duplicate on the aggregate, and events are at-least-once by contract (D9, FR-025)
-- [ ] T063 [US2] Create `src/modules/comments/infrastructure/publish-worker.ts`: the
+- [X] T063 [US2] Create `src/modules/comments/infrastructure/publish-worker.ts`: the
       `comment-publish` BullMQ worker with a per-account Redis token bucket for concurrency, wiring
       the publish and reconcile use cases (§9.2)
-- [ ] T064 [US2] Create `src/modules/comments/infrastructure/sweepers.ts` with the stuck-work
+- [X] T064 [US2] Create `src/modules/comments/infrastructure/sweepers.ts` with the stuck-work
       sweeper re-enqueueing comments left `queued` for more than a minute with no active job, and
       register it on the `scheduler` queue in `src/app/worker.ts` — **concurrency 1**, which is what
       keeps the relay's "published once" true (§9.2)
@@ -666,7 +666,7 @@ reason the registry gives.
       `{ items: PlatformCapabilities[] }` — `platform`, `supportsComments`, `canCreateTopLevel`,
       `canReply`, `maxReplyDepth`, `textLimit`, `textUnit`, `ingestion`, `unsupportedReason` —
       serialized straight from `src/platforms/registry.ts` with no second source of truth
-- [ ] T099 [US5] Reject a write against a platform whose registry entry has
+- [X] T099 [US5] Reject a write against a platform whose registry entry has
       `supportsComments: false` with `422 PLATFORM_NOT_SUPPORTED` before anything leaves the service,
       in `src/modules/comments/application/create-reply.ts` and
       `src/modules/comments/application/create-top-level-comment.ts`

@@ -19,10 +19,11 @@
  *     ports and the `CommentRepository` (T056) — `markProcessing`, `markPosted`, `markFailed`,
  *     `markQueuedForRetry` are T056's own names; `findById` is this file's addition, needed for the
  *     T060a parent recheck.
- *   - `createContactQuota(db)` exposes `release(commentId): Promise<void>` (T057); `reserve` is
- *     exercised by `create-reply.integration.test.ts` (T053), not here — this file seeds
- *     `contact_quota_usage` directly, per w6-common's "seed through the repository or a direct
- *     insert, whichever makes the test's intent clearest".
+ *   - `createContactQuota(db, workspaces)` exposes `release(commentId): Promise<void>` (T057);
+ *     `reserve` is exercised by `create-reply.integration.test.ts` (T053), not here — this file
+ *     seeds `contact_quota_usage` directly, per w6-common's "seed through the repository or a
+ *     direct insert, whichever makes the test's intent clearest". `workspaces` is required by the
+ *     constructor even though this file's `release`-only usage never reads it (T057, w8-1 report).
  *   - `getAdapter: (platform: Platform) => CommentPlatformAdapter` is `PublishComment`'s only way
  *     to reach a platform adapter; the real per-platform wiring is T063's job.
  *   - The webhook-echo race (§7.1 step 7) is asserted purely at the end state `publish()` leaves
@@ -58,6 +59,7 @@ import {
   encryptCredentials,
 } from '#src/modules/platform-core/local/account-credentials.ts';
 import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.ts';
+import { createLocalWorkspaces } from '#src/modules/platform-core/local/workspaces.ts';
 import { socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import {
   AuthError,
@@ -349,7 +351,7 @@ function buildPublishComment(db: NodePgDatabase, adapter: CommentPlatformAdapter
   return createPublishComment({
     database: db,
     commentRepository: createCommentRepository(db),
-    contactQuota: createContactQuota(db),
+    contactQuota: createContactQuota(db, createLocalWorkspaces(db)),
     accounts: createLocalAccounts(db),
     accountCredentials: createLocalAccountCredentials(db, testKeyMaterial()),
     accountHealth: createAccountHealth(db),

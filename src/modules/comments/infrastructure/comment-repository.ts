@@ -1,5 +1,5 @@
 /**
- * Read side of the comments repository (T043, T044, T050).
+ * Comments repository — read side (T043, T044, T050) and write side (T056).
  *
  * Every method takes `workspaceId` as a required parameter and puts it in the predicate — a row
  * belonging to another workspace is simply not found, never a `403` (D20, FR-026).
@@ -15,10 +15,29 @@
  * The placeholder rule (FR-005, A4) is applied once, here, for both list methods: a `deleted`
  * comment is included only while `reply_count > 0` (it still has live replies hanging off it) —
  * `getById` is a direct lookup by id, not a list, and applies no such filter (T050).
+ *
+ * The write side's four transitions (`markProcessing`, `markPosted`, `markFailed`,
+ * `markQueuedForRetry`) are conditional `UPDATE ... WHERE status = <expected>` statements whose
+ * affected-row count is returned to the caller (R-10, Principle III) — a `false` is not an error,
+ * it means another worker already moved this row and the caller must stop, not retry the write.
+ * `src/modules/comments/domain/status.ts` is consulted for legality rather than re-encoded here,
+ * so there is exactly one place that decides which `from -> to` moves exist.
+ *
+ * Every write method takes the caller's open transaction ({@link OutboxTransaction}) rather than
+ * opening its own, so a use case can append to the outbox (D9) in the same transaction as the
+ * state change — the type itself refuses a plain database handle, the same enforcement
+ * `appendToOutbox` uses.
  */
+
+// oxlint-disable max-lines -- one workspace-scoped repository implementing one CommentRepository
+// interface (read side T043/T044/T050, write side T056); splitting read and write across files
+// would duplicate CommentRecord, COMMENT_COLUMNS and the workspace-scoping discipline documented
+// above instead of removing any of it.
 
 import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { canTransition, type CommentStatus } from '#src/modules/comments/domain/status.ts';
+import type { OutboxTransaction } from '#src/modules/comments/infrastructure/outbox.ts';
 import {
   comments,
   commentSyncJobs,
@@ -68,6 +87,34 @@ export interface SyncStatus {
   readonly activeJobId: string | null;
 }
 
+/**
+ * Fields needed to insert a `queued`, API-created comment (D12, A12) — a reply when
+ * `parentCommentId` is given, a top-level comment when it is `null`. `depth` and the row's
+ * `rootCommentId` are not inputs: `insertQueued` derives both from the parent row itself (reading
+ * `comments_depth_matches_parent`'s invariant the same way the schema enforces it), so there is
+ * one place, not two, that can get the depth/root pairing wrong.
+ */
+export interface InsertQueuedInput {
+  readonly socialAccountId: string;
+  readonly platform: string;
+  readonly postId: string | null;
+  readonly platformPostId: string;
+  /** `null` for a top-level comment; the comment being replied to otherwise. */
+  readonly parentCommentId: string | null;
+  readonly authorPlatformId: string;
+  readonly text: string;
+  readonly idempotencyKey: string | null;
+}
+
+export interface MarkPostedInput {
+  readonly platformCommentId: string;
+}
+
+export interface MarkFailedInput {
+  readonly errorCode: string;
+  readonly errorMessage: string;
+}
+
 export interface CommentRepository {
   listTopLevelByPost(
     workspaceId: string,
@@ -81,6 +128,62 @@ export interface CommentRepository {
   ): Promise<ListResult>;
   getById(workspaceId: string, commentId: string): Promise<CommentRecord | null>;
   getSyncStatus(workspaceId: string, postId: string): Promise<SyncStatus>;
+  findByIdempotencyKey(workspaceId: string, idempotencyKey: string): Promise<CommentRecord | null>;
+  /**
+   * Inserts a `queued`, API-created comment. With a `parentCommentId`, this is a reply: depth and
+   * root are derived from the parent row, and — in the same transaction — the parent's
+   * `reply_count` increments and the root's `last_activity_at` moves. With `parentCommentId:
+   * null`, this is a top-level comment: depth 0, no parent to bump, and the row is its own root,
+   * so `last_activity_at` is set on itself at insert. Either way `last_activity_at` on the root is
+   * the retention key (A9): a thread that just received activity must not be purged as stale.
+   */
+  insertQueued(
+    tx: OutboxTransaction,
+    workspaceId: string,
+    input: InsertQueuedInput,
+  ): Promise<CommentRecord>;
+  /**
+   * `queued -> processing`. Bumps `attemptCount` and stamps `lastAttemptStartedAt` — the anchor
+   * the stuck-work sweeper's `COALESCE(last_attempt_started_at, created_at)` selector reads.
+   * Returns `false`, not an error, when the row was not `queued` (another worker already claimed
+   * it) — the caller must stop, not proceed to publish.
+   */
+  markProcessing(tx: OutboxTransaction, workspaceId: string, commentId: string): Promise<boolean>;
+  /**
+   * `processing -> posted`. Also clears `errorCode`/`errorMessage`: a row can re-enter
+   * `processing` after an earlier attempt failed and was retried (`markQueuedForRetry`), and
+   * `rest-api.md`'s `Comment.error` is present only while `status = 'failed'` — clearing it here
+   * keeps that invariant in the data itself rather than relying on the serializer to suppress a
+   * stale error on every other status. Returns `false`, not an error, when the row was not
+   * `processing` — the caller must not treat this as a successful publish.
+   */
+  markPosted(
+    tx: OutboxTransaction,
+    workspaceId: string,
+    commentId: string,
+    input: MarkPostedInput,
+  ): Promise<boolean>;
+  /**
+   * `processing -> failed`, terminal (D14: `PermanentError`, `AuthError`, or attempts exhausted).
+   * Returns `false`, not an error, when the row was not `processing`.
+   */
+  markFailed(
+    tx: OutboxTransaction,
+    workspaceId: string,
+    commentId: string,
+    input: MarkFailedInput,
+  ): Promise<boolean>;
+  /**
+   * `processing -> queued`, for a bounded retry (`RetryableError` / `OutcomeUnknownError` with no
+   * reconciled outcome). Leaves `lastAttemptStartedAt` untouched — it stays the sweeper's anchor
+   * for "how long has this retry been pending" until the next `markProcessing` call updates it.
+   * Returns `false`, not an error, when the row was not `processing`.
+   */
+  markQueuedForRetry(
+    tx: OutboxTransaction,
+    workspaceId: string,
+    commentId: string,
+  ): Promise<boolean>;
 }
 
 const COMMENT_COLUMNS = {
@@ -242,6 +345,213 @@ async function getSyncStatus(
   return { lastSyncedAt: target.lastSyncedAt, activeJobId: job?.id ?? null };
 }
 
+async function findByIdempotencyKey(
+  db: NodePgDatabase,
+  workspaceId: string,
+  idempotencyKey: string,
+): Promise<CommentRecord | null> {
+  const [row] = await db
+    .select(COMMENT_COLUMNS)
+    .from(comments)
+    .where(and(eq(comments.workspaceId, workspaceId), eq(comments.idempotencyKey, idempotencyKey)))
+    .limit(1);
+  return row ?? null;
+}
+
+interface ParentForInsert {
+  readonly id: string;
+  readonly depth: number;
+  readonly rootCommentId: string | null;
+}
+
+/** The parent row's `depth` and `rootCommentId`, scoped by workspace — {@link insertQueued}'s only read. */
+async function loadParentForInsert(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  parentCommentId: string,
+): Promise<ParentForInsert | null> {
+  const [row] = await tx
+    .select({ id: comments.id, depth: comments.depth, rootCommentId: comments.rootCommentId })
+    .from(comments)
+    .where(and(eq(comments.id, parentCommentId), eq(comments.workspaceId, workspaceId)))
+    .limit(1);
+  return row ?? null;
+}
+
+interface Placement {
+  readonly parent: ParentForInsert | null;
+  readonly depth: number;
+  readonly rootCommentId: string | null;
+}
+
+/**
+ * Resolves where a new comment sits: `null` in, `parentCommentId` means top-level (depth 0, no
+ * root). Otherwise depth and root come from the parent row — a depth-1 reply's parent is itself
+ * the root (its own `rootCommentId` is null, being top-level); any deeper reply inherits the
+ * parent's `rootCommentId` directly.
+ */
+async function resolvePlacement(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  parentCommentId: string | null,
+): Promise<Placement> {
+  if (parentCommentId === null) {
+    return { parent: null, depth: 0, rootCommentId: null };
+  }
+
+  const parent = await loadParentForInsert(tx, workspaceId, parentCommentId);
+  if (parent === null) {
+    throw new Error(`insertQueued: parent comment ${parentCommentId} not found`);
+  }
+
+  return { parent, depth: parent.depth + 1, rootCommentId: parent.rootCommentId ?? parent.id };
+}
+
+/**
+ * The thread bookkeeping that must commit with the insert (data-model.md §2): the parent's
+ * `reply_count` increments and the root's `last_activity_at` moves. A top-level comment has no
+ * parent to bump and is its own root, whose `last_activity_at` the insert itself already set — a
+ * no-op here.
+ */
+async function bumpParentAndRoot(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  placement: Placement,
+  now: Date,
+): Promise<void> {
+  if (placement.parent === null || placement.rootCommentId === null) {
+    return;
+  }
+
+  await tx
+    .update(comments)
+    .set({ replyCount: sql`${comments.replyCount} + 1`, updatedAt: now })
+    .where(and(eq(comments.id, placement.parent.id), eq(comments.workspaceId, workspaceId)));
+
+  await tx
+    .update(comments)
+    .set({ lastActivityAt: now, updatedAt: now })
+    .where(and(eq(comments.id, placement.rootCommentId), eq(comments.workspaceId, workspaceId)));
+}
+
+async function insertQueued(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  input: InsertQueuedInput,
+): Promise<CommentRecord> {
+  const now = new Date();
+  const placement = await resolvePlacement(tx, workspaceId, input.parentCommentId);
+
+  const [row] = await tx
+    .insert(comments)
+    .values({
+      workspaceId,
+      socialAccountId: input.socialAccountId,
+      platform: input.platform,
+      postId: input.postId,
+      platformPostId: input.platformPostId,
+      parentCommentId: input.parentCommentId,
+      rootCommentId: placement.rootCommentId,
+      depth: placement.depth,
+      isOwn: true,
+      source: 'api',
+      authorPlatformId: input.authorPlatformId,
+      text: input.text,
+      status: 'queued',
+      idempotencyKey: input.idempotencyKey,
+      replyCount: 0,
+      lastActivityAt: now,
+      occurredAt: now,
+    })
+    .returning(COMMENT_COLUMNS);
+
+  if (row === undefined) {
+    throw new Error('insertQueued: insert returned no row');
+  }
+
+  // Same transaction as the insert — a crash between the two would otherwise leave a reply the
+  // parent's reply_count does not know about, or a root whose last_activity_at understates how
+  // fresh the thread actually is.
+  await bumpParentAndRoot(tx, workspaceId, placement, now);
+
+  return row;
+}
+
+/**
+ * Applies one conditional transition, consulting {@link canTransition} rather than re-deciding
+ * legality here. Throws on an illegal pair — that is a caller bug, not a lost race — and returns
+ * whether the `UPDATE` actually matched a row for a legal one.
+ */
+async function applyTransition(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  commentId: string,
+  from: CommentStatus,
+  to: CommentStatus,
+  set: Record<string, unknown>,
+): Promise<boolean> {
+  if (!canTransition(from, to)) {
+    throw new Error(`comment-repository: illegal transition ${from} -> ${to}`);
+  }
+
+  const result = await tx
+    .update(comments)
+    .set({ status: to, updatedAt: new Date(), ...set })
+    .where(
+      and(
+        eq(comments.id, commentId),
+        eq(comments.workspaceId, workspaceId),
+        eq(comments.status, from),
+      ),
+    );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+function markProcessing(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  commentId: string,
+): Promise<boolean> {
+  return applyTransition(tx, workspaceId, commentId, 'queued', 'processing', {
+    attemptCount: sql`${comments.attemptCount} + 1`,
+    lastAttemptStartedAt: new Date(),
+  });
+}
+
+function markPosted(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  commentId: string,
+  input: MarkPostedInput,
+): Promise<boolean> {
+  return applyTransition(tx, workspaceId, commentId, 'processing', 'posted', {
+    platformCommentId: input.platformCommentId,
+    errorCode: null,
+    errorMessage: null,
+  });
+}
+
+function markFailed(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  commentId: string,
+  input: MarkFailedInput,
+): Promise<boolean> {
+  return applyTransition(tx, workspaceId, commentId, 'processing', 'failed', {
+    errorCode: input.errorCode,
+    errorMessage: input.errorMessage,
+  });
+}
+
+function markQueuedForRetry(
+  tx: OutboxTransaction,
+  workspaceId: string,
+  commentId: string,
+): Promise<boolean> {
+  return applyTransition(tx, workspaceId, commentId, 'processing', 'queued', {});
+}
+
 /** Backs {@link CommentRepository}; construct once per database handle (T043). */
 export function createCommentRepository(db: NodePgDatabase): CommentRepository {
   return {
@@ -251,5 +561,15 @@ export function createCommentRepository(db: NodePgDatabase): CommentRepository {
       listRepliesByParent(db, workspaceId, parentCommentId, pagination),
     getById: (workspaceId, commentId) => getById(db, workspaceId, commentId),
     getSyncStatus: (workspaceId, postId) => getSyncStatus(db, workspaceId, postId),
+    findByIdempotencyKey: (workspaceId, idempotencyKey) =>
+      findByIdempotencyKey(db, workspaceId, idempotencyKey),
+    insertQueued: (tx, workspaceId, input) => insertQueued(tx, workspaceId, input),
+    markProcessing: (tx, workspaceId, commentId) => markProcessing(tx, workspaceId, commentId),
+    markPosted: (tx, workspaceId, commentId, input) =>
+      markPosted(tx, workspaceId, commentId, input),
+    markFailed: (tx, workspaceId, commentId, input) =>
+      markFailed(tx, workspaceId, commentId, input),
+    markQueuedForRetry: (tx, workspaceId, commentId) =>
+      markQueuedForRetry(tx, workspaceId, commentId),
   };
 }

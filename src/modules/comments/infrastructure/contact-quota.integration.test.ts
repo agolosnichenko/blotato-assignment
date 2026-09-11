@@ -29,6 +29,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createContactQuota,
   type ContactQuota,
+  type ReserveInput,
+  type ReserveResult,
 } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import { contactQuotaUsage } from '#src/modules/comments/infrastructure/schema.ts';
 import { createLocalWorkspaces } from '#src/modules/platform-core/local/workspaces.ts';
@@ -81,6 +83,17 @@ function newContactId(): string {
 }
 
 /**
+ * `reserve` now joins the caller's transaction (spec.md §7.1 step 3) instead of opening its own —
+ * this harness stands in for the accepting transaction the real accept path composes it into.
+ * Each call opens its own `db.transaction`, so two calls fired via `Promise.all` are still two
+ * genuinely independent, concurrently-committing transactions — the property the concurrency case
+ * below depends on.
+ */
+function reserveInOwnTransaction(harness: Harness, input: ReserveInput): Promise<ReserveResult> {
+  return harness.db.transaction((tx) => harness.quota.reserve(tx, input));
+}
+
+/**
  * Each case is a standalone top-level function, called once from the outer `describe` (same shape
  * as `local-ports.integration.test.ts`'s `registerUnknownEntityTests` etc.) rather than nested
  * inline, so the outer `describe` callback stays a short list of registrations.
@@ -95,13 +108,13 @@ function registerConcurrentReservationTest(getHarness: () => Harness): void {
     // Genuinely concurrent — Promise.all, not two sequential awaits — so this only passes if the
     // implementation actually serializes on pg_advisory_xact_lock(workspace_id, period) (R-08).
     const [resultA, resultB] = await Promise.all([
-      harness.quota.reserve({
+      reserveInOwnTransaction(harness, {
         workspaceId,
         platform: 'instagram',
         contactPlatformId,
         commentId: generateId(),
       }),
-      harness.quota.reserve({
+      reserveInOwnTransaction(harness, {
         workspaceId,
         platform: 'instagram',
         contactPlatformId,
@@ -122,7 +135,7 @@ function registerExhaustedAllowanceTest(getHarness: () => Harness): void {
     const existingContact = newContactId();
     const newContact = newContactId();
 
-    const first = await harness.quota.reserve({
+    const first = await reserveInOwnTransaction(harness, {
       workspaceId,
       platform: 'instagram',
       contactPlatformId: existingContact,
@@ -130,7 +143,7 @@ function registerExhaustedAllowanceTest(getHarness: () => Harness): void {
     });
     expect(first).toEqual({ ok: true });
 
-    const rejected = await harness.quota.reserve({
+    const rejected = await reserveInOwnTransaction(harness, {
       workspaceId,
       platform: 'instagram',
       contactPlatformId: newContact,
@@ -140,7 +153,7 @@ function registerExhaustedAllowanceTest(getHarness: () => Harness): void {
 
     // The limit counts people contacted, not messages sent — a second reply to the same person
     // this period is not a new contact and must not be blocked by the same exhausted allowance.
-    const repeatContact = await harness.quota.reserve({
+    const repeatContact = await reserveInOwnTransaction(harness, {
       workspaceId,
       platform: 'instagram',
       contactPlatformId: existingContact,
@@ -159,7 +172,7 @@ function registerReleaseTest(getHarness: () => Harness): void {
     const contactPlatformId = newContactId();
     const commentId = generateId();
 
-    const reserved = await harness.quota.reserve({
+    const reserved = await reserveInOwnTransaction(harness, {
       workspaceId,
       platform: 'instagram',
       contactPlatformId,
@@ -171,7 +184,7 @@ function registerReleaseTest(getHarness: () => Harness): void {
 
     expect(await countUsageRows(harness.db, workspaceId)).toBe(0);
 
-    const afterRelease = await harness.quota.reserve({
+    const afterRelease = await reserveInOwnTransaction(harness, {
       workspaceId,
       platform: 'instagram',
       contactPlatformId: newContactId(),
