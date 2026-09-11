@@ -107,7 +107,7 @@ user story sits on.
 
 ### Schema and migrations
 
-- [ ] T016 Create `src/modules/platform-core/schema.ts` — the read-only projection of §5.1:
+- [X] T016 Create `src/modules/platform-core/schema.ts` — the read-only projection of §5.1:
       `workspaces` (`id`, `name`, `contact_limit_monthly`, `created_at`), `api_keys` (`id`,
       `workspace_id`, `prefix` unique, `key_hash`, `name`, `rate_limit_per_min`, `revoked_at`,
       `created_at`), `social_accounts` (`id`, `workspace_id`, `platform`, `platform_account_id`,
@@ -115,7 +115,7 @@ user story sits on.
       `credentials_ciphertext` bytea, `credentials_key_version`, `status` — `active`/`disconnected`,
       `created_at`), `posts` (`id`, `workspace_id`, `social_account_id`, `platform`,
       `platform_post_id`, `platform_meta` jsonb, `published_at`, `created_at`)
-- [ ] T017 Create `src/modules/comments/infrastructure/schema.ts` with the `comments` table exactly
+- [X] T017 Create `src/modules/comments/infrastructure/schema.ts` with the `comments` table exactly
       as data-model.md §2 specifies. Not-null: `workspace_id`, `social_account_id`, `platform`,
       `platform_post_id`, `depth` (smallint, 0 = top-level), `platform_meta` (jsonb default `{}`),
       `is_own`, `source` (`api`/`webhook`/`sync`), `status`
@@ -126,19 +126,19 @@ user story sits on.
       `author_display_name`, `text`, `error_code`, `error_message`, `last_attempt_started_at`,
       `idempotency_key`, `deleted_at`. **No FK on `workspace_id`, `social_account_id`, `post_id`**
       (D8, D29, Principle II)
-- [ ] T018 Add the four `comments` constraints from data-model.md to
+- [X] T018 Add the four `comments` constraints from data-model.md to
       `src/modules/comments/infrastructure/schema.ts`:
       `UNIQUE (social_account_id, platform_comment_id) WHERE platform_comment_id IS NOT NULL`,
       `UNIQUE (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
       `CHECK (status <> 'posted' OR platform_comment_id IS NOT NULL)`,
       `CHECK ((parent_comment_id IS NULL) = (depth = 0))`
-- [ ] T019 Add the five `comments` indexes from data-model.md:
+- [X] T019 Add the five `comments` indexes from data-model.md:
       `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL`,
       `(parent_comment_id, occurred_at ASC, id ASC)`,
       `(social_account_id, occurred_at DESC, id DESC)`,
       `(last_activity_at) WHERE parent_comment_id IS NULL`,
       `(status, last_attempt_started_at) WHERE status IN ('queued','processing')`
-- [ ] T020 Add the module-internal tables of data-model.md §3 to
+- [X] T020 Add the module-internal tables of data-model.md §3 to
       `src/modules/comments/infrastructure/schema.ts`: `comment_sync_targets` (with
       `UNIQUE (social_account_id, platform_post_id)`, `next_sync_at` nullable where null means
       deactivated, `manual_cooldown_until`), `comment_sync_jobs` (`trigger`
@@ -196,12 +196,12 @@ user story sits on.
       `queued → processing → posted | failed` machine plus `deleted`, expressed as allowed
       transitions, so every repository move can be a conditional `UPDATE ... WHERE status =
       <expected>` (data-model.md §2, R-10)
-- [ ] T029 [P] Create `src/modules/comments/domain/limits.ts`: a registry-driven depth check
+- [X] T029 [P] Create `src/modules/comments/domain/limits.ts`: a registry-driven depth check
       (`depth + 1 ≤ maxReplyDepth`, unbounded when null) and text-length check counting UTF-16
       characters where `textUnit` is characters and graphemes via `Intl.Segmenter` with
       `granularity: 'grapheme'` where it is graphemes. **No platform `switch` anywhere in this file**
       (R-07, Principle IV)
-- [ ] T030 [P] Create `src/modules/comments/domain/limits.test.ts`: Instagram depth 1 accepted /
+- [X] T030 [P] Create `src/modules/comments/domain/limits.test.ts`: Instagram depth 1 accepted /
       depth 2 rejected, Bluesky depth 5 accepted, a 300-grapheme Bluesky string with emoji accepted
       where its UTF-16 length exceeds 300, and a 2201-character Instagram string rejected
 
