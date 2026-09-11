@@ -2,5 +2,5 @@
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "lineWidth": 100,
   "singleQuote": true,
-  "ignorePatterns": ["dist", "*.md", ".specify", ".superpowers"]
+  "ignorePatterns": ["dist", "*.md", ".specify", ".superpowers", "drizzle"]
 }
