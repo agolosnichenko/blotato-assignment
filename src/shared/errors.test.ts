@@ -20,6 +20,7 @@ const EXPECTED_STATUS = {
   QUOTA_EXCEEDED: 422,
   RATE_LIMITED: 429,
   SYNC_COOLDOWN: 429,
+  INTERNAL_ERROR: 500,
 } as const satisfies Record<SyncErrorCode, number>;
 
 describe('ApiError / toProblemDetails', () => {

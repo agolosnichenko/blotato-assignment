@@ -41,6 +41,15 @@ export interface OutboxRelayResult {
  * aborts the transaction before any `published_at` is written, so a failed publish is
  * never mistaken for a successful one.
  *
+ * Rows in a batch are published with `Promise.all`, not a sequential loop — this is
+ * incidental, not load-bearing. The rows are independent of each other, a single pg
+ * connection serialises the underlying queries regardless of how the calls are issued
+ * from JS, and a rejection from any one of them aborts the whole transaction before any
+ * `published_at` write becomes durable, exactly as a sequential loop would. Do not read
+ * the parallelism as a reason to move the stamp outside the transaction "to make it
+ * faster" — doing that would let a row be marked published without ever having
+ * committed, which breaks SC-011.
+ *
  * Args:
  *   db: The database handle to select and stamp rows on.
  *   domainEventsQueue: The BullMQ queue to publish envelopes to.
@@ -61,6 +70,9 @@ export function relayOutboxBatch(
       .limit(BATCH_SIZE)
       .for('update', { skipLocked: true });
 
+    // Parallel across rows for lint (no-await-in-loop), not for speed — see the
+    // docstring above: rows are independent and a rejection here aborts the whole
+    // transaction, so nothing here depends on this running concurrently.
     await Promise.all(rows.map((row) => publishAndStamp(tx, domainEventsQueue, row)));
 
     return { relayed: rows.length };

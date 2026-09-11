@@ -5,6 +5,12 @@
  * through {@link ApiError} and {@link toProblemDetails}. `AsyncErrorCode` is recorded on a
  * `failed` comment's `error_code` column and never leaves the service as a response — it has no
  * HTTP status and no path through `ApiError`, so a use case cannot return it by accident.
+ *
+ * `INTERNAL_ERROR` (500) is the one `SyncErrorCode` no caller ever constructs deliberately — it's
+ * what the global error handler (`src/app/api.ts`) reaches for on an unhandled exception, so FR-032
+ * still holds (every response carries a machine-readable `code`) without reporting a bug in this
+ * service as if the client caused it. Its `detail` must never carry internal text (an exception
+ * message, a stack fragment, a query) — that goes to the log, not the response body.
  */
 
 const SYNC_ERROR_STATUS = {
@@ -20,6 +26,7 @@ const SYNC_ERROR_STATUS = {
   QUOTA_EXCEEDED: 422,
   RATE_LIMITED: 429,
   SYNC_COOLDOWN: 429,
+  INTERNAL_ERROR: 500,
 } as const satisfies Record<string, number>;
 
 const SYNC_ERROR_TITLE = {
@@ -35,6 +42,7 @@ const SYNC_ERROR_TITLE = {
   QUOTA_EXCEEDED: 'Quota Exceeded',
   RATE_LIMITED: 'Rate Limited',
   SYNC_COOLDOWN: 'Sync Cooldown',
+  INTERNAL_ERROR: 'Internal Server Error',
 } as const satisfies Record<SyncErrorCode, string>;
 
 /** Codes a REST endpoint can return in a response body (contracts/rest-api.md §Error codes). */

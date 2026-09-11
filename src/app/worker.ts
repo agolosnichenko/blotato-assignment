@@ -1,25 +1,20 @@
 import { pathToFileURL } from 'node:url';
-import { loadConfig } from '#src/app/config.ts';
-import { createDatabase } from '#src/shared/db.ts';
+import { buildContainer } from '#src/app/container.ts';
 import { createLogger } from '#src/shared/logger.ts';
-import { createRedis } from '#src/shared/queue.ts';
 
 async function main(): Promise<void> {
-  const config = loadConfig();
-  const logger = createLogger(config, { role: 'worker' });
-  const database = createDatabase(config);
-  const redis = createRedis(config);
+  const container = buildContainer();
+  const logger = createLogger(container.config, { role: 'worker' });
 
-  await database.ping();
-  await redis.ping();
+  await container.database.ping();
+  await container.redis.ping();
   logger.info('worker ready');
 
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.once(signal, () => {
       void (async () => {
         logger.info({ signal }, 'shutting down');
-        await database.close();
-        redis.disconnect();
+        await container.close();
       })();
     });
   }

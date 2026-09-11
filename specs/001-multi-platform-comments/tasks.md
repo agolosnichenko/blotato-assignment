@@ -221,7 +221,7 @@ user story sits on.
       `blotato-api-key` header — parse `blt_<prefix>_<secret>`, look up by `prefix`, compare
       `sha256(secret)` in constant time, reject a revoked key — and decorating the request with the
       resolved `workspaceId` (A16, §10). Missing, unrecognized or revoked → `401 UNAUTHORIZED`
-- [ ] T034 Register `@fastify/rate-limit` in `src/app/api.ts` with a Redis store keyed by the
+- [X] T034 Register `@fastify/rate-limit` in `src/app/api.ts` with a Redis store keyed by the
       resolved api key id (never by IP), emitting `RateLimit-*` and `Retry-After`, and mapping the
       rejection to `429 RATE_LIMITED` in problem+json (R-05, FR-027). Two buckets per key, read and
       write, and **one rule for which limit applies**: `RATE_LIMIT_READS_PER_MIN` /
@@ -230,19 +230,19 @@ user story sits on.
       effective write is `min(env write, column)`. A ceiling rather than a replacement is what keeps
       the §10 demo figures intact (column 30 → 30 reads and still 5 writes) and makes a per-key value
       unable to raise a budget above the deployment's own
-- [ ] T035 Register a global error handler in `src/app/api.ts` that serializes every failure through
+- [X] T035 Register a global error handler in `src/app/api.ts` that serializes every failure through
       `src/shared/errors.ts` as `application/problem+json`, including Zod validation failures as
       `400 VALIDATION_ERROR` (FR-032)
-- [ ] T036 Register `@fastify/swagger`, `@fastify/swagger-ui` at `/docs` and
+- [X] T036 Register `@fastify/swagger`, `@fastify/swagger-ui` at `/docs` and
       `fastify-type-provider-zod` in `src/app/api.ts`, so one Zod schema object serves validation,
       static types and the OpenAPI document (R-03)
-- [ ] T037 Create `src/app/container.ts` wiring config, database, redis, ports, repositories,
+- [X] T037 Create `src/app/container.ts` wiring config, database, redis, ports, repositories,
       adapters and use cases, shared by both the `api` and `worker` roles, and consume it from
       `src/app/api.ts` and `src/app/worker.ts`
 
 ### Scripts
 
-- [ ] T038 [P] Create `scripts/create-api-key.ts`: generate a secret with ≥ 32 bytes of entropy,
+- [X] T038 [P] Create `scripts/create-api-key.ts`: generate a secret with ≥ 32 bytes of entropy,
       store `prefix` + `sha256(secret)`, print the full `blt_<prefix>_<secret>` **once** and never
       again — it cannot be recovered from the row (§10, D25)
 - [ ] T039 [P] Create `scripts/seed-account.ts`: a demo workspace with `contact_limit_monthly`, an

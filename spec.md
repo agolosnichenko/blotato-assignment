@@ -319,6 +319,7 @@ Base path `/v1`. Auth: `blotato-api-key: <api key>` header (A16). JSON, `camelCa
 | 422 | `QUOTA_EXCEEDED` | Monthly active contacts limit reached |
 | 429 | `RATE_LIMITED` | Per-key rate limit |
 | 429 | `SYNC_COOLDOWN` | Manual sync requested more often than the cooldown allows |
+| 500 | `INTERNAL_ERROR` | An unhandled failure in the service; `detail` carries no internal text (§18) |
 
 Asynchronous `error.code` values on a comment: `PLATFORM_REJECTED`, `PLATFORM_AUTH_FAILED`,
 `PLATFORM_RATE_LIMITED` (retries exhausted), `PARENT_DELETED`, `OUTCOME_UNKNOWN` (reconciliation and
@@ -672,3 +673,12 @@ implementation.
   `ACCOUNT_DISCONNECTED` and A19 behave exactly as specified, while the boundary holds. Clearing the
   record remains the accounts service's job (reconnection), and a projection row that flips back to
   `active` clears it.
+- **`INTERNAL_ERROR` (extends §6.3).** FR-032 requires every failure to be
+  `application/problem+json` carrying a machine-readable `code`, but the §6.3 catalogue lists only
+  the failures a client can cause: it has no entry for an unhandled exception. The global error
+  handler therefore needs a code the catalogue does not provide, and the alternatives were both
+  worse — a `500` body with no `code` breaks FR-032 for the one case a client cannot anticipate, and
+  reusing an existing code would misreport a bug as a client error. Added: `500` `INTERNAL_ERROR`,
+  "An unhandled failure in the service; `detail` carries no internal text." It is a synchronous code
+  and never appears as a comment's `error.code`. This extends the catalogue rather than revising any
+  decision, so no D-number changes.
