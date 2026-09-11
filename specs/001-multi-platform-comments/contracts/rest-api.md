@@ -56,8 +56,11 @@ workspace; every read and write is scoped to it, and another workspace's resourc
 - `error` is `{ "code": "...", "message": "..." }` when `status` is `failed`, otherwise null.
 - A deleted comment that still has live replies appears with `status: "deleted"`, `text: null` and a
   null author; a deleted comment with no replies is omitted entirely (A4, FR-005).
-- `postId` is null for comments on posts not published through the platform (D13), and also once the
-  `posts` row is no longer resolvable (A10a).
+- `postId` is null for comments on posts not published through the platform (D13), and only then. If
+  the `posts` row stops resolving, `postId` keeps the value it was stored with: the service does not
+  track the other service's deletions, and a read never calls a port per comment to find out (A10a,
+  §5.1). What changes is the route — `GET /v1/posts/:postId/comments` becomes `404` while the
+  comments stay reachable through the account inbox.
 
 ## `SyncJob`
 

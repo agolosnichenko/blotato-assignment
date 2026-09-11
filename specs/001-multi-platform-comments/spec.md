@@ -4,7 +4,9 @@
 
 **Created**: 2026-09-11
 
-**Status**: Draft
+**Status**: Approved — quality checklist passed, plan and Phase 1 artifacts derived from this
+document. It tracks `spec.md`, which is FINAL; a change here follows a change there, never precedes
+it (Principle I).
 
 **Input**: User description: "@spec.md — the working specification of the Blotato take-home comment
 system (status FINAL, decisions D1–D29, assumptions A1–A23, spikes S1–S5)."
@@ -384,18 +386,28 @@ Carried from `spec.md` §16; the identifiers are the ones used there.
 - **A1**: A post is visible to this feature only once it has a platform identifier; earlier states
   belong to the publishing service.
 - **A2**: "Own" is decided by author identity matching the connected account, not by origin.
+- **A3**: Ordering is the caller's choice; the defaults follow the use — newest first for a post's
+  comments and for the inbox, oldest first for reading a thread of replies (superseded by D27, which
+  made the direction an explicit parameter and part of the cursor).
 - **A4**: Lists show every status except deleted; a deleted comment with live replies is a
   placeholder.
+- **A5**: Comment text is plain text; where a platform needs markup to make links and mentions live
+  (Bluesky facets), the service derives it rather than asking the caller for it.
 - **A6**: Only a comment in the posted state can be replied to.
 - **A7**: Replies to comments on external posts are supported; top-level comments on them are not.
 - **A8**: The audience-contact allowance is reserved at acceptance and released on final failure;
   the same person counts once per month per platform.
 - **A9**: Retention runs from the thread's last activity, not from each comment's own age.
+- **A10**: A post's first refresh walk is history, not news: what it finds is tagged backfill so
+  consumers can ignore it.
 - **A10a**: A comment may outlive the post record it references; it stays reachable through the
   account inbox, and retention bounds the dangling rows. No cross-service cascade is assumed.
 - **A11**: Writes are acknowledged as accepted-for-processing, not as created-and-done.
 - **A12**: Idempotency keys are optional, recommended, and live as long as the comment.
 - **A13**: Cursors are opaque, encode the ordering direction, and are stable under inserts.
+- **A14**: The contract is versioned by a path prefix; a breaking change becomes a new version
+  rather than a changed meaning inside the current one.
+- **A15**: Identifiers are opaque, time-sortable UUIDs with no type prefix.
 - **A16**: Authentication reuses the platform's existing API-key header so existing clients and
   automation tools need no new configuration.
 - **A17**: The same Instagram account connected through two different login variants is two
@@ -409,7 +421,9 @@ Carried from `spec.md` §16; the identifiers are the ones used there.
 
 **Dependencies on other services** (D8, D29): workspaces, API credentials, connected accounts with
 their platform tokens, and posts are owned elsewhere and are read through ports only — never written,
-never joined to. Three platform behaviours remain unverified and gate the parts that depend on them:
+never joined to. Three Meta behaviours remain unverified and gate the parts that depend on them:
 delivery of Facebook Page comment events under the app's current access level (S1), readability of
 Instagram comments under each login variant (S2), and which signing secret authenticates events for
-the Instagram login variant (S5).
+the Instagram login variant (S5). Two further unknowns affect configuration rather than behaviour
+and are tracked in the plan: the managed Redis settings the deployment can actually set (S3) and
+Bluesky's current rate limits, against which the refresh intervals behind SC-004 must be tuned (S4).

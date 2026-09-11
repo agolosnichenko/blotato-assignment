@@ -27,7 +27,8 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 pnpm install
 docker compose up -d              # PostgreSQL + Redis
 pnpm db:migrate                   # apply drizzle/ migrations
-pnpm seed                         # demo workspace, api key, accounts, posts as refresh targets
+pnpm seed:account                 # scripts/seed-account.ts — demo workspace, api key, connected
+                                  # accounts, and published posts registered as refresh targets
 pnpm dev:api                      # http://localhost:3000/docs
 pnpm dev:worker                   # in a second terminal
 ```
@@ -150,4 +151,9 @@ committed (D25). Target: under 10 minutes.
 The Meta App runs in Standard Access, so Instagram comment webhooks will not arrive in this
 deployment; Instagram and Facebook data comes through the refresh path, and the webhook path is
 exercised with test events from the App Dashboard (D23). Three platform behaviours remain
-unverified and gate the code that depends on them: S1, S2 and S5 (§17, research R-09).
+unverified and gate the code that depends on them: S1, S2 and S5 (§17, research R-09). Two
+deployment facts are likewise unconfirmed: whether Railway's managed Redis accepts
+`maxmemory-policy noeviction` with persistence on (S3 — locally `docker-compose.yml` sets both), and
+Bluesky's current rate limits, which the §7.3 polling intervals were chosen without (S4). Both are
+configuration, not code: S3's fallback is Redis from an image with a volume, and the intervals are
+env-driven.

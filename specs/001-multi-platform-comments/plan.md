@@ -39,10 +39,12 @@ introduces and their rationale are in [research.md](./research.md): `drizzle-kit
 `@fastify/rate-limit`, `@fastify/swagger` + `@fastify/swagger-ui`, `fastify-type-provider-zod`,
 `uuidv7`.
 
-**Storage**: PostgreSQL 16 — the only source of truth. Owns `comments`, `comment_sync_targets`,
+**Storage**: PostgreSQL 18 — the only source of truth. Owns `comments`, `comment_sync_targets`,
 `comment_sync_jobs`, `webhook_deliveries`, `outbox_events`, `contact_quota_usage`, plus a read-only
-local projection of four externally owned tables (§5.1). Redis 7 holds queues, per-account token
+local projection of four externally owned tables (§5.1). Redis 8 holds queues, per-account token
 buckets, per-key rate limits and short-lived locks; losing it must lose no data (FR-033, SC-011).
+Both versions match `docker-compose.yml` (`postgres:18.6-alpine`, `redis:8.10.1-alpine`), and the
+same major versions are what the Railway services must provision.
 
 **Testing**: vitest with two projects — `unit` (no containers) and `integration` (testcontainers
 Postgres + Redis, `fastify.inject`, platform HTTP mocked at the boundary with msw); fast-check for
@@ -69,10 +71,12 @@ will not arrive in this deployment and IG/FB data comes through the refresh path
 registry, three with adapters; 45-day retention (D15); demo workspace rate-limited to 30 reads and 5
 writes per minute (§10).
 
-**Unresolved**: none blocking Phase 1. Three platform behaviours stay unverified and gate the parts
-that depend on them — S1 (Facebook Page feed events under Standard Access), S2 (Instagram comment
-reads per login variant), S5 (which secret signs events for the Instagram Login variant). See
-Complexity Tracking and [research.md](./research.md) R-09.
+**Unresolved**: none blocking Phase 1. All five spikes of §17 stay open and gate the parts that
+depend on them — three platform behaviours, S1 (Facebook Page feed events under Standard Access),
+S2 (Instagram comment reads per login variant) and S5 (which secret signs events for the Instagram
+Login variant), covered in [research.md](./research.md) R-09; and two infrastructure facts, S3
+(whether Railway's managed Redis accepts `maxmemory-policy noeviction` with persistence enabled) and
+S4 (Bluesky's current `createRecord` and `getPostThread` rate limits). See Complexity Tracking.
 
 ## Constitution Check
 
@@ -139,7 +143,7 @@ src/
 ├── modules/
 │   ├── platform-core/
 │   │   ├── ports.ts              # Workspaces, ApiKeys, Accounts, Posts, AccountCredentials,
-│   │   │                         # ContactQuota — the whole service boundary in one file
+│   │   │                         # PostPublished — the whole service boundary in one file
 │   │   ├── schema.ts             # read-only projection tables (§5.1)
 │   │   └── local/                # the single implementation reading the projection
 │   └── comments/
@@ -147,7 +151,8 @@ src/
 │       ├── application/          # ListPostComments, ListReplies, GetComment, ListAccountComments,
 │       │                         # CreateReply, CreateTopLevelComment, RequestSync, IngestComments,
 │       │                         # PublishComment, ReconcileComment, PurgeRetention
-│       ├── infrastructure/       # Drizzle repositories, outbox writer and relay, quota, workers
+│       ├── infrastructure/       # Drizzle repositories, outbox writer and relay, ContactQuota,
+│       │                         # queues and workers
 │       └── http/                 # routes, Zod schemas, error mapping
 └── platforms/
     ├── registry.ts               # capability registry — all nine platforms (§8.1)
@@ -170,11 +175,29 @@ imposes. The boundary between `comments` and `platform-core` is the compile-time
 Principle II: a repository in `comments/infrastructure` has no import path to another service's
 tables, only to a port.
 
+Three points where this layout resolves something §4.2 states more briefly:
+
+- **`ContactQuota` lives in `comments/infrastructure`**, where §4.2 places it, not in
+  `platform-core/ports.ts`. Only the *limit* crosses the boundary (`workspaces.contact_limit_monthly`, read through
+  the `Workspaces` port, billing entitlements in the real platform — D16); the *usage* is this
+  service's own `contact_quota_usage` table (§5.3), and the reservation is a local transaction with
+  an advisory lock (R-08). Putting the whole thing behind a boundary port would misdescribe a table
+  we own as somebody else's data.
+- **`PostPublished` is an inbound port**, the one §7.3 names for creating a refresh target when a
+  post is published; in this deployment the seed script calls it instead of the publishing service.
+  It is on the boundary list because the event originates outside the service.
+- **The use-case list extends §4.2** with `GetComment`, `ListAccountComments`, `ReconcileComment` and
+  `PurgeRetention`. These are the endpoints and jobs §6.1, §7.1 and §7.4 already require, named here
+  for the first time; no decision changes, so `spec.md` §18 stays "None" (Principle I).
+
 ## Complexity Tracking
 
-No constitutional violation requires justification. One conditional gate is recorded here because it
-constrains sequencing rather than design:
+No constitutional violation requires justification. The conditional gates below are recorded because
+they constrain sequencing rather than design — they are the five spikes of §17, none of which may be
+built on before it is run (Principle I):
 
 | Item | Why it exists | What it blocks until resolved |
 |------|---------------|-------------------------------|
 | Spikes S1, S2, S5 unverified | Meta's behaviour under Standard Access is not documented in a way we can rely on (§2.3); Principle I forbids building on unverified platform behaviour | S1 gates the Facebook Page feed webhook subscription; S2 gates which Instagram login variant the live demo uses; S5 gates the signing-secret configuration in the webhook verifier. The Bluesky adapter, the whole read path, the publish path and the refresh path are unaffected and can proceed first |
+| Spike S3 unverified | FR-033 / SC-011 promise that losing Redis loses no data, but an evicting Redis breaks a weaker promise first — a dropped BullMQ job is work the sweepers must then recover. `docker-compose.yml` sets `noeviction` and AOF locally; whether Railway's managed Redis allows both is untested | Gates the Redis provisioning step of the Railway deployment (D24, §9.2). The fallback — Redis from a Docker image with a volume — changes deployment configuration only, not code, so implementation proceeds meanwhile |
+| Spike S4 unverified | The §7.3 polling intervals, which FR-018 and SC-004 measure freshness against, were chosen without confirming Bluesky's current `createRecord` and `getPostThread` limits | Gates the interval values in config, not the scheduler that reads them. The intervals are configurable by design, so the spike tunes a value rather than blocking the refresh path |

@@ -89,9 +89,11 @@ version at install time and drop to the previous one rather than lifting the set
   BullMQ `jobId` is the comment id, and the `Location` header is built from it. Node 22's
   `crypto.randomUUID` is v4, which is random-ordered and would defeat the `(occurred_at, id)` keyset
   tie-break and scatter index writes.
-- **Alternatives considered**: a database default (requires PostgreSQL 18's `uuidv7()` or a pgcrypto
-  extension, and returns the id only after the insert); ULIDs as text (same ordering property, but
-  loses the native `uuid` type and every tool that understands it).
+- **Alternatives considered**: a database default — PostgreSQL 18 does ship `uuidv7()` and the
+  deployment runs 18.6, so availability is not the objection; the objection is that the id would
+  exist only after the insert returns, which is too late for all three uses above and would force a
+  round trip or a second statement to learn it. ULIDs as text (same ordering property, but loses the
+  native `uuid` type and every tool that understands it).
 
 ## R-07: Counting text the way each platform counts it
 

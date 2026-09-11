@@ -36,7 +36,7 @@ interface CommentPlatformAdapter {
 | `RetryableError` | 429, 5xx, or a network failure *before* the request was sent; may carry `retryAfter` | Back to `queued`, backoff 1s / 4s / 16s / 64s / 256s, up to 6 attempts, honouring `retryAfter` |
 | `OutcomeUnknownError` | timeout or connection drop *after* the request was sent | `findPublishedComment` first; found → `posted`; not found → treat as retryable |
 | `PermanentError` | 4xx, an explicit platform rejection | `failed` with a code; the quota reservation is released |
-| `AuthError` | the credential is invalid | `failed`; the account is marked `disconnected` and its work stops (A19) |
+| `AuthError` | the credential is invalid | `failed` with a code; the quota reservation is released; the account is marked `disconnected` and its work stops (A19) |
 
 Classifying a post-send failure as `RetryableError` is the one mistake that produces a duplicate
 public reply. An adapter that cannot tell "not sent" from "sent, answer lost" must report
