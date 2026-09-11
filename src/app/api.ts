@@ -17,7 +17,10 @@ import {
 } from 'fastify-type-provider-zod';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
+import { registerCommentReadRoutes } from '#src/modules/comments/http/routes.ts';
+import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { createLocalApiKeys } from '#src/modules/platform-core/local/api-keys.ts';
+import { createLocalPosts } from '#src/modules/platform-core/local/posts.ts';
 import { ApiError, toProblemDetails, type ProblemDetails } from '#src/shared/errors.ts';
 import { createLogger } from '#src/shared/logger.ts';
 
@@ -219,6 +222,13 @@ export function buildApi({ config, database, redis }: ApiDependencies) {
   // only this one port, not the whole `PlatformCorePorts` bag `container.ts` builds for `worker.ts`.
   registerApiKeyAuth(app, createLocalApiKeys(database.drizzle));
   registerRateLimit(app, config, redis);
+
+  app.register(
+    registerCommentReadRoutes({
+      repository: createCommentRepository(database.drizzle),
+      posts: createLocalPosts(database.drizzle),
+    }),
+  );
 
   app.get('/healthz', () => ({ status: 'ok' }));
 

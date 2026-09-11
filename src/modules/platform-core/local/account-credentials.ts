@@ -22,9 +22,40 @@ import {
   type AccountCredentialsRecord,
   type Found,
 } from '#src/modules/platform-core/ports.ts';
+import type { Platform } from '#src/platforms/types.ts';
 
 const IV_LENGTH_BYTES = 12;
 const AUTH_TAG_LENGTH_BYTES = 16;
+
+interface SocialAccountRow {
+  readonly socialAccountId: string;
+  readonly platform: string;
+  readonly authVariant: 'facebook_login' | 'instagram_login' | null;
+}
+
+/**
+ * Builds the platform-discriminated {@link AccountCredentialsRecord} this port promises (D28):
+ * only the Meta arm carries `authVariant` — every other platform's record has no such field, so
+ * an adapter that is not the Meta Graph client cannot read it even by accident.
+ */
+function toCredentialsRecord(row: SocialAccountRow, token: Buffer): AccountCredentialsRecord {
+  if (row.platform === 'instagram' || row.platform === 'facebook') {
+    return {
+      socialAccountId: row.socialAccountId,
+      platform: row.platform,
+      authVariant: row.authVariant,
+      token,
+    };
+  }
+  return {
+    socialAccountId: row.socialAccountId,
+    // `social_accounts.platform` is an unconstrained text column (this service does not own that
+    // table, D8/D29) — every value besides Instagram/Facebook is narrowed to the shared `Platform`
+    // union here, the one place this record is built.
+    platform: row.platform as Exclude<Platform, 'instagram' | 'facebook'>,
+    token,
+  };
+}
 
 /** Packs an {@link EncryptedPayload} into the single blob stored in `credentials_ciphertext`. */
 export function packCredentials(payload: EncryptedPayload): Buffer {
@@ -69,12 +100,7 @@ export function createLocalAccountCredentials(
       const payload = unpackCredentials(row.credentialsCiphertext, row.credentialsKeyVersion);
       const token = decrypt(payload, keyMaterial);
 
-      return found({
-        socialAccountId: row.socialAccountId,
-        platform: row.platform,
-        authVariant: row.authVariant,
-        token,
-      });
+      return found(toCredentialsRecord(row, token));
     },
   };
 }

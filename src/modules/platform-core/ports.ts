@@ -15,6 +15,8 @@
  * a stale projection makes that distinction real rather than theoretical.
  */
 
+import type { Platform } from '#src/platforms/types.ts';
+
 /** The result of looking up an entity that may not exist in the local projection. */
 export type Found<T> = { readonly found: true; readonly value: T } | { readonly found: false };
 
@@ -81,18 +83,40 @@ export interface Posts {
   findById(postId: string): Promise<Found<PostRecord>>;
 }
 
+/** Fields every platform's credential record carries, regardless of what else it needs. */
+interface AccountCredentialsBase {
+  readonly socialAccountId: string;
+  readonly token: Buffer;
+}
+
+/**
+ * The Meta arm of {@link AccountCredentialsRecord} — the only one carrying `authVariant` (D28).
+ * `src/platforms/meta/graph-client.ts` is the only adapter code allowed to read it; every other
+ * platform's arm of the union has no such field to read in the first place.
+ */
+interface MetaAccountCredentials extends AccountCredentialsBase {
+  readonly platform: 'instagram' | 'facebook';
+  readonly authVariant: 'facebook_login' | 'instagram_login' | null;
+}
+
+/** Every platform besides Meta's two — no login-variant concept, so no such field. */
+interface OtherAccountCredentials extends AccountCredentialsBase {
+  readonly platform: Exclude<Platform, 'instagram' | 'facebook'>;
+}
+
 /**
  * A decrypted platform token, live only for the duration of the call that requested it (D26).
  * Nothing outside the `AccountCredentials` implementation may hold `credentials_ciphertext`; a
  * caller that needs it decrypted gets exactly this record and must not cache `token` beyond the
  * one call it was fetched for.
+ *
+ * Discriminated on `platform` rather than one flat shape with an Instagram-only field on every
+ * arm (D28, Principle IV): a prior review removed the same field from `AccountContext` for the
+ * same reason, and a flat `authVariant` here would have quietly put it back — every non-Meta
+ * adapter, Bluesky included, would receive a struct carrying Instagram vocabulary it has no use
+ * for and must not branch on.
  */
-export interface AccountCredentialsRecord {
-  readonly socialAccountId: string;
-  readonly platform: string;
-  readonly authVariant: 'facebook_login' | 'instagram_login' | null;
-  readonly token: Buffer;
-}
+export type AccountCredentialsRecord = MetaAccountCredentials | OtherAccountCredentials;
 
 export interface AccountCredentials {
   findBySocialAccountId(socialAccountId: string): Promise<Found<AccountCredentialsRecord>>;

@@ -1,0 +1,122 @@
+/**
+ * Zod schemas for the read routes (T048, T050) — contracts/rest-api.md's `Comment` shape, the
+ * shared pagination query and the mapping from a repository row to the wire representation.
+ *
+ * `toCommentResponse` is where `error` collapses to `{ code, message }` only when `status` is
+ * `failed` (otherwise null, T048) and where a deleted comment's `author` reads back as `null`
+ * (T050) — both follow directly from the columns already being null in that case (data-model.md
+ * §2: `author_*`/`text` are nulled on deletion, `error_code`/`error_message` are set only when
+ * `failed`), so this function states the rule rather than re-deciding it. Which *rows* reach this
+ * mapping at all — the placeholder-vs-omit split for a deleted comment — is the repository's job
+ * (`comment-repository.ts`'s `visibleInList`), not this file's.
+ */
+
+import { z } from 'zod';
+import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import type { SortOrder } from '#src/shared/pagination.ts';
+
+export const postIdParamsSchema = z.object({ postId: z.uuid() });
+export const commentIdParamsSchema = z.object({ commentId: z.uuid() });
+
+const DEFAULT_LIMIT = 20;
+const MIN_LIMIT = 1;
+const MAX_LIMIT = 100;
+
+/** The shared `limit`/`cursor`/`order` query schema (T048) — `order`'s default varies by route. */
+export function paginationQuerySchema(defaultOrder: SortOrder) {
+  return z.object({
+    limit: z.coerce.number().int().min(MIN_LIMIT).max(MAX_LIMIT).default(DEFAULT_LIMIT),
+    cursor: z.string().min(1).optional(),
+    order: z.enum(['asc', 'desc']).default(defaultOrder),
+  });
+}
+
+const commentAuthorSchema = z
+  .object({
+    platformId: z.string(),
+    username: z.string().nullable(),
+    displayName: z.string().nullable(),
+  })
+  .nullable();
+
+const commentErrorSchema = z
+  .object({
+    code: z.string(),
+    message: z.string(),
+  })
+  .nullable();
+
+export const commentSchema = z.object({
+  id: z.uuid(),
+  accountId: z.uuid(),
+  platform: z.string(),
+  postId: z.uuid().nullable(),
+  platformPostId: z.string(),
+  parentCommentId: z.uuid().nullable(),
+  platformCommentId: z.string().nullable(),
+  depth: z.number().int().nonnegative(),
+  isOwn: z.boolean(),
+  author: commentAuthorSchema,
+  text: z.string().nullable(),
+  status: z.enum(['queued', 'processing', 'posted', 'failed', 'deleted']),
+  error: commentErrorSchema,
+  replyCount: z.number().int().nonnegative(),
+  occurredAt: z.iso.datetime(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
+export type CommentResponse = z.infer<typeof commentSchema>;
+
+export const commentsPageSchema = z.object({
+  items: z.array(commentSchema),
+  nextCursor: z.string().nullable(),
+});
+
+export const postCommentsPageSchema = commentsPageSchema.extend({
+  sync: z.object({
+    lastSyncedAt: z.iso.datetime().nullable(),
+    activeJobId: z.uuid().nullable(),
+  }),
+});
+
+/**
+ * Maps one repository row to the `Comment` wire shape.
+ *
+ * Args:
+ *   record: The row as read by `comment-repository.ts`.
+ *
+ * Returns:
+ *   The `Comment` representation contracts/rest-api.md documents.
+ */
+export function toCommentResponse(record: CommentRecord): CommentResponse {
+  return {
+    id: record.id,
+    accountId: record.socialAccountId,
+    platform: record.platform,
+    postId: record.postId,
+    platformPostId: record.platformPostId,
+    parentCommentId: record.parentCommentId,
+    platformCommentId: record.platformCommentId,
+    depth: record.depth,
+    isOwn: record.isOwn,
+    author:
+      record.authorPlatformId === null
+        ? null
+        : {
+            platformId: record.authorPlatformId,
+            username: record.authorUsername,
+            displayName: record.authorDisplayName,
+          },
+    text: record.text,
+    status: record.status as CommentResponse['status'],
+    error:
+      record.status === 'failed' && record.errorCode !== null
+        ? { code: record.errorCode, message: record.errorMessage ?? '' }
+        : null,
+    replyCount: record.replyCount,
+    occurredAt: record.occurredAt.toISOString(),
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  };
+}

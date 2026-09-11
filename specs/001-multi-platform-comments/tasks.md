@@ -284,29 +284,29 @@ freshness timestamp — without ever writing to a platform.
 
 ### Implementation for User Story 1
 
-- [ ] T043 [US1] Create `src/modules/comments/infrastructure/comment-repository.ts` with the read
+- [X] T043 [US1] Create `src/modules/comments/infrastructure/comment-repository.ts` with the read
       side: `listTopLevelByPost`, `listRepliesByParent`, `getById`. **Every method takes
       `workspaceId` as a required parameter** and scopes its predicate on it; a row belonging to
       another workspace is simply not found (D20, FR-026)
-- [ ] T044 [US1] Implement keyset paging in `src/modules/comments/infrastructure/comment-repository.ts`
+- [X] T044 [US1] Implement keyset paging in `src/modules/comments/infrastructure/comment-repository.ts`
       using `(occurred_at, id)` with both components in the comparison and the direction taken from
       the decoded cursor, so the query drives the index of T019 in either scan direction (R-02)
-- [ ] T045 [P] [US1] Create `src/modules/comments/application/list-post-comments.ts` — top-level
+- [X] T045 [P] [US1] Create `src/modules/comments/application/list-post-comments.ts` — top-level
       comments for a post, defaulting to `desc`, and the `sync` block reporting `lastSyncedAt` and
       the active job id from `comment_sync_targets` / `comment_sync_jobs` (FR-001, FR-006)
-- [ ] T046 [P] [US1] Create `src/modules/comments/application/list-replies.ts` — direct replies of one
+- [X] T046 [P] [US1] Create `src/modules/comments/application/list-replies.ts` — direct replies of one
       comment as a separately paged list, defaulting to `asc` (FR-002, FR-003, D11)
-- [ ] T047 [P] [US1] Create `src/modules/comments/application/get-comment.ts` — one comment by id,
+- [X] T047 [P] [US1] Create `src/modules/comments/application/get-comment.ts` — one comment by id,
       the polling target for a pending write (FR-007)
-- [ ] T048 [US1] Create `src/modules/comments/http/schemas.ts` with the Zod schemas for the `Comment`
+- [X] T048 [US1] Create `src/modules/comments/http/schemas.ts` with the Zod schemas for the `Comment`
       representation of contracts/rest-api.md — including `error` as `{ code, message }` only when
       `status` is `failed` and null otherwise, and `postId` nullable — plus the shared `limit` (1–100,
       default 20), `cursor` and `order` query schema. The placeholder rule for deleted comments is
       T050's alone, so the two tasks do not each half-own it
-- [ ] T049 [US1] Create `src/modules/comments/http/routes.ts` registering
+- [X] T049 [US1] Create `src/modules/comments/http/routes.ts` registering
       `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
       `GET /v1/comments/:commentId` against the use cases, and register it from `src/app/api.ts`
-- [ ] T050 [US1] Apply the placeholder rule in `src/modules/comments/http/schemas.ts` and the
+- [X] T050 [US1] Apply the placeholder rule in `src/modules/comments/http/schemas.ts` and the
       repository: lists include every status except `deleted`; a `deleted` comment with surviving
       replies is returned with `text: null` and a null author, one with no replies is omitted
       (FR-005, A4)
@@ -419,28 +419,28 @@ one comment on the platform and one row locally.
       sweeper re-enqueueing comments left `queued` for more than a minute with no active job, and
       register it on the `scheduler` queue in `src/app/worker.ts` — **concurrency 1**, which is what
       keeps the relay's "published once" true (§9.2)
-- [ ] T065 [US2] Implement `publishComment` and `findPublishedComment` in
+- [X] T065 [US2] Implement `publishComment` and `findPublishedComment` in
       `src/platforms/bluesky/adapter.ts`: session from handle + app password refreshed inside the
       adapter, `com.atproto.repo.createRecord` for `app.bsky.feed.post` with
       `reply: { root: {uri, cid}, parent: {uri, cid} }` where `root` is the post, facets detected via
       `RichText.detectFacets`, AT URIs as `platform_comment_id` and `cid` in `platform_meta` (§8.3)
-- [ ] T065a [P] [US2] Create `src/platforms/bluesky/facets.test.ts`: plain text carrying a URL, an
+- [X] T065a [P] [US2] Create `src/platforms/bluesky/facets.test.ts`: plain text carrying a URL, an
       `@handle` and a `#tag` produces the corresponding facets with correct byte offsets, and text
       with none produces an empty facet list. A5 makes deriving the markup this service's job rather
       than the caller's, so it is behaviour worth pinning — byte offsets over a multi-byte string are
       exactly where a hand-rolled version would drift
-- [ ] T066 [US2] Create `src/platforms/meta/graph-client.ts` over `undici`, resolving host and token
+- [X] T066 [US2] Create `src/platforms/meta/graph-client.ts` over `undici`, resolving host and token
       from `auth_variant` — `graph.facebook.com` with a Page token for `facebook_login`,
       `graph.instagram.com` with an Instagram user token for `instagram_login` — with the API version
       from config, parsing `X-Business-Use-Case-Usage` / `X-App-Usage` to throttle that account's
       jobs. **This is the only file that knows `auth_variant` exists** (D28)
-- [ ] T067 [US2] Map Meta and Bluesky transport failures onto the four typed errors in
+- [X] T067 [US2] Map Meta and Bluesky transport failures onto the four typed errors in
       `src/platforms/meta/errors.ts` and `src/platforms/bluesky/errors.ts`: 429/5xx/pre-send network
       failure → `RetryableError`; timeout or connection drop **after** the request was sent →
       `OutcomeUnknownError`; 4xx/explicit rejection → `PermanentError`; invalid credential →
       `AuthError`. Classifying a post-send failure as retryable is the one mistake that produces a
       duplicate public reply (contracts/platform-adapter.md)
-- [ ] T068 [US2] Implement `publishComment` and `findPublishedComment` in
+- [X] T068 [US2] Implement `publishComment` and `findPublishedComment` in
       `src/platforms/meta/instagram-adapter.ts` and `src/platforms/meta/facebook-adapter.ts` over the
       shared Graph client: IG top-level `POST /{media-id}/comments`, IG reply
       `POST /{ig-comment-id}/replies`; FB top-level `POST /{post-id}/comments`, FB reply
