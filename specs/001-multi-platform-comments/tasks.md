@@ -76,32 +76,32 @@ user story sits on.
 
 ### Shared primitives
 
-- [ ] T007 Extend the Zod schema in `src/app/config.ts` with every variable added in T004, failing
+- [X] T007 Extend the Zod schema in `src/app/config.ts` with every variable added in T004, failing
       fast with all problems listed; `CREDENTIALS_ENCRYPTION_KEY` must validate as exactly 32 bytes
       of base64, `RETENTION_DAYS` as a positive integer defaulting to 45
-- [ ] T008 [P] Add cases to `src/app/config.test.ts` covering a missing required variable, a
+- [X] T008 [P] Add cases to `src/app/config.test.ts` covering a missing required variable, a
       malformed encryption key and applied defaults
-- [ ] T009 [P] Create `src/shared/ids.ts` exporting a UUIDv7 generator over the `uuidv7` package —
+- [X] T009 [P] Create `src/shared/ids.ts` exporting a UUIDv7 generator over the `uuidv7` package —
       ids are generated in the application because the outbox row, the BullMQ `jobId` and the
       `Location` header all need the id before the insert returns (R-06, A15)
-- [ ] T010 [P] Create `src/shared/crypto.ts`: AES-256-GCM encrypt/decrypt carrying `key_version`,
+- [X] T010 [P] Create `src/shared/crypto.ts`: AES-256-GCM encrypt/decrypt carrying `key_version`,
       `sha256` hashing for API-key secrets, and a constant-time comparison wrapper over
       `crypto.timingSafeEqual` that tolerates length mismatch without leaking timing (§10)
-- [ ] T011 [P] Create `src/shared/crypto.test.ts`: round-trip encryption, decryption failure on a
+- [X] T011 [P] Create `src/shared/crypto.test.ts`: round-trip encryption, decryption failure on a
       tampered ciphertext, and rejection of a wrong `key_version`
-- [ ] T012 [P] Create `src/shared/pagination.ts`: the opaque base64url keyset cursor codec encoding
+- [X] T012 [P] Create `src/shared/pagination.ts`: the opaque base64url keyset cursor codec encoding
       `(occurredAt, id)` **and** the `order` direction, with a decode that rejects a cursor presented
       under a different `order` (D27, A13, R-02)
-- [ ] T013 [P] Create `src/shared/pagination.test.ts` with a fast-check round-trip property plus
+- [X] T013 [P] Create `src/shared/pagination.test.ts` with a fast-check round-trip property plus
       explicit cases: malformed base64, a truncated payload, and a `desc` cursor replayed as `asc`
-- [ ] T014 [P] Create `src/shared/errors.ts`: an RFC 9457 `application/problem+json` mapper and the
+- [X] T014 [P] Create `src/shared/errors.ts`: an RFC 9457 `application/problem+json` mapper and the
       complete §6.3 code catalogue as a typed union — `VALIDATION_ERROR`, `UNAUTHORIZED`,
       `NOT_FOUND`, `IDEMPOTENCY_KEY_REUSED`, `PLATFORM_NOT_SUPPORTED`, `REPLY_DEPTH_EXCEEDED`,
       `TEXT_TOO_LONG`, `PARENT_NOT_POSTED`, `ACCOUNT_DISCONNECTED`, `QUOTA_EXCEEDED`,
       `RATE_LIMITED`, `SYNC_COOLDOWN`, plus the asynchronous `PLATFORM_REJECTED`,
       `PLATFORM_AUTH_FAILED`, `PLATFORM_RATE_LIMITED`, `PARENT_DELETED`, `OUTCOME_UNKNOWN`
       (contracts/rest-api.md)
-- [ ] T015 [P] Extend `src/shared/logger.ts` redaction to cover the `blotato-api-key` header,
+- [X] T015 [P] Extend `src/shared/logger.ts` redaction to cover the `blotato-api-key` header,
       platform tokens and **comment text**, and to stamp `requestId` or `jobId` on every entry —
       under A22 these logs are the whole observability surface (§10)
 
@@ -174,25 +174,25 @@ user story sits on.
 
 ### Platform abstraction
 
-- [ ] T025 [P] Create `src/platforms/types.ts`: the `CommentPlatformAdapter` interface with
+- [X] T025 [P] Create `src/platforms/types.ts`: the `CommentPlatformAdapter` interface with
       `listComments`, `publishComment`, `findPublishedComment`, `fetchComment`; the `AccountContext`,
       `PostTarget`, `CommentPage`, `PublishInput`, `PublishedComment`, `ReconcileProbe` and
       `NormalizedComment` types; the `WebhookNormalizer` port with its `IngestionEvent`
       (`upsert`/`delete`); and the four typed errors `RetryableError` (optional `retryAfter`),
       `OutcomeUnknownError`, `PermanentError`, `AuthError` (contracts/platform-adapter.md)
-- [ ] T026 [P] Create `src/platforms/registry.ts` with all nine publishing platforms (§8.1, FR-031):
+- [X] T026 [P] Create `src/platforms/registry.ts` with all nine publishing platforms (§8.1, FR-031):
       `instagram` (comments yes, top-level yes, reply yes, `maxReplyDepth` 1, `textLimit` 2200,
       `textUnit` characters, `ingestion` `webhook+sync`), `facebook` (same but `textLimit` 8000),
       `bluesky` (`maxReplyDepth` null = unbounded per A20, `textLimit` 300, `textUnit` graphemes,
       `ingestion` `sync`), and `threads`, `x`, `linkedin`, `youtube`, `tiktok`, `pinterest` with
       `supportsComments: false` and a required `unsupportedReason`
-- [ ] T027 [P] Create `src/platforms/registry.test.ts`: every entry with `supportsComments: false`
+- [X] T027 [P] Create `src/platforms/registry.test.ts`: every entry with `supportsComments: false`
       carries a non-empty `unsupportedReason`, exactly nine entries exist, and exactly three support
       comments
 
 ### Domain rules
 
-- [ ] T028 [P] Create `src/modules/comments/domain/status.ts`: the
+- [X] T028 [P] Create `src/modules/comments/domain/status.ts`: the
       `queued → processing → posted | failed` machine plus `deleted`, expressed as allowed
       transitions, so every repository move can be a conditional `UPDATE ... WHERE status =
       <expected>` (data-model.md §2, R-10)

@@ -76,6 +76,31 @@ describe('createLogger redaction, deeper nesting', () => {
   });
 });
 
+describe('createLogger redaction, depths beyond two levels', () => {
+  it('redacts comment text nested inside job data three levels deep', () => {
+    const { destination, lines } = captureLogLines();
+    const logger = createLogger(config, {}, destination);
+
+    logger.info({ job: { data: { comment: { text: 'hello world' } } } }, 'processing job');
+
+    const [entry] = lines() as [{ job: { data: { comment: { text: string } } } }];
+    expect(entry.job.data.comment.text).toBe('[redacted]');
+  });
+
+  it('redacts comment text inside a page of comments four levels deep', () => {
+    const { destination, lines } = captureLogLines();
+    const logger = createLogger(config, {}, destination);
+
+    logger.info(
+      { result: { page: { comments: [{ text: 'hello world' }] } } },
+      'sync walk complete',
+    );
+
+    const [entry] = lines() as [{ result: { page: { comments: [{ text: string }] } } }];
+    expect(entry.result.page.comments[0]?.text).toBe('[redacted]');
+  });
+});
+
 describe('context stamping', () => {
   it('stamps requestId on every entry from a request-scoped logger', () => {
     const { destination, lines } = captureLogLines();

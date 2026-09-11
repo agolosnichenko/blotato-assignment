@@ -96,7 +96,15 @@ export function hashSecret(secret: string): string {
  * from an early length check would leak the secret's length through timing. So
  * both inputs are first reduced to fixed-length SHA-256 digests — always 32
  * bytes regardless of the original length — and those digests are compared with
- * `crypto.timingSafeEqual` instead.
+ * `crypto.timingSafeEqual` instead. That final comparison carries no length
+ * signal at all.
+ *
+ * Residual limitation: hashing `a` and `b` still takes time roughly
+ * proportional to each input's length, before the constant-time compare runs.
+ * That makes this function safe for comparing fixed-length digests (which is
+ * how it's used at both call sites — `hashSecret` output and webhook HMAC
+ * digests) but not a general substitute for constant-time behaviour over raw,
+ * variable-length secrets, where the hashing step itself could leak length.
  */
 export function secureCompare(a: Buffer | string, b: Buffer | string): boolean {
   const digestA = createHash('sha256').update(a).digest();

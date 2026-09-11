@@ -22,12 +22,17 @@ const SENSITIVE_FIELD_NAMES = [
 ];
 
 /**
- * Pino's redact paths each match one exact depth — there is no recursive wildcard. Under A22
- * these logs are the whole observability surface, and the sensitive fields above appear at
- * varying depths (a request body, BullMQ job data, an adapter payload), so each name is redacted
- * at the top level and up to two levels of nesting.
+ * Pino's redact paths each match one exact depth — there is no recursive wildcard, so a
+ * depth-unlimited guarantee would need walking the log object in a `hooks.logMethod` before
+ * pino's own serializers (req/res/err) run, which is a bigger change than this module's scope.
+ * Instead each name is redacted at the top level and up to four levels of nesting — enough for
+ * the shapes this codebase actually logs (`req.body.text` at depth 2, a BullMQ
+ * `job.data.comment.text` or a wrapped `result.page.comments[0].text` at depth 3–4). Under A22
+ * these logs are the whole observability surface, so a *fifth*-level nesting is the point where
+ * this guarantee stops; keep new call sites logging comment text no deeper than that, or extend
+ * this list if one has to.
  */
-const REDACTED_CONTENT_PATHS = ['', '*.', '*.*.'].flatMap((prefix) =>
+const REDACTED_CONTENT_PATHS = ['', '*.', '*.*.', '*.*.*.', '*.*.*.*.'].flatMap((prefix) =>
   SENSITIVE_FIELD_NAMES.map((name) => `${prefix}${name}`),
 );
 

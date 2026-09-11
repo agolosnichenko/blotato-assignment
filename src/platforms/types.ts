@@ -27,15 +27,16 @@ export type Platform =
  *
  * Credentials are obtained through the `AccountCredentials` port (D26) — an adapter never reads
  * `social_accounts` itself. Their shape is platform-specific (a Meta token vs. a Bluesky session),
- * so this port carries them as `unknown`; each adapter narrows what it expects to receive.
+ * so this port carries them as `unknown`; each adapter narrows what it expects to receive. The
+ * Instagram `auth_variant` (D28) is part of that Meta-specific credential shape, not this generic
+ * struct — it must stay unreadable to every adapter except the Meta Graph client
+ * (`src/platforms/meta/graph-client.ts`), Bluesky and the six unsupported platforms included.
  */
 export interface AccountContext {
   readonly workspaceId: string;
   readonly socialAccountId: string;
   readonly platform: Platform;
   readonly platformAccountId: string;
-  /** Instagram only (D28); `null` for every other platform, including Facebook. */
-  readonly authVariant: 'facebook_login' | 'instagram_login' | null;
   readonly credentials: unknown;
 }
 
