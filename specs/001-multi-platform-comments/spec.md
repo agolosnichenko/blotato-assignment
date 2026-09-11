@@ -392,10 +392,10 @@ achievable — not to promise a number to a customer.
   crossing it, and no conversation with activity inside the window is partially removed.
 - **SC-011**: Losing the queueing infrastructure and restarting loses zero accepted writes, zero
   received events and zero undelivered notifications.
-- **SC-012**: A reviewer can complete the documented walkthrough — list platforms, read a post's
-  comments, post a reply, poll it to "posted", hit the depth limit on one platform and succeed past
-  it on another, and request a refresh — against the live deployment in under 10 minutes with no
-  local setup.
+- **SC-012**: A reviewer can complete every step of the documented walkthrough — list platforms, read
+  a post's comments, post a reply, poll it to "posted", hit the depth limit on one platform and
+  succeed past it on another, and request a refresh — against the live deployment, with no local
+  setup and no step that the documentation does not cover.
 
 ## Assumptions
 

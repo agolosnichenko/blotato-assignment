@@ -188,7 +188,7 @@ whose breakage is silent in production.
 
 Against the live deployment, no local setup, with the demo API key delivered out of band — never
 committed (D25). The reviewer is assumed not to run the code locally, which is why the deployment is
-the deliverable surface (D22). Target: under 10 minutes.
+the deliverable surface (D22). Every step below must work from the documentation alone.
 
 1. `GET /v1/platforms` — nine platforms, three supporting comments, six with a stated reason.
 2. `GET /v1/posts/:postId/comments` — the conversation, newest first, with freshness reported.
