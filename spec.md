@@ -248,7 +248,7 @@ Constraints and indexes:
 
 | Table | Purpose and columns |
 |-------|---------------------|
-| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at`, `last_error`, `manual_cooldown_until`. `UNIQUE (social_account_id, platform_post_id)` |
+| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`. `UNIQUE (social_account_id, platform_post_id)` |
 | `comment_sync_jobs` | API resource (D19): `id`, `workspace_id`, `target_id`, `trigger` (`manual` / `scheduled` / `post_published`), `status` (`queued` / `running` / `succeeded` / `failed`), `stats` (jsonb: fetched / inserted / updated / deleted), `error`, `created_at`, `started_at`, `finished_at`. At most one active job per target (partial unique index) |
 | `webhook_deliveries` | Raw deliveries: `id`, `provider` (`meta`), `payload` (jsonb), `received_at`, `processed_at`, `attempts`, `error`. Retention 7 days |
 | `outbox_events` | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` (jsonb), `created_at`, `published_at`, `attempts` |
@@ -369,7 +369,7 @@ retries exhausted).
 
 ### 7.3. Sync (backfill, reconciliation, Bluesky polling)
 
-- Targets are created on the post-published event (a port from the publishing module; in the demo —
+- Targets are created on the post-published event (a port from the publishing service; in the demo —
   the seed script) and on the first ingested comment for an external post.
 - The scheduler (a repeatable job every minute) selects `next_sync_at ≤ now()` using
   `FOR UPDATE SKIP LOCKED` and enqueues `comment-sync` jobs.
@@ -387,8 +387,14 @@ retries exhausted).
   webhook path.
 - After a **complete** successful walk, comments no longer present on the platform are marked
   `deleted`. A partial walk (error midway) never infers deletions.
+- A `PermanentError` from the platform (the post was deleted or is no longer accessible) deactivates
+  the target — `next_sync_at = null`, the reason in `last_error` — instead of rescheduling it; the
+  thread is left to retention. Deactivation infers no deletions: a post that is gone answers nothing,
+  so the walk is not complete (previous rule). `RetryableError` keeps the schedule.
 - Manual sync (D19): an active job already exists → `202` with that job;
-  `manual_cooldown_until > now()` → `429 SYNC_COOLDOWN` (60 s cooldown).
+  `manual_cooldown_until > now()` → `429 SYNC_COOLDOWN` (60 s cooldown). A manual request runs a job
+  for a deactivated target too and restores its schedule on success — the client may know the post is
+  reachable again.
 - Events from sync carry `ingestionSource: "sync"`; comments found by a post's first backfill walk are
   tagged `"backfill"` so that consumers (DM automations) don't react to old comments.
 
@@ -585,11 +591,13 @@ Product and domain:
   root), not from the age of an individual comment: a thread is never cut in the middle.
 - **A10.** A post's first sync walk tags the comments it finds as `backfill`, so event consumers don't
   react to old comments.
-- **A10a.** (added with D29) A comment can outlive the post or account it references. A deleted post
-  is expected to arrive as a platform event: sync targets are stopped and the threads are left to
-  retention, which removes them within 45 days. Until then `GET /v1/posts/:postId/comments` returns
-  `404` because the post is unknown to the ports, while the same comments remain visible in the
-  account inbox.
+- **A10a.** (added with D29) A comment can outlive the `posts` row it references, and the service does
+  not track that: comments are anchored to `platform_post_id`, which the adapters use, while `post_id`
+  only serves the post-scoped route. If the ports no longer resolve a `postId`,
+  `GET /v1/posts/:postId/comments` returns `404` and the comments stay reachable through the account
+  inbox — the same shape as an external post (D13). No cross-service cascade or `post.deleted`
+  subscription is needed; retention bounds the dangling rows. A post deleted on the **platform** is a
+  different case and is handled by sync (§7.3).
 
 API:
 
@@ -610,7 +618,7 @@ Platforms and integrations:
 
 - **A17.** (changed → D28) IG supports both login variants. The same IG account connected through
   different variants is a separate `social_accounts` row (the variants' id spaces may differ); no
-  merging across variants. Refreshing the 60-day Instagram user token is the accounts module's job;
+  merging across variants. Refreshing the 60-day Instagram user token is the accounts service's job;
   the token lifetime is sufficient for the demo, and the README states the expiry date.
 - **A18.** Meta webhooks are subscribed with values included (the payload contains text and author);
   if data is missing, it is fetched through the API.
