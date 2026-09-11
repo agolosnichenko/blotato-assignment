@@ -1,0 +1,45 @@
+repos:
+  - repo: local
+    hooks:
+      - id: oxlint
+        name: oxlint
+        entry: pnpm lint
+        language: system
+        types_or: [ts, javascript]
+        pass_filenames: false
+
+      - id: oxfmt
+        name: oxfmt
+        entry: pnpm format:check
+        language: system
+        types_or: [ts, javascript]
+        pass_filenames: false
+
+      - id: typecheck
+        name: tsc --noEmit
+        entry: pnpm typecheck
+        language: system
+        types_or: [ts]
+        pass_filenames: false
+
+      - id: test-unit
+        name: vitest unit
+        entry: pnpm test:unit
+        language: system
+        types_or: [ts]
+        pass_filenames: false
+
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        args: []
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
+
+      - id: zizmor
+        name: zizmor
+        entry: zizmor .github/workflows/
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false

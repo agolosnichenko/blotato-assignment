@@ -13,15 +13,33 @@ code diverges from it. Cite decision ids (e.g. "per D14") in commits, PRs and DE
 
 All deliverables (README, DESIGN.md, OpenAPI, code comments) are in English (D18).
 
-## Tooling (decided in D21, not yet set up)
+## Commands
 
-pnpm · Node 22 ESM · TypeScript strict · oxlint + oxfmt · `tsc --noEmit` · vitest with
-testcontainers (Postgres + Redis) and msw for platform HTTP · fast-check · prek · GitHub Actions
-(SHA-pinned, zizmor) · Dependabot. Runtime stack: Fastify, PostgreSQL, Drizzle ORM, BullMQ on Redis
-(D6). Deployed to Railway as `api` + `worker` services from one Dockerfile (D24).
+```bash
+docker compose up -d          # Postgres + Redis for local work and integration tests
+pnpm dev:api                  # tsx watch, reads .env (copy from .env.example)
+pnpm dev:worker
+pnpm lint                     # oxlint — warnings count as failures
+pnpm format                   # oxfmt (format:check in CI)
+pnpm typecheck                # tsc --noEmit
+pnpm test:unit                # fast, no containers
+pnpm test:integration         # testcontainers, needs a Docker daemon
+pnpm test -- src/app/config.test.ts            # a single file
+pnpm test:unit -- -t 'applies defaults'        # a single test by name
+pnpm build && pnpm start:api  # bundles to dist/*.mjs via tsdown
+```
 
-When `package.json` scripts are added, record the real commands here (dev, lint, typecheck, test,
-single test, migrations, `scripts/` CLIs, OpenAPI generation — CI checks `openapi.json` is current).
+Versions are pinned exactly and `.npmrc` sets `minimum-release-age=1440`: a release younger than
+24 h is refused at install time, so pin the previous one rather than lifting the setting.
+
+`tsdown` emits `.mjs`; keep `start:*` scripts and the Dockerfile `CMD` in step with that.
+
+**Colima or another non-default Docker context:** testcontainers finds no socket on its own. Run
+integration tests with `DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`.
+
+Not set up yet, add with the first migration: `drizzle-kit` (`db:generate`, `db:migrate`) and
+OpenAPI generation from the Zod schemas (CI has to check the committed `openapi.json` is current).
 
 ## Commits
 

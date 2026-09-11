@@ -1,0 +1,51 @@
+{
+  "name": "blotato-comments",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#src/*": "./src/*"
+  },
+  "scripts": {
+    "dev:api": "tsx watch src/app/api.ts",
+    "dev:worker": "tsx watch src/app/worker.ts",
+    "build": "tsdown",
+    "start:api": "node dist/api.mjs",
+    "start:worker": "node dist/worker.mjs",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
+  },
+  "dependencies": {
+    "@atproto/api": "0.20.42",
+    "bullmq": "6.3.4",
+    "drizzle-orm": "0.45.2",
+    "fastify": "5.12.3",
+    "ioredis": "6.0.0",
+    "pg": "8.23.0",
+    "pino": "10.3.1",
+    "zod": "4.6.1"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.1.0",
+    "@testcontainers/redis": "12.1.0",
+    "@types/node": "22.20.2",
+    "@types/pg": "8.23.1",
+    "fast-check": "4.9.0",
+    "msw": "2.15.0",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
+    "tsdown": "0.23.0",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0"
+  },
+  "engines": {
+    "node": ">=22.20.0 <23"
+  },
+  "packageManager": "pnpm@10.26.1"
+}
