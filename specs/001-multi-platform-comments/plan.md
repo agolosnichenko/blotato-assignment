@@ -42,8 +42,8 @@ introduces and their rationale are in [research.md](./research.md): `drizzle-kit
 `uuidv7`.
 
 **Storage**: PostgreSQL 18 — the only source of truth. Owns `comments`, `comment_sync_targets`,
-`comment_sync_jobs`, `webhook_deliveries`, `outbox_events`, `contact_quota_usage`, plus a read-only
-local projection of four externally owned tables (§5.1). Redis 8 holds queues, per-account token
+`comment_sync_jobs`, `webhook_deliveries`, `outbox_events`, `contact_quota_usage`, `account_health`
+(D30), plus a read-only local projection of four externally owned tables (§5.1). Redis 8 holds queues, per-account token
 buckets, per-key rate limits and short-lived locks; losing it must lose no data (FR-033, SC-011).
 Both versions match `docker-compose.yml` (`postgres:18.6-alpine`, `redis:8.10.1-alpine`), and the
 same major versions are what the Railway services must provision.
@@ -89,7 +89,7 @@ S4 (Bluesky's current `createRecord` and `getPostThread` rate limits). See Compl
 | Principle | How this plan satisfies it | Verdict |
 |-----------|---------------------------|---------|
 | **I. Spec Is the Source of Truth** | Every technical choice cites its decision id; choices without one are new and recorded in `research.md`, not in code comments. No decision is revised here, so `spec.md` §18 stays "None". Spike-gated work is fenced off (below). | PASS |
-| **II. Service Boundary Integrity** | `workspace_id`, `social_account_id`, `post_id` are plain `uuid` columns with no FK; only `parent_comment_id` and `root_comment_id` keep FKs. The projection tables in §5.1 are read-only and reachable only through `platform-core` ports. Adapters take credentials from the `AccountCredentials` port (D26). `data-model.md` states this per column. | PASS |
+| **II. Service Boundary Integrity** | `workspace_id`, `social_account_id`, `post_id` are plain `uuid` columns with no FK; only `parent_comment_id` and `root_comment_id` keep FKs. The projection tables in §5.1 are read-only and reachable only through `platform-core` ports — including on `AuthError`, which writes this service's own `account_health` rather than `social_accounts.status` (D30). Adapters take credentials from the `AccountCredentials` port (D26). `data-model.md` states this per column. | PASS |
 | **III. Never Double-Post** | Writes return `202 queued`; transitions are conditional `UPDATE`s; adapter errors are the four typed classes; `OutcomeUnknownError` reconciles via `findPublishedComment` before retry; ingestion upserts on `UNIQUE (social_account_id, platform_comment_id)`; events go through the outbox in the state-change transaction; only a complete walk marks deletions. All six are in `data-model.md` and `contracts/`. | PASS |
 | **IV. Platform Differences Stay in Adapters** | One `CommentPlatformAdapter` port, one capability registry covering all nine platforms, zero platform or `auth_variant` branching in use cases — the IG Graph client resolves host and token from `auth_variant` (D28). Depth and text limits are enforced from registry data, so a new platform is an adapter plus a registry row. | PASS |
 | **V. Tested Behavior, Verified Failures** | `quickstart.md` maps every invariant to the scenario that proves it, including the three where the code must be broken once to confirm the test fails (deduplication, reconciliation, tenancy). Platform HTTP is mocked at the boundary; Postgres and Redis run for real. | PASS |

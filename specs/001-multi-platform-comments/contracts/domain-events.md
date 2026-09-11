@@ -20,8 +20,14 @@ are not implemented here (§14); the contract and a test for it are (D9).
 | `comment.posted` | `commentId`, `socialAccountId`, `platform`, `postId`, `parentCommentId`, `platformCommentId` |
 | `comment.failed` | `commentId`, `errorCode`, `errorMessage` |
 | `comment.deleted` | `commentId`, `socialAccountId`, `platform` |
+| `account.auth_failed` | `socialAccountId`, `platform`, `reason` |
 
 Each payload carries enough for a consumer to act without reading this service's storage (FR-024).
+
+`account.auth_failed` is the one event addressed to another service rather than to a consumer of
+comments: it is how an `AuthError` reaches the accounts service, which owns the account's status.
+This service records the observation in its own `account_health` and never writes
+`social_accounts` (D30, Principle II). Reconnection is the accounts service's job (A19).
 
 ## Delivery guarantees
 

@@ -18,6 +18,11 @@ system (status FINAL, decisions D1–D29, assumptions A1–A23, spikes S1–S5).
 > from. Where a requirement traces to a decision, the decision id is cited in parentheses. The scope
 > boundary itself is inherited, not chosen here: it is the product's documented comment
 > functionality (D2).
+>
+> **One term, two names.** This document says *refresh* because that is what the customer asks for;
+> the plan, the data model, the contract and the code say *sync* — `comment_sync_targets`,
+> `SyncJob`, `POST /v1/posts/:postId/comments/sync`, `SYNC_COOLDOWN`. They are the same thing, and
+> the pair is recorded here so the drift is a translation rather than a discrepancy.
 
 ## User Scenarios & Testing *(mandatory)*
 

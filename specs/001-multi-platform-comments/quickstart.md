@@ -77,8 +77,12 @@ after send; 429 with `Retry-After`; permanent rejection; and the platform echoin
 through ingestion while the worker is still publishing. **Expect** exactly one comment on the
 platform double and one row locally in every case; on timeout the worker reconciles through
 `findPublishedComment` and settles on `posted` without a second send; on permanent rejection the
-comment is `failed` and the quota reservation is released.
-**Proves**: FR-009, FR-011, FR-012, FR-014, SC-001, D14, §7.1 step 7.
+comment is `failed` and the quota reservation is released. Two further outcomes: an `AuthError`
+leaves `failed` + `PLATFORM_AUTH_FAILED`, an `auth_failed` row in `account_health`, an outbox
+`account.auth_failed` and `social_accounts` **unchanged** — the boundary holds even on the failure
+path (D30); and a parent deleted after the child was queued settles the child `failed` +
+`PARENT_DELETED` with the quota released and nothing sent.
+**Proves**: FR-009, FR-011, FR-012, FR-014, SC-001, D14, D30, A19, §7.1 step 7.
 
 ### V3 — Write validation and idempotency (US2)
 
@@ -101,17 +105,22 @@ counted this period → `202`. A write against a platform the registry marks uns
 Deliver a signed event, then redeliver it; run a refresh over the same post; tamper with the
 signature. **Expect** one comment and one `comment.received` event regardless of redelivery; a
 tampered signature rejected with nothing stored; a reply whose parent is unknown attached correctly
-after the ancestor walk; a *complete* walk marking platform-side deletions and an *interrupted* walk
-marking none; a post's first walk tagged `backfill`. Then the schedule itself: a post under 24 h old,
+after the ancestor walk; an event arriving without `text` completed through `fetchComment` rather
+than blanking the stored text (A18); a *complete* walk marking platform-side deletions — with `text`
+and the author nulled exactly as a webhook delete does it, since both take the same path — and an
+*interrupted* walk marking none; a post's first walk tagged `backfill`. Then the schedule itself: a
+post under 24 h old,
 one aged past a week and one past retention land in different age bands and the last is not polled at
-all; an ingested comment on a post never published through the platform creates a refresh target of
-its own. Then manual refresh — a second request inside the cooldown → `429 SYNC_COOLDOWN`, a request
+all — checked against a non-default `RETENTION_DAYS`, because the top band is derived from it rather
+than from a literal 45; an ingested comment on a post never published through the platform creates a
+refresh target of its own. Then manual refresh — a second request inside the cooldown → `429 SYNC_COOLDOWN`, a request
 while a job is running → `202` carrying that same job. Also assert one `comment.received`, one
 `comment.posted`, one `comment.failed` and one `comment.deleted` reach the queue with the payload
 fields the contract lists.
 Freshness is asserted with the clock under test control: a pushed event is readable inside the
 60-second budget, and a post with no push channel becomes fresh within its age band's interval.
-**Proves**: FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, FR-022, FR-024, SC-003, SC-004, SC-008.
+**Proves**: FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, FR-022, FR-024, FR-030, SC-003, SC-004,
+SC-008, A18.
 
 ### V5 — Tenancy (all stories)
 
@@ -120,7 +129,9 @@ Freshness is asserted with the clock under test control: a pushed event is reada
 Every endpoint, called with a second workspace's key against the first workspace's resource.
 **Expect** `404` everywhere — never `403`, never a leak of existence. Then the credential itself: a
 missing key, an unrecognized one and a revoked one each → `401 UNAUTHORIZED`; a key driven past its
-per-minute budget → `429 RATE_LIMITED` carrying `RateLimit-*` and `Retry-After`.
+per-minute budget → `429 RATE_LIMITED` carrying `RateLimit-*` and `Retry-After`. The per-key column
+`api_keys.rate_limit_per_min` is a ceiling, not a replacement: a key below the env default is cut off
+at its own value, one above it is still cut off at the deployment's.
 **Proves**: FR-026, FR-027, FR-028, SC-007, D20.
 
 ### V6 — Durability without Redis (US2, US3)
@@ -138,7 +149,8 @@ and unprocessed webhook deliveries older than five minutes.
 
 A thread whose last activity is 46 days old is removed whole; a thread with a comment on day 44 is
 untouched, including its older comments.
-**Proves**: FR-029, FR-030, SC-010, A9.
+**Proves**: FR-029, SC-010, A9. (FR-030 belongs to the delete path, proven in V4, not to retention:
+retention removes whole threads rather than redacting individual comments.)
 
 ### V8 — The account inbox (US4)
 

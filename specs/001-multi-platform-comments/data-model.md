@@ -111,6 +111,15 @@ Rules that make the machine safe (Principle III):
 | `webhook_deliveries` | Raw pushed payloads, stored before processing so nothing is lost | `id`, `provider`, `payload` jsonb, `received_at`, `processed_at`, `attempts`, `error`. Purged after 7 days |
 | `outbox_events` | **Notification** — written in the state-change transaction, relayed afterwards (D9) | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` jsonb, `created_at`, `published_at`, `attempts`. Purged 7 days after publication |
 | `contact_quota_usage` | **Audience-contact usage** — one row per person per month per platform (D16, A8) | `workspace_id`, `period` (`YYYY-MM`), `platform`, `contact_platform_id`, `comment_id`, `created_at`. PK `(workspace_id, period, platform, contact_platform_id)`. Purged after two periods |
+| `account_health` | What *this* service has observed about a connected account, so A19 never writes the projection (D30) | `social_account_id` PK (external reference, no FK), `workspace_id`, `state` (`auth_failed`), `reason`, `detected_at`. One row per failing account; removed when the accounts service reconnects it |
+
+**Why `account_health` exists.** §7.1 step 6 says an `AuthError` marks the account `disconnected`,
+but `social_accounts` belongs to the accounts service and is read-only here (§1, Principle II). D30
+resolves this: the worker writes `account_health`, emits outbox `account.auth_failed`, and the
+`Accounts` port returns an **effective** status — `active` only when the projection says `active`
+*and* no `auth_failed` row exists. `ACCOUNT_DISCONNECTED` (§6.3) and A19 behave as specified while
+the boundary holds, and the pre-flight check in §7.1 step 1 reads the effective status, not the
+column.
 
 `webhook_deliveries` and `outbox_events` are what make FR-033 / SC-011 true: an accepted write lives
 in `comments`, a received event in `webhook_deliveries` and an unsent notification in `outbox_events`

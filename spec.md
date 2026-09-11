@@ -346,8 +346,10 @@ retries exhausted).
    - `OutcomeUnknownError` → `adapter.findPublishedComment` (own author + same text + created no
      earlier than `last_attempt_started_at − 2 min`, among the parent's replies or the post's
      comments): found → `posted`; not found → retry as retryable;
-   - `PermanentError` / `AuthError` → `failed` + code; on `AuthError` the account is marked
-     `disconnected`; the quota reservation is released; outbox `comment.failed`.
+   - `PermanentError` / `AuthError` → `failed` + code; on `AuthError` the account becomes
+     `disconnected` — recorded in `account_health` and announced as outbox `account.auth_failed`,
+     not written into the `social_accounts` projection (see D30 in §18); the quota reservation is
+     released; outbox `comment.failed`.
 7. Race with the webhook echo: if ingestion has already inserted our own comment, the worker's
    `UPDATE` hits the unique index → within one transaction the ingested duplicate is deleted, and the
    API-created comment gets `platform_comment_id` and status `posted`.
@@ -623,7 +625,8 @@ Platforms and integrations:
 - **A18.** Meta webhooks are subscribed with values included (the payload contains text and author);
   if data is missing, it is fetched through the API.
 - **A19.** An invalid token (`AuthError`) moves the account to `disconnected` and stops its jobs;
-  reconnecting is the accounts service's job.
+  reconnecting is the accounts service's job. How the status moves without writing another service's
+  table is D30 in §18.
 - **A20.** Bluesky reply depth is not limited at the service level; UI limits are the client's concern.
 
 Infrastructure:
@@ -653,4 +656,19 @@ Infrastructure:
 
 ## 18. Open questions
 
-None. Any change to decisions in sections 3 and 16 is recorded here before implementation.
+None outstanding. Any change to decisions in sections 3 and 16 is recorded here before
+implementation.
+
+### Recorded changes
+
+- **D30 (amends §7.1 step 6 and A19).** "The account is marked `disconnected`" is kept as a
+  *behaviour*, not as a write to `social_accounts`. That table is a read-only projection of the
+  accounts service (D8, D29, Constitution Principle II), and writing its `status` column would make
+  this service a second writer of another service's data — the one boundary the design exists to
+  demonstrate. Instead this service owns `account_health` (§5.3): on `AuthError` the worker records
+  `auth_failed` there, emits outbox `account.auth_failed` for the accounts service, and stops the
+  account's jobs. The `Accounts` port returns an **effective** status — `active` only when the
+  projection says `active` *and* no local `auth_failed` record exists — so §6.3
+  `ACCOUNT_DISCONNECTED` and A19 behave exactly as specified, while the boundary holds. Clearing the
+  record remains the accounts service's job (reconnection), and a projection row that flips back to
+  `active` clears it.
