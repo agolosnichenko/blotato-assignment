@@ -1,29 +1,49 @@
 /**
  * Read routes (T049): `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies`,
- * `GET /v1/comments/:commentId`.
+ * `GET /v1/comments/:commentId`. Write routes (T069): `POST /v1/posts/:postId/comments`,
+ * `POST /v1/comments/:commentId/replies`. Capability registry route (T098): `GET /v1/platforms`.
  *
- * Registered from `src/app/api.ts` as `app.register(registerCommentReadRoutes(deps))` — never as
- * bare `app.get()` calls on the shared instance. `@fastify/rate-limit` attaches through an
- * `onRoute` hook fired at route-*definition* time; only a route defined inside a plugin's own
- * (avvio-queued) registration is guaranteed to run after that hook is wired up (see
- * `src/app/api.ts`'s `registerRateLimit` doc comment).
+ * Registered from `src/app/api.ts` as `app.register(registerCommentReadRoutes(deps))` /
+ * `app.register(registerCommentWriteRoutes(deps))` / `app.register(registerPlatformRoutes())` —
+ * never as bare `app.get()`/`app.post()` calls on the shared instance. `@fastify/rate-limit`
+ * attaches through an `onRoute` hook fired at route-*definition* time; only a route defined inside
+ * a plugin's own (avvio-queued) registration is guaranteed to run after that hook is wired up (see
+ * `src/app/api.ts`'s `registerRateLimit` doc comment) — which is also what puts these `POST`
+ * routes in the write rate-limit bucket (`isReadRequest` keys on HTTP method, not a route list).
  */
 
+// oxlint-disable max-dependencies -- this file now registers all six comment/platform HTTP routes
+// (three read, two write, one capability listing), so it imports every use case, port and schema
+// those routes call; splitting it would not reduce that fan-in, only hide it behind re-exports —
+// the same trade `create-reply.ts` and `create-top-level-comment.ts` make for the same reason.
+// oxlint-disable max-lines -- six routes, each already factored into its own named
+// `registerXRoute` function with its own docstring, is the file's actual scope, not padding.
+
+import type { Queue } from 'bullmq';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
+import type { Logger } from 'pino';
+import { createReply } from '#src/modules/comments/application/create-reply.ts';
+import { createTopLevelComment } from '#src/modules/comments/application/create-top-level-comment.ts';
 import { getComment } from '#src/modules/comments/application/get-comment.ts';
 import { listPostComments } from '#src/modules/comments/application/list-post-comments.ts';
 import { listReplies } from '#src/modules/comments/application/list-replies.ts';
 import type { CommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import type { ContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import {
   commentIdParamsSchema,
   commentSchema,
   commentsPageSchema,
+  createCommentBodySchema,
   paginationQuerySchema,
+  platformsPageSchema,
   postCommentsPageSchema,
   postIdParamsSchema,
   toCommentResponse,
+  toPlatformCapabilitiesResponse,
 } from '#src/modules/comments/http/schemas.ts';
-import type { Posts } from '#src/modules/platform-core/ports.ts';
+import type { Accounts, Posts } from '#src/modules/platform-core/ports.ts';
+import { platformRegistry } from '#src/platforms/registry.ts';
+import type { Database } from '#src/shared/db.ts';
 import { ApiError } from '#src/shared/errors.ts';
 import {
   decodeCursor,
@@ -35,6 +55,16 @@ import {
 export interface CommentReadRoutesDeps {
   readonly repository: CommentRepository;
   readonly posts: Posts;
+}
+
+export interface CommentWriteRoutesDeps {
+  readonly database: Database;
+  readonly repository: CommentRepository;
+  readonly posts: Posts;
+  readonly accounts: Accounts;
+  readonly contactQuota: ContactQuota;
+  readonly publishQueue: Queue;
+  readonly logger: Logger;
 }
 
 const postCommentsQuerySchema = paginationQuerySchema('desc');
@@ -144,6 +174,134 @@ function registerGetCommentRoute(
       return toCommentResponse(comment);
     },
   );
+}
+
+/**
+ * The `Idempotency-Key` header (A12) — Fastify lower-cases incoming header names, so this is the
+ * one place both write routes read it. `null` means "no key sent", not "empty key sent".
+ */
+function readIdempotencyKey(request: { headers: Record<string, unknown> }): string | null {
+  const header = request.headers['idempotency-key'];
+  return typeof header === 'string' && header.length > 0 ? header : null;
+}
+
+/** The `Location` header both write routes point at — the polling target (A11, rest-api.md). */
+function locationForComment(commentId: string): string {
+  return `/v1/comments/${commentId}`;
+}
+
+/** Builds the `POST /v1/posts/:postId/comments` route registered by {@link registerCommentWriteRoutes}. */
+function registerCreateTopLevelCommentRoute(
+  app: Parameters<FastifyPluginAsyncZod>[0],
+  deps: CommentWriteRoutesDeps,
+): void {
+  app.post(
+    '/v1/posts/:postId/comments',
+    {
+      schema: {
+        params: postIdParamsSchema,
+        body: createCommentBodySchema,
+        response: { 202: commentSchema },
+      },
+    },
+    async (request, reply) => {
+      const comment = await createTopLevelComment(
+        {
+          database: deps.database,
+          repository: deps.repository,
+          posts: deps.posts,
+          accounts: deps.accounts,
+          publishQueue: deps.publishQueue,
+          logger: deps.logger,
+        },
+        {
+          workspaceId: request.workspaceId,
+          postId: request.params.postId,
+          text: request.body.text,
+          idempotencyKey: readIdempotencyKey(request),
+        },
+      );
+      return reply
+        .code(202)
+        .header('location', locationForComment(comment.id))
+        .send(toCommentResponse(comment));
+    },
+  );
+}
+
+/** Builds the `POST /v1/comments/:commentId/replies` route registered by {@link registerCommentWriteRoutes}. */
+function registerCreateReplyRoute(
+  app: Parameters<FastifyPluginAsyncZod>[0],
+  deps: CommentWriteRoutesDeps,
+): void {
+  app.post(
+    '/v1/comments/:commentId/replies',
+    {
+      schema: {
+        params: commentIdParamsSchema,
+        body: createCommentBodySchema,
+        response: { 202: commentSchema },
+      },
+    },
+    async (request, reply) => {
+      const comment = await createReply(
+        {
+          database: deps.database,
+          repository: deps.repository,
+          accounts: deps.accounts,
+          contactQuota: deps.contactQuota,
+          publishQueue: deps.publishQueue,
+          logger: deps.logger,
+        },
+        {
+          workspaceId: request.workspaceId,
+          parentCommentId: request.params.commentId,
+          text: request.body.text,
+          idempotencyKey: readIdempotencyKey(request),
+        },
+      );
+      return reply
+        .code(202)
+        .header('location', locationForComment(comment.id))
+        .send(toCommentResponse(comment));
+    },
+  );
+}
+
+/**
+ * Builds the plugin `src/app/api.ts` registers for the two write routes (T069).
+ *
+ * Args:
+ *   deps: Everything `createTopLevelComment` and `createReply` need — the repository, the `Posts`
+ *     and `Accounts` ports, `ContactQuota`, the publish queue and a logger.
+ *
+ * Returns:
+ *   A Fastify plugin, meant to be passed to `app.register(...)`.
+ */
+export function registerCommentWriteRoutes(deps: CommentWriteRoutesDeps): FastifyPluginAsyncZod {
+  return (app) => {
+    registerCreateTopLevelCommentRoute(app, deps);
+    registerCreateReplyRoute(app, deps);
+    return Promise.resolve();
+  };
+}
+
+/**
+ * Builds the plugin `src/app/api.ts` registers for `GET /v1/platforms` (T098) — serialized
+ * straight from `src/platforms/registry.ts`, no second source of truth (SC-009).
+ *
+ * Returns:
+ *   A Fastify plugin, meant to be passed to `app.register(...)`.
+ */
+export function registerPlatformRoutes(): FastifyPluginAsyncZod {
+  return (app) => {
+    app.get('/v1/platforms', { schema: { response: { 200: platformsPageSchema } } }, () => ({
+      items: Object.values(platformRegistry).map((capabilities) =>
+        toPlatformCapabilitiesResponse(capabilities),
+      ),
+    }));
+    return Promise.resolve();
+  };
 }
 
 /**

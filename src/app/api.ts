@@ -7,6 +7,7 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
+import type { Redis } from 'ioredis';
 import {
   hasZodFastifySchemaValidationErrors,
   isResponseSerializationError,
@@ -17,15 +18,27 @@ import {
 } from 'fastify-type-provider-zod';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
-import { registerCommentReadRoutes } from '#src/modules/comments/http/routes.ts';
+import {
+  registerCommentReadRoutes,
+  registerCommentWriteRoutes,
+  registerPlatformRoutes,
+} from '#src/modules/comments/http/routes.ts';
 import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
-import { createLocalApiKeys } from '#src/modules/platform-core/local/api-keys.ts';
-import { createLocalPosts } from '#src/modules/platform-core/local/posts.ts';
+import type { Database } from '#src/shared/db.ts';
 import { ApiError, toProblemDetails, type ProblemDetails } from '#src/shared/errors.ts';
 import { createLogger } from '#src/shared/logger.ts';
 
-/** The subset of {@link Container} this app needs — same three fields the api role always builds. */
-export type ApiDependencies = Pick<Container, 'config' | 'database' | 'redis'>;
+/**
+ * The subset of {@link Container} this app needs — `ports`, `contactQuota` and `publishQueue`
+ * for the write routes on top of the three fields every role builds. The api role still needs no
+ * BullMQ `Worker`/`Redis`-backed sweeper of its own, only the container's already-built ports and
+ * the shared `ContactQuota`/queue handle — see `container.ts`'s doc comment on why those two are
+ * built once, centrally, rather than a second time here.
+ */
+export type ApiDependencies = Pick<
+  Container,
+  'config' | 'database' | 'redis' | 'ports' | 'contactQuota' | 'publishQueue'
+>;
 
 type CheckResult = { ok: true } | { ok: false; error: string };
 
@@ -200,36 +213,31 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
   });
 }
 
-/**
- * Builds the HTTP application with its dependencies injected so tests can
- * supply containers or fakes without touching the process environment.
- *
- * The return type is inferred: passing a pino instance narrows Fastify's logger
- * generic, which no longer matches the default `FastifyInstance`.
- */
-export function buildApi({ config, database, redis }: ApiDependencies) {
-  const app = Fastify({
-    loggerInstance: createLogger(config, { role: 'api' }),
-  }).withTypeProvider<ZodTypeProvider>();
-  app.setValidatorCompiler(validatorCompiler);
-  app.setSerializerCompiler(serializerCompiler);
+/** Registers the three read routes, the two write routes and `GET /v1/platforms` (T049, T069, T098). */
+function registerCommentRoutes(
+  app: ReturnType<typeof Fastify>,
+  deps: ApiDependencies,
+  logger: ReturnType<typeof createLogger>,
+): void {
+  const repository = createCommentRepository(deps.database.drizzle);
 
-  registerErrorHandler(app);
-  registerDocs(app);
-
-  // Built directly from `database` (not `container.ports.apiKeys`) so `ApiDependencies` stays the
-  // same three fields `src/app/api.integration.test.ts` already constructs — the api role needs
-  // only this one port, not the whole `PlatformCorePorts` bag `container.ts` builds for `worker.ts`.
-  registerApiKeyAuth(app, createLocalApiKeys(database.drizzle));
-  registerRateLimit(app, config, redis);
-
+  app.register(registerCommentReadRoutes({ repository, posts: deps.ports.posts }));
   app.register(
-    registerCommentReadRoutes({
-      repository: createCommentRepository(database.drizzle),
-      posts: createLocalPosts(database.drizzle),
+    registerCommentWriteRoutes({
+      database: deps.database,
+      repository,
+      posts: deps.ports.posts,
+      accounts: deps.ports.accounts,
+      contactQuota: deps.contactQuota,
+      publishQueue: deps.publishQueue,
+      logger,
     }),
   );
+  app.register(registerPlatformRoutes());
+}
 
+/** Registers `GET /healthz` (liveness) and `GET /readyz` (Postgres + Redis, T035). */
+function registerHealthRoutes(app: Api, database: Database, redis: Redis): void {
   app.get('/healthz', () => ({ status: 'ok' }));
 
   app.get('/readyz', async (_request, reply) => {
@@ -243,6 +251,27 @@ export function buildApi({ config, database, redis }: ApiDependencies) {
       checks: { postgres, redis: redisCheck },
     });
   });
+}
+
+/**
+ * Builds the HTTP application with its dependencies injected so tests can
+ * supply containers or fakes without touching the process environment.
+ *
+ * The return type is inferred: passing a pino instance narrows Fastify's logger
+ * generic, which no longer matches the default `FastifyInstance`.
+ */
+export function buildApi(deps: ApiDependencies) {
+  const logger = createLogger(deps.config, { role: 'api' });
+  const app = Fastify({ loggerInstance: logger }).withTypeProvider<ZodTypeProvider>();
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
+
+  registerErrorHandler(app);
+  registerDocs(app);
+  registerApiKeyAuth(app, deps.ports.apiKeys);
+  registerRateLimit(app, deps.config, deps.redis);
+  registerCommentRoutes(app, deps, logger);
+  registerHealthRoutes(app, deps.database, deps.redis);
 
   return app;
 }
@@ -251,11 +280,7 @@ export type Api = ReturnType<typeof buildApi>;
 
 async function main(): Promise<void> {
   const container = buildContainer();
-  const app = buildApi({
-    config: container.config,
-    database: container.database,
-    redis: container.redis,
-  });
+  const app = buildApi(container);
 
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.once(signal, () => {

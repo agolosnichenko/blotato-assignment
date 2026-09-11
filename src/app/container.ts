@@ -18,7 +18,12 @@
 // something that should be wired centrally is being constructed ad hoc elsewhere instead.
 
 import type { Redis } from 'ioredis';
+import { Queue } from 'bullmq';
 import { loadConfig, type Config } from '#src/app/config.ts';
+import {
+  createContactQuota,
+  type ContactQuota,
+} from '#src/modules/comments/infrastructure/contact-quota.ts';
 import { createLocalAccountCredentials } from '#src/modules/platform-core/local/account-credentials.ts';
 import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.ts';
 import { createLocalApiKeys } from '#src/modules/platform-core/local/api-keys.ts';
@@ -36,6 +41,7 @@ import type {
 import type { KeyMaterial } from '#src/shared/crypto.ts';
 import { createDatabase, type Database } from '#src/shared/db.ts';
 import { createRedis } from '#src/shared/queue.ts';
+import { QUEUE_NAMES } from '#src/shared/queues.ts';
 
 /** The service-boundary ports (D8, D29), backed by the local projection (src/modules/platform-core/local). */
 export interface PlatformCorePorts {
@@ -52,7 +58,16 @@ export interface Container {
   readonly database: Database;
   readonly redis: Redis;
   readonly ports: PlatformCorePorts;
-  /** Closes the Postgres pool and disconnects Redis. Neither role owns these beyond its own lifetime. */
+  /**
+   * The `ContactQuota` port (D16, A8) and the `comment-publish` queue handle (§9.2) — both roles
+   * need them: the api role's write routes reserve a quota slot and enqueue on accept, the
+   * worker's publish path releases a reservation on final failure and consumes the same queue.
+   * Built once here rather than separately in `api.ts`/`worker.ts` so there is one composition
+   * root, not two (see module docstring).
+   */
+  readonly contactQuota: ContactQuota;
+  readonly publishQueue: Queue;
+  /** Closes the Postgres pool, the publish queue's own connections, and disconnects Redis. */
   close(): Promise<void>;
 }
 
@@ -94,13 +109,18 @@ export function buildContainer(options: BuildContainerOptions = {}): Container {
   const database = createDatabase(config);
   const redis = createRedis(config);
   const ports = buildPorts(database, toKeyMaterial(config));
+  const contactQuota = createContactQuota(database.drizzle, ports.workspaces);
+  const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
 
   return {
     config,
     database,
     redis,
     ports,
+    contactQuota,
+    publishQueue,
     async close() {
+      await publishQueue.close();
       await database.close();
       redis.disconnect();
     },

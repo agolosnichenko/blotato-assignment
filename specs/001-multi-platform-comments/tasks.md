@@ -445,7 +445,7 @@ one comment on the platform and one row locally.
       shared Graph client: IG top-level `POST /{media-id}/comments`, IG reply
       `POST /{ig-comment-id}/replies`; FB top-level `POST /{post-id}/comments`, FB reply
       `POST /{comment-id}/comments` (§8.2)
-- [ ] T069 [US2] Add `POST /v1/posts/:postId/comments` and `POST /v1/comments/:commentId/replies` to
+- [X] T069 [US2] Add `POST /v1/posts/:postId/comments` and `POST /v1/comments/:commentId/replies` to
       `src/modules/comments/http/routes.ts`, both returning `202` with `status: "queued"` and a
       `Location` header pointing at `GET /v1/comments/:id` — `202` rather than `201` because the row
       exists and the platform action has not happened (A11, FR-009)
@@ -662,7 +662,7 @@ reason the registry gives.
 
 ### Implementation for User Story 5
 
-- [ ] T098 [US5] Add `GET /v1/platforms` to `src/modules/comments/http/routes.ts` returning
+- [X] T098 [US5] Add `GET /v1/platforms` to `src/modules/comments/http/routes.ts` returning
       `{ items: PlatformCapabilities[] }` — `platform`, `supportsComments`, `canCreateTopLevel`,
       `canReply`, `maxReplyDepth`, `textLimit`, `textUnit`, `ingestion`, `unsupportedReason` —
       serialized straight from `src/platforms/registry.ts` with no second source of truth

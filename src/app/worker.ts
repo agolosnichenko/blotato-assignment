@@ -40,9 +40,9 @@ interface Runtime {
   readonly schedulerQueue: Queue;
 }
 
-/** Builds and starts every BullMQ worker and queue this role owns. */
+/** Builds and starts every BullMQ worker this role owns, on the container's `commentPublish` queue. */
 function buildRuntime(container: Container, logger: Logger): Runtime {
-  const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: container.redis });
+  const publishQueue = container.publishQueue;
   const schedulerQueue = new Queue(QUEUE_NAMES.scheduler, { connection: container.redis });
 
   const publishWorker = createPublishWorker({
@@ -71,10 +71,11 @@ function buildRuntime(container: Container, logger: Logger): Runtime {
 
 async function shutdown(runtime: Runtime, container: Container, logger: Logger): Promise<void> {
   logger.info('shutting down');
+  // `runtime.publishQueue` is `container.publishQueue` (see `buildRuntime`) — `container.close()`
+  // below closes it, so it is not closed a second time here.
   await Promise.all([
     runtime.publishWorker.close(),
     runtime.schedulerWorker.close(),
-    runtime.publishQueue.close(),
     runtime.schedulerQueue.close(),
   ]);
   await container.close();

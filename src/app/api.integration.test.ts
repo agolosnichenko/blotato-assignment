@@ -1,10 +1,19 @@
+// oxlint-disable max-dependencies -- this harness now builds the same dependency graph
+// `buildContainer` does (config, both composition roots' ports, the publish queue) plus its own
+// dedicated Redis container for the readiness-degrades case — see the same justification on
+// container.ts and other integration tests in this module.
+
 import { RedisContainer } from '@testcontainers/redis';
 import type { Redis } from 'ioredis';
+import { Queue } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApi, type Api } from '#src/app/api.ts';
 import { loadConfig } from '#src/app/config.ts';
-import { createDatabase, type Database } from '#src/shared/db.ts';
+import { buildContainer, type PlatformCorePorts } from '#src/app/container.ts';
+import type { ContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
+import type { Database } from '#src/shared/db.ts';
 import { createRedis } from '#src/shared/queue.ts';
+import { QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -12,6 +21,9 @@ interface Harness {
   containers: TestContainers;
   database: Database;
   redis: Redis;
+  ports: PlatformCorePorts;
+  contactQuota: ContactQuota;
+  publishQueue: Queue;
   app: Api;
 }
 
@@ -23,15 +35,23 @@ async function startHarness(): Promise<Harness> {
     DATABASE_URL: containers.databaseUrl,
     REDIS_URL: containers.redisUrl,
   });
-  const database = createDatabase(config);
-  const redis = createRedis(config);
-  const app = buildApi({ config, database, redis });
+  const container = buildContainer({ config });
+  const app = buildApi(container);
   await app.ready();
-  return { containers, database, redis, app };
+  return {
+    containers,
+    database: container.database,
+    redis: container.redis,
+    ports: container.ports,
+    contactQuota: container.contactQuota,
+    publishQueue: container.publishQueue,
+    app,
+  };
 }
 
 async function stopHarness(harness: Harness): Promise<void> {
   await harness.app.close();
+  await harness.publishQueue.close();
   await harness.database.close();
   harness.redis.disconnect();
   await harness.containers.stop();
@@ -53,7 +73,17 @@ async function assertReadinessDegradesWhenRedisIsGone(harness: Harness): Promise
     REDIS_URL: redisContainer.getConnectionUrl(),
   });
   const redis = createRedis(config);
-  const app = buildApi({ config, database: harness.database, redis });
+  // A fresh queue handle on this test's own disposable Redis — `harness.ports`/`harness.contactQuota`
+  // only ever touch Postgres, so they are safe to reuse against the shared `harness.database`.
+  const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
+  const app = buildApi({
+    config,
+    database: harness.database,
+    redis,
+    ports: harness.ports,
+    contactQuota: harness.contactQuota,
+    publishQueue,
+  });
   await app.ready();
 
   try {
@@ -70,6 +100,7 @@ async function assertReadinessDegradesWhenRedisIsGone(harness: Harness): Promise
     });
   } finally {
     await app.close();
+    await publishQueue.close();
     redis.disconnect();
   }
 }

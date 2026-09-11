@@ -34,17 +34,16 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { Redis } from 'ioredis';
-import { Queue } from 'bullmq';
+import type { Queue } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApi, type Api } from '#src/app/api.ts';
 import { loadConfig } from '#src/app/config.ts';
+import { buildContainer } from '#src/app/container.ts';
 import { accountHealth, comments } from '#src/modules/comments/infrastructure/schema.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
-import { createDatabase, type Database } from '#src/shared/db.ts';
+import type { Database } from '#src/shared/db.ts';
 import { generateId } from '#src/shared/ids.ts';
-import { createRedis } from '#src/shared/queue.ts';
-import { QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -55,7 +54,6 @@ interface Harness {
   app: Api;
   publishQueue: Queue;
   workspaceId: string;
-  apiKey: string;
 }
 
 async function mintApiKey(database: Database, workspaceId: string): Promise<string> {
@@ -82,11 +80,14 @@ async function startHarness(): Promise<Harness> {
     DATABASE_URL: containers.databaseUrl,
     REDIS_URL: containers.redisUrl,
   });
-  const database = createDatabase(config);
-  const redis = createRedis(config);
-  const app = buildApi({ config, database, redis });
+  // `buildContainer` builds `ports`/`contactQuota`/`publishQueue` alongside `database`/`redis` —
+  // `buildApi` now needs all of them, and this harness's own job-count queries reuse the same
+  // `publishQueue` handle the write routes enqueue on, rather than a second instance of the same
+  // named queue.
+  const container = buildContainer({ config });
+  const { database, redis, publishQueue } = container;
+  const app = buildApi(container);
   await app.ready();
-  const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
 
   const workspaceId = generateId();
   await database.drizzle.insert(workspaces).values({
@@ -95,9 +96,8 @@ async function startHarness(): Promise<Harness> {
     contactLimitMonthly: 1000,
     createdAt: new Date(),
   });
-  const apiKey = await mintApiKey(database, workspaceId);
 
-  return { containers, database, redis, app, publishQueue, workspaceId, apiKey };
+  return { containers, database, redis, app, publishQueue, workspaceId };
 }
 
 async function stopHarness(harness: Harness): Promise<void> {
@@ -249,8 +249,17 @@ interface ReplyResponse {
   readonly body: Record<string, unknown>;
 }
 
+/**
+ * Mints a fresh API key per call so each request lands in its own write rate-limit bucket
+ * (`RATE_LIMIT_WRITES_PER_MIN` defaults to 5, and this file makes more than five write requests
+ * total) rather than the single key `startHarness` used to mint once for the whole file. The
+ * `Idempotency-Key` header is unrelated to which API key authenticates a request, and idempotency
+ * resolution is scoped by workspace, not by key — so the two calls in an idempotency case landing
+ * on different keys changes nothing about what either call resolves to.
+ */
 async function postReply(harness: Harness, request: ReplyRequest): Promise<ReplyResponse> {
-  const headers: Record<string, string> = { 'blotato-api-key': harness.apiKey };
+  const apiKey = await mintApiKey(harness.database, harness.workspaceId);
+  const headers: Record<string, string> = { 'blotato-api-key': apiKey };
   if (request.idempotencyKey !== undefined) {
     headers['idempotency-key'] = request.idempotencyKey;
   }

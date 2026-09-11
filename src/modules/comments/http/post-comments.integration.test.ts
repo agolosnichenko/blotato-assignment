@@ -20,24 +20,25 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import type { Redis } from 'ioredis';
+import type { Queue } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApi, type Api } from '#src/app/api.ts';
 import { loadConfig } from '#src/app/config.ts';
+import { buildContainer } from '#src/app/container.ts';
 import { comments, commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
-import { createDatabase, type Database } from '#src/shared/db.ts';
+import type { Database } from '#src/shared/db.ts';
 import { generateId } from '#src/shared/ids.ts';
-import { createRedis } from '#src/shared/queue.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
-
-type Redis = ReturnType<typeof createRedis>;
 
 interface Harness {
   containers: TestContainers;
   database: Database;
   redis: Redis;
+  publishQueue: Queue;
   app: Api;
   workspaceId: string;
   apiKey: string;
@@ -67,9 +68,11 @@ async function startHarness(): Promise<Harness> {
     DATABASE_URL: containers.databaseUrl,
     REDIS_URL: containers.redisUrl,
   });
-  const database = createDatabase(config);
-  const redis = createRedis(config);
-  const app = buildApi({ config, database, redis });
+  // `buildContainer` builds `ports`/`contactQuota`/`publishQueue` alongside `database`/`redis` —
+  // `buildApi` now needs all of them (T069's write routes).
+  const container = buildContainer({ config });
+  const { database, redis, publishQueue } = container;
+  const app = buildApi(container);
   await app.ready();
 
   const workspaceId = generateId();
@@ -81,11 +84,12 @@ async function startHarness(): Promise<Harness> {
   });
   const apiKey = await mintApiKey(database, workspaceId);
 
-  return { containers, database, redis, app, workspaceId, apiKey };
+  return { containers, database, redis, publishQueue, app, workspaceId, apiKey };
 }
 
 async function stopHarness(harness: Harness): Promise<void> {
   await harness.app.close();
+  await harness.publishQueue.close();
   await harness.database.close();
   harness.redis.disconnect();
   await harness.containers.stop();

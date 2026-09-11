@@ -13,6 +13,7 @@
 
 import { z } from 'zod';
 import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import type { PlatformCapabilities } from '#src/platforms/registry.ts';
 import type { SortOrder } from '#src/shared/pagination.ts';
 
 export const postIdParamsSchema = z.object({ postId: z.uuid() });
@@ -79,6 +80,64 @@ export const postCommentsPageSchema = commentsPageSchema.extend({
     activeJobId: z.uuid().nullable(),
   }),
 });
+
+/** Request body shared by both write routes (contracts/rest-api.md `POST .../comments`, `.../replies`). */
+export const createCommentBodySchema = z.object({ text: z.string().min(1) });
+
+export type CreateCommentBody = z.infer<typeof createCommentBodySchema>;
+
+/**
+ * `PlatformCapabilities` (contracts/rest-api.md, T098) — the fields present depend on
+ * `supportsComments`: a supported entry carries `canCreateTopLevel`/`canReply`/`maxReplyDepth`/
+ * `textLimit`/`textUnit`/`ingestion`, an unsupported one carries only `unsupportedReason`.
+ */
+export const platformCapabilitiesSchema = z.object({
+  platform: z.string(),
+  supportsComments: z.boolean(),
+  canCreateTopLevel: z.boolean().optional(),
+  canReply: z.boolean().optional(),
+  maxReplyDepth: z.number().int().nonnegative().nullable().optional(),
+  textLimit: z.number().int().positive().optional(),
+  textUnit: z.enum(['characters', 'graphemes']).optional(),
+  ingestion: z.enum(['webhook+sync', 'sync']).optional(),
+  unsupportedReason: z.string().optional(),
+});
+
+export type PlatformCapabilitiesResponse = z.infer<typeof platformCapabilitiesSchema>;
+
+export const platformsPageSchema = z.object({ items: z.array(platformCapabilitiesSchema) });
+
+/**
+ * Maps one `platformRegistry` entry to the `PlatformCapabilities` wire shape (T098) — serialized
+ * straight from `src/platforms/registry.ts`, no second source of truth (data-model.md §4).
+ *
+ * Args:
+ *   capabilities: One entry from `platformRegistry`.
+ *
+ * Returns:
+ *   The `PlatformCapabilities` representation contracts/rest-api.md documents.
+ */
+export function toPlatformCapabilitiesResponse(
+  capabilities: PlatformCapabilities,
+): PlatformCapabilitiesResponse {
+  if (!capabilities.supportsComments) {
+    return {
+      platform: capabilities.platform,
+      supportsComments: false,
+      unsupportedReason: capabilities.unsupportedReason,
+    };
+  }
+  return {
+    platform: capabilities.platform,
+    supportsComments: true,
+    canCreateTopLevel: capabilities.supportsTopLevel,
+    canReply: capabilities.supportsReply,
+    maxReplyDepth: capabilities.maxReplyDepth,
+    textLimit: capabilities.textLimit,
+    textUnit: capabilities.textUnit,
+    ingestion: capabilities.ingestion,
+  };
+}
 
 /**
  * Maps one repository row to the `Comment` wire shape.
