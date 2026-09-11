@@ -149,25 +149,25 @@ user story sits on.
       `account_health` (`social_account_id` PK — external reference, **no FK**, `workspace_id`,
       `state` `auth_failed`, `reason`, `detected_at`), which is how an `AuthError` is recorded
       without writing the read-only `social_accounts` projection (D30, Principle II)
-- [ ] T021 Run `pnpm db:generate` and commit the resulting SQL under `drizzle/`, reading the diff to
+- [X] T021 Run `pnpm db:generate` and commit the resulting SQL under `drizzle/`, reading the diff to
       confirm the partial unique indexes and `CHECK` constraints appear verbatim — they are the
       schema-level half of Principle III (R-01)
 
 ### Service boundary
 
-- [ ] T022 Create `src/modules/platform-core/ports.ts` declaring the whole boundary in one file:
+- [X] T022 Create `src/modules/platform-core/ports.ts` declaring the whole boundary in one file:
       `Workspaces`, `ApiKeys`, `Accounts`, `Posts`, `AccountCredentials`, `PostPublished` (D8, D29)
-- [ ] T023 Implement the ports against the projection in `src/modules/platform-core/local/` — one
+- [X] T023 Implement the ports against the projection in `src/modules/platform-core/local/` — one
       file per port, each returning "unknown entity" for a stale or missing row rather than throwing.
       `AccountCredentials` decrypts through `src/shared/crypto.ts` and is the **only** path to a
       platform token (D26). `Accounts` returns an **effective** status: `active` only when the
       projection row says `active` **and** `account_health` holds no `auth_failed` row for it — the
       read is what makes D30 work, and every caller sees the composed value, never the raw column
-- [ ] T023a Create `src/modules/comments/infrastructure/account-health.ts`: `markAuthFailed`
+- [X] T023a Create `src/modules/comments/infrastructure/account-health.ts`: `markAuthFailed`
       (upsert `account_health` with the reason) and `clear` (called when the projection row returns
       to `active`). **This module never issues an `UPDATE` against `social_accounts`** — the
       projection stays read-only and the accounts service remains the owner of the status (D30)
-- [ ] T024 [P] Create `src/modules/platform-core/local/local-ports.integration.test.ts` asserting
+- [X] T024 [P] Create `src/modules/platform-core/local/local-ports.integration.test.ts` asserting
       that a missing projection row reports the entity as unknown, that no query in this module
       joins a `comments` table, and that an `auth_failed` row in `account_health` makes `Accounts`
       report the account disconnected while `social_accounts.status` is left untouched (D30, A19)
@@ -207,17 +207,17 @@ user story sits on.
 
 ### Outbox
 
-- [ ] T031 Create `src/modules/comments/infrastructure/outbox.ts` with a writer that inserts an
+- [X] T031 Create `src/modules/comments/infrastructure/outbox.ts` with a writer that inserts an
       `outbox_events` row **inside a caller-supplied transaction** — the signature must make it
       impossible to call outside one — and the envelope shape
       `{ id, type, version: 1, occurredAt, workspaceId, data }` (D9, contracts/domain-events.md)
-- [ ] T032 Create `src/modules/comments/infrastructure/outbox-relay.ts`: a job selecting unpublished
+- [X] T032 Create `src/modules/comments/infrastructure/outbox-relay.ts`: a job selecting unpublished
       rows with `FOR UPDATE SKIP LOCKED` in batches of 100, publishing to the `domain-events` queue
       with `jobId = event.id`, then stamping `published_at` (§9.1)
 
 ### HTTP plumbing
 
-- [ ] T033 Create `src/modules/comments/http/auth.ts`: a Fastify plugin resolving the
+- [X] T033 Create `src/modules/comments/http/auth.ts`: a Fastify plugin resolving the
       `blotato-api-key` header — parse `blt_<prefix>_<secret>`, look up by `prefix`, compare
       `sha256(secret)` in constant time, reject a revoked key — and decorating the request with the
       resolved `workspaceId` (A16, §10). Missing, unrecognized or revoked → `401 UNAUTHORIZED`
