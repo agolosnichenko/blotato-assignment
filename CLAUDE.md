@@ -24,8 +24,8 @@ pnpm format                   # oxfmt (format:check in CI)
 pnpm typecheck                # tsc --noEmit
 pnpm test:unit                # fast, no containers
 pnpm test:integration         # testcontainers, needs a Docker daemon
-pnpm test -- src/app/config.test.ts            # a single file
-pnpm test:unit -- -t 'applies defaults'        # a single test by name
+pnpm test src/app/config.test.ts               # a single file — no `--`, pnpm 10 forwards
+pnpm test:unit -t 'applies defaults'           # a single test by name
 pnpm build && pnpm start:api  # bundles to dist/*.mjs via tsdown
 ```
 

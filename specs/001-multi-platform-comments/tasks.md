@@ -268,17 +268,17 @@ freshness timestamp — without ever writing to a platform.
 
 > Write these first and confirm they fail before implementing.
 
-- [ ] T040 [P] [US1] Create `src/modules/comments/http/post-comments.integration.test.ts` (V1): seed
+- [X] T040 [P] [US1] Create `src/modules/comments/http/post-comments.integration.test.ts` (V1): seed
       30 top-level comments, page with `limit=20` in both `order` directions, follow the cursor, then
       insert 5 more comments between two page requests and follow it again — every pre-existing
       comment exactly once, no gaps, correct `replyCount`, a `sync.lastSyncedAt`, and `400
       VALIDATION_ERROR` when the cursor is replayed with the other `order` (FR-001, FR-003, FR-004,
       FR-006, SC-002, D27)
-- [ ] T041 [P] [US1] Create `src/modules/comments/http/replies.integration.test.ts` (V1): a comment
+- [X] T041 [P] [US1] Create `src/modules/comments/http/replies.integration.test.ts` (V1): a comment
       with 3 direct replies returns them oldest first by default, the parent reports `replyCount: 3`,
       and a deleted comment with live replies comes back as a placeholder with `text: null` and a
       null author while a deleted comment with no replies is absent entirely (FR-002, FR-005, A4)
-- [ ] T042 [P] [US1] Create `src/modules/comments/http/get-comment.integration.test.ts`: a single
+- [X] T042 [P] [US1] Create `src/modules/comments/http/get-comment.integration.test.ts`: a single
       comment fetched by id, and another workspace's comment returning `404 NOT_FOUND` rather than
       `403` (FR-007, D20)
 
@@ -326,7 +326,7 @@ one comment on the platform and one row locally.
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T051 [P] [US2] Create `src/modules/comments/application/publish-comment.integration.test.ts`
+- [X] T051 [P] [US2] Create `src/modules/comments/application/publish-comment.integration.test.ts`
       (V2) covering the full failure matrix against an adapter double: success; timeout after send;
       connection drop after send; `429` with `Retry-After`; permanent rejection; and the platform
       echoing our own reply back through ingestion while the worker is still publishing. Expect
@@ -338,7 +338,7 @@ one comment on the platform and one row locally.
       port and **`social_accounts` byte-for-byte unchanged** (D30, A19); and a parent deleted *after*
       the child was queued → `failed` + `PARENT_DELETED` with the quota released and nothing sent to
       the platform (T060a) (FR-009, FR-011, FR-012, FR-014, SC-001, D14, §7.1 step 7)
-- [ ] T052 [P] [US2] Create `src/modules/comments/http/create-reply.integration.test.ts` (V3): reply
+- [X] T052 [P] [US2] Create `src/modules/comments/http/create-reply.integration.test.ts` (V3): reply
       to a reply on Instagram → `422 REPLY_DEPTH_EXCEEDED` whose `detail` names the top-level
       comment, the same depth on Bluesky → `202`; over-length text → `422 TEXT_TOO_LONG` with nothing
       sent; same `Idempotency-Key` with the same body → the original comment, with a different body →
@@ -350,15 +350,15 @@ one comment on the platform and one row locally.
       composes the two (D30). Every
       rejection asserted to be `application/problem+json` carrying its `code` (FR-010, FR-013,
       FR-032, D12, A6, A19)
-- [ ] T053 [P] [US2] Create `src/modules/comments/infrastructure/contact-quota.integration.test.ts`
+- [X] T053 [P] [US2] Create `src/modules/comments/infrastructure/contact-quota.integration.test.ts`
       (V3): two concurrent replies to the same new audience member consume the allowance once; with
       the allowance exhausted, a reply to a *new* person → `422 QUOTA_EXCEEDED` while a reply to
       someone already counted this period → `202`; a final failure releases the reservation (FR-014,
       D16, A8)
-- [ ] T054 [P] [US2] Create `src/modules/comments/infrastructure/outbox.integration.test.ts` (V6):
+- [X] T054 [P] [US2] Create `src/modules/comments/infrastructure/outbox.integration.test.ts` (V6):
       an event appears only after the transaction commits, is relayed exactly once, and survives the
       queue being dropped between acceptance and relay (FR-025, FR-033, SC-011, D9)
-- [ ] T055 [P] [US2] Create `src/modules/comments/infrastructure/sweeper.integration.test.ts` (V6):
+- [X] T055 [P] [US2] Create `src/modules/comments/infrastructure/sweeper.integration.test.ts` (V6):
       a comment left `queued` for more than a minute with no active job is re-enqueued, and an
       accepted write is never silently abandoned (§7.1 step 4, R-10)
 
@@ -650,7 +650,7 @@ reason the registry gives.
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T096 [P] [US5] Create `src/modules/comments/http/platforms.integration.test.ts` (V9):
+- [X] T096 [P] [US5] Create `src/modules/comments/http/platforms.integration.test.ts` (V9):
       `GET /v1/platforms` lists all nine platforms — three supporting comments, six carrying an
       `unsupportedReason` — and **the depth, text limit and unit it reports for a platform are the
       same values the write path enforces**, so the registry cannot drift from behaviour (FR-031,

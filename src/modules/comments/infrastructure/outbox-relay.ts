@@ -15,7 +15,6 @@ import type { OutboxTransaction } from '#src/modules/comments/infrastructure/out
 import { outboxEvents } from '#src/modules/comments/infrastructure/schema.ts';
 
 const BATCH_SIZE = 100;
-export const DOMAIN_EVENTS_QUEUE_NAME = 'domain-events';
 
 export interface OutboxRelayResult {
   readonly relayed: number;
