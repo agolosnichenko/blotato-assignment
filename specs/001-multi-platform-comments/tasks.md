@@ -37,18 +37,18 @@ convention already set by `src/app/api.integration.test.ts`.
 
 **Purpose**: bring the toolchain up to what the plan requires before any code is written.
 
-- [ ] T001 Add the exact-pinned dependencies from research.md to `package.json`: `drizzle-kit`
+- [X] T001 Add the exact-pinned dependencies from research.md to `package.json`: `drizzle-kit`
       0.31.10 (R-01), `fastify-type-provider-zod` 7.0.0 + `@fastify/swagger` 9.8.1 +
       `@fastify/swagger-ui` 6.1.1 (R-03), `@fastify/rate-limit` 11.2.0 (R-05), `uuidv7` 1.2.1
       (R-06). No `^` or `~`; `.npmrc` `minimum-release-age=1440` means a release younger than 24 h
       is pinned to the previous version rather than lifting the setting
-- [ ] T002 Create `drizzle.config.ts` at the repository root pointing at the schema files and
+- [X] T002 Create `drizzle.config.ts` at the repository root pointing at the schema files and
       `drizzle/` output, and add `db:generate` / `db:migrate` scripts to `package.json` (R-01)
-- [ ] T003 [P] Add `seed:account`, `create-api-key`, `generate-openapi` and `smoke` script entries to
+- [X] T003 [P] Add `seed:account`, `create-api-key`, `generate-openapi` and `smoke` script entries to
       `package.json`, each invoking the matching file under `scripts/` through `tsx`. The entries
       point at files created later (T038, T039, T107, T108); nothing runs them until then, so this is
       declaration, not a broken build
-- [ ] T004 [P] Extend `.env.example` with every variable the feature introduces:
+- [X] T004 [P] Extend `.env.example` with every variable the feature introduces:
       `CREDENTIALS_ENCRYPTION_KEY`, `CREDENTIALS_KEY_VERSION`, `META_APP_SECRET`,
       `META_APP_SECRET_INSTAGRAM`, `META_WEBHOOK_VERIFY_TOKEN`, `META_GRAPH_API_VERSION`,
       `RETENTION_DAYS` (default 45), `SYNC_INTERVALS_*` for the age bands per platform family (§7.3)
@@ -61,7 +61,7 @@ convention already set by `src/app/api.integration.test.ts`.
       as T107**, which creates `scripts/generate-openapi.ts` and the first `openapi.json`: a CI step
       calling a script that does not exist yet fails every pull request until Phase 8, and a
       permanently red gate is a gate nobody reads
-- [ ] T006 [P] Add a testcontainers helper in `src/shared/testing/containers.ts` that starts
+- [X] T006 [P] Add a testcontainers helper in `src/shared/testing/containers.ts` that starts
       PostgreSQL + Redis and applies the committed `drizzle/` migrations, so the test schema and the
       deployed schema cannot drift (R-01)
 
