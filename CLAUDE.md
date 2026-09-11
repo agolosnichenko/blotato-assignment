@@ -34,13 +34,15 @@ Reference the spec decision in the body when the change implements or diverges f
 
 ## Architecture (spec §4)
 
-Modular monolith, one image, two processes: `api` (REST, webhook intake, Swagger UI, health) and
-`worker` (BullMQ: publish, sync, webhook processing, outbox relay, sweepers, purge). Postgres is the
-source of truth; Redis holds only queues, rate limits and locks — losing Redis must never lose data.
+One service of the platform, deployed on its own, with two runtime roles from one image: `api`
+(REST, webhook intake, Swagger UI, health) and `worker` (BullMQ: publish, sync, webhook processing,
+outbox relay, sweepers, purge). Postgres is the source of truth; Redis holds only queues, rate limits
+and locks — losing Redis must never lose data. Don't call this a monolith and don't split the roles
+into separate services (§4.1).
 
 Planned layout (§4.2): `src/app` (composition, Zod env config), `src/shared`,
-`src/modules/platform-core` (stub tables **owned by other modules**: workspaces, api keys, social
-accounts, posts — accessed only through ports, D8), `src/modules/comments/{domain,application,
+`src/modules/platform-core` (ports to other services + a read-only local projection of their data:
+workspaces, api keys, social accounts, posts — D8), `src/modules/comments/{domain,application,
 infrastructure,http}`, `src/platforms/{registry.ts,types.ts,meta,bluesky}`, `scripts/`, `drizzle/`.
 
 Platform abstraction: every platform implements `CommentPlatformAdapter` (§4.3) and has an entry in
@@ -52,6 +54,10 @@ the IG `auth_variant` (D28) — differences stay inside adapters / the Graph cli
 
 These are spread across the spec and are easy to break:
 
+- **Service boundary (D8, D29):** no foreign key and no SQL join from `comments` to platform-core
+  tables — `workspace_id`, `social_account_id` and `post_id` are external references. Other services'
+  data is read through ports only, never written. Credentials come from the `AccountCredentials`
+  port, never from a table read inside an adapter (D26).
 - **Tenancy (D20):** every repository call takes `workspaceId`; another workspace's resource → `404`,
   never `403`. Integration tests assert this on every endpoint.
 - **Dedup key:** `UNIQUE (social_account_id, platform_comment_id)`. Webhooks and sync share one

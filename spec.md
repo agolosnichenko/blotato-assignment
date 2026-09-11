@@ -1,7 +1,9 @@
 # Blotato Take Home — Comment System: Specification
 
 > Status: **FINAL** (2026-09-11). The contested assumptions (A3, A4, A9, A11, A16, A17) were reviewed
-> with the author; decisions D27–D28 were added as a result.
+> with the author; decisions D27–D28 were added as a result. A later review of the system shape
+> replaced the "modular monolith" framing with an explicit service boundary: D29 and A10a, with
+> §4.1, §5.1, §5.2, D8 and D26 updated to match.
 > This is the working specification. The deliverable documents (README, DESIGN.md, OpenAPI) are also
 > in English (D18).
 > All decisions are in section 3, all assumptions in section 16, risks and spikes in section 17.
@@ -87,7 +89,7 @@ Sources: <https://developers.facebook.com/docs/instagram-platform/webhooks>,
 | D5 | Platforms | Instagram + Facebook (Meta Graph API) + a third platform with a different model; all 9 platforms are described in a capability registry | The abstraction is validated against two different models |
 | D6 | Stack | Node 22, TypeScript strict (ESM), Fastify, PostgreSQL, Drizzle ORM, BullMQ on Redis | Production-grade path; Redis queues are standard platform infrastructure |
 | D7 | Third platform | Bluesky (AT Protocol) | Arbitrary-depth trees, replies via root+parent (uri+cid), no webhooks, open API |
-| D8 | Module boundaries | Workspaces, API keys, social accounts (+ tokens) and posts belong to other modules. Migrations create minimal stub tables marked "owned elsewhere"; the comments module accesses them through ports | Focus on comments; the module plugs into an existing platform |
+| D8 | Service boundaries | Workspaces, API keys, social accounts (+ tokens) and posts are owned by other services of the platform. The comments service reads them only through ports; it never writes them and never joins to them in SQL | Focus on comments; the service plugs into an existing platform |
 | D9 | Domain events | Transactional outbox → relay → BullMQ. Consumers are not implemented; only the contract and a test | At-least-once delivery without dual writes |
 | D10 | Write operations | Public reply to a comment + top-level comment on a post. Private reply is out of scope | Mirrors the product; DMs are a different domain |
 | D11 | Read shape | `GET /posts/:postId/comments` — top-level comments with `replyCount`; `GET /comments/:commentId/replies` — direct replies; a cursor at each level | One model for depth 1 and ∞, predictable response size |
@@ -95,7 +97,7 @@ Sources: <https://developers.facebook.com/docs/instagram-platform/webhooks>,
 | D13 | External posts | Comments on posts not published through Blotato are stored with `postId = null`, emit events, are available via `GET /accounts/:accountId/comments`, and can be replied to | Required for the "on any post" automation and the account inbox |
 | D14 | Publish retries | Backoff only on retryable errors; on an uncertain outcome, reconcile first (look for our comment on the platform), then retry | A duplicate public reply on behalf of a brand is worse than a delay |
 | D15 | Retention | 45 days (configurable), purge job. Partitioning is described in DESIGN.md as the next step | Mirrors the product, limits PII and table growth |
-| D16 | Active contacts | A `ContactQuota` port reserves the contact before enqueueing; exceeding the limit → `422 QUOTA_EXCEEDED`. The limit is read from the `workspaces.contact_limit_monthly` stub (in the real platform — billing module entitlements) | A real business constraint behind a billing interface |
+| D16 | Active contacts | A `ContactQuota` port reserves the contact before enqueueing; exceeding the limit → `422 QUOTA_EXCEEDED`. The limit is read through the port from the projected `workspaces.contact_limit_monthly` (in the real platform — billing entitlements) | A real business constraint behind a billing interface |
 | D17 | Bluesky ingestion | Adaptive polling; Jetstream is described in DESIGN.md as the scaling path | One sync mechanism without a stateful WebSocket component |
 | D18 | Documentation | English: README, DESIGN.md (mermaid), OpenAPI generated from Zod schemas. `spec.md` is the working specification, also in English | The founder reads the repository |
 | D19 | Manual sync | `POST /posts/:postId/comments/sync` → `202` + sync job; `lastSyncedAt` in read responses | A client or agent can request fresh data itself |
@@ -105,19 +107,31 @@ Sources: <https://developers.facebook.com/docs/instagram-platform/webhooks>,
 | D23 | Meta access | A real Meta App in Standard Access without App Review or Business Verification. IG/FB comments arrive through the sync job; the webhook path is exercised with test events from the App Dashboard and spike S1 for FB Page feed. The limitation is stated openly in DESIGN.md | Business verification and review take weeks and are outside our control |
 | D24 | Hosting | Railway: `api` and `worker` services from one Dockerfile, managed Postgres and Redis, HTTPS domain, deploys from GitHub | Minimal ops while still running real HTTPS / worker / Postgres / Redis |
 | D25 | Reviewer access | Public Swagger UI (`/docs`); the demo API key is sent in the email, not committed to the repository; the key is bound to a demo workspace, has a reduced rate limit and can be revoked; README contains a curl walkthrough | The reviewer can try a reply, but a random repository visitor cannot post on behalf of real accounts |
-| D26 | Account tokens | A CLI seed script accepts manually obtained tokens (Meta long-lived Page token or Instagram user token, Bluesky app password), encrypts them with AES-256-GCM (key from env) into the `social_accounts` stub table and subscribes the account to webhooks | The connect flow stays with another module (D8) |
+| D26 | Account tokens | Adapters obtain credentials through an `AccountCredentials` port, never from a table. The single implementation for this deployment reads the local projection and decrypts AES-256-GCM (key from env); a CLI seed script accepts manually obtained tokens (Meta long-lived Page token or Instagram user token, Bluesky app password) and subscribes the account to webhooks. In the platform the port is a call to the accounts service returning a short-lived token | Token custody belongs to the accounts service (D8); the port is the seam, and the demo needs exactly one implementation behind it |
 | D27 | List ordering | All list endpoints accept `order=asc\|desc`. Defaults: top-level and account inbox — `desc`, replies — `asc`. The cursor encodes the direction | The client picks the scenario (inbox or reading a conversation); B-tree indexes are readable in both directions, so no extra indexes are needed |
 | D28 | Instagram login | The IG adapter supports both variants: Facebook Login for Business (Page token, `graph.facebook.com`) and Instagram Login (Instagram user token, `graph.instagram.com`). The variant is stored in `social_accounts.auth_variant`; differences are isolated in the Graph client, and use cases do not depend on the variant | Instagram Login is how most modern creators connect without an FB Page; Facebook Login covers businesses with a linked Page |
+| D29 | Data ownership | The service owns its schema. References to other services' entities (`workspace_id`, `social_account_id`, `post_id`) are plain `uuid` columns with no foreign key; only links inside the service (`parent_comment_id`, `root_comment_id`) keep foreign keys. Referential integrity comes from port validation on write and platform events on delete | A foreign key across a service boundary forces a shared database and blocks independent schema changes; the read contract (§6.2) needs no data from other services, so the boundary costs nothing |
 
 ## 4. Architecture
 
 ### 4.1. System shape
 
-A modular monolith: one repository, one Docker image, two processes:
+One service among the platform's services, deployed on its own. It owns its schema and its Redis
+(D29) and talks to the rest of the platform only through ports and domain events (D8, D9) — never
+through a shared table or a cross-service join.
+
+One repository, one Docker image, two runtime roles of the same service:
 
 - **api** (Fastify): public REST API, webhook intake, Swagger UI, health checks.
 - **worker** (BullMQ): comment publishing, sync, webhook delivery processing, outbox relay,
   retention purge, sync scheduler.
+
+Splitting the roles into separate deployables is a queue-and-process detail, not a service boundary:
+they share one schema, one release and one owner. Ingestion, publishing and reads are likewise not
+split further — there is no independent scaling profile, availability requirement or team boundary to
+justify it. The trigger that would change this: webhook bursts whose intake has to stay available
+while publishing is degraded — then intake becomes its own deployable, writing to the same
+`webhook_deliveries` table.
 
 Postgres is the source of truth. Redis holds only queues, rate limiting and short-lived locks
 (losing Redis does not lose data: see the outbox and `webhook_deliveries`).
@@ -130,7 +144,8 @@ src/
   shared/                   # db (drizzle), queue (bullmq), logger (pino), errors (problem+json),
                             # crypto (AES-GCM), pagination (cursor codec), http helpers
   modules/
-    platform-core/          # STUBS, owned elsewhere: workspaces, api keys, social accounts, posts
+    platform-core/          # ports to other services + local projection of their data
+                            # (workspaces, api keys, social accounts, posts)
     comments/
       domain/               # Comment, status state machine, reply rules, capability checks
       application/          # use cases: ListPostComments, ListReplies, CreateReply,
@@ -171,7 +186,13 @@ interface CommentPlatformAdapter {
 
 All ids are UUIDv7 (time-sortable). All timestamps are `timestamptz`.
 
-### 5.1. Stub tables (owned elsewhere, D8)
+### 5.1. Local projection of platform data (D8, D29)
+
+These four tables mirror data owned by other services so that the hot paths — authenticating a key,
+resolving a post, loading an account — do not make a network call per request. The service only reads
+them; they are filled by the seed script in this deployment and by platform events in the real one.
+A stale or missing row is a normal condition, not a corruption: the port reports the entity as
+unknown and the request gets `404` or the job is parked.
 
 | Table | Columns |
 |-------|---------|
@@ -185,10 +206,10 @@ All ids are UUIDv7 (time-sortable). All timestamps are `timestamptz`.
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | uuid PK | |
-| `workspace_id` | uuid FK, not null | denormalized for scoping (D20) |
-| `social_account_id` | uuid FK, not null | |
+| `workspace_id` | uuid, not null | external reference, no FK (D29); denormalized for scoping (D20) |
+| `social_account_id` | uuid, not null | external reference, no FK (D29) |
 | `platform` | text, not null | |
-| `post_id` | uuid FK, null | null for external posts (D13) |
+| `post_id` | uuid, null | external reference, no FK (D29); null for external posts (D13) |
 | `platform_post_id` | text, not null | |
 | `parent_comment_id` | uuid FK → comments, null, `ON DELETE CASCADE` | null = top-level |
 | `root_comment_id` | uuid FK → comments, null | top-level ancestor; null on the top-level comment itself |
@@ -513,7 +534,9 @@ Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).
 
 - `README.md`: what it is, link to the deployment and `/docs`, walkthrough, local run (docker
   compose), layout, "How I used AI tools" section.
-- `DESIGN.md`: context and scope, architecture (mermaid), database schema (ER diagram), API, flows
+- `DESIGN.md`: context and scope, architecture (mermaid) including the service boundary — what the
+  service owns, what it reads through ports, and why it is not split further (§4.1),
+  database schema (ER diagram), API, flows
   (reply / webhook / sync sequence diagrams), platforms and registry, key decisions with trade-offs and
   alternatives, assumptions, Meta deployment constraints, differences from the current
   `/v2/comments`, evolution path (Jetstream, partitioning, remaining platforms, private replies).
@@ -522,7 +545,7 @@ Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).
 
 ## 14. Out of scope
 
-- OAuth connect flow, account management and post publishing (other modules).
+- OAuth connect flow, account management and post publishing (other services).
 - Private replies and DMs; implementing event consumers (DM automations, inbox UI).
 - Moderation: hide / unhide, likes, deleting and editing comments through our API.
 - Media attachments in comments.
@@ -541,7 +564,7 @@ describes this briefly and factually.
 Product and domain:
 
 - **A1.** A "published post" is a row in `posts` with a `platform_post_id`; posts in other states
-  belong to the publishing module and are not visible to the comments module.
+  belong to the publishing service and are not visible to the comments service.
 - **A2.** An "own" comment is determined by the author id matching the connected account id, not by
   whether it was created through our API.
 - **A3.** (changed → D27) Ordering is controlled by the `order` parameter; by default top-level
@@ -562,6 +585,11 @@ Product and domain:
   root), not from the age of an individual comment: a thread is never cut in the middle.
 - **A10.** A post's first sync walk tags the comments it finds as `backfill`, so event consumers don't
   react to old comments.
+- **A10a.** (added with D29) A comment can outlive the post or account it references. A deleted post
+  is expected to arrive as a platform event: sync targets are stopped and the threads are left to
+  retention, which removes them within 45 days. Until then `GET /v1/posts/:postId/comments` returns
+  `404` because the post is unknown to the ports, while the same comments remain visible in the
+  account inbox.
 
 API:
 
@@ -587,7 +615,7 @@ Platforms and integrations:
 - **A18.** Meta webhooks are subscribed with values included (the payload contains text and author);
   if data is missing, it is fetched through the API.
 - **A19.** An invalid token (`AuthError`) moves the account to `disconnected` and stops its jobs;
-  reconnecting is another module's job.
+  reconnecting is the accounts service's job.
 - **A20.** Bluesky reply depth is not limited at the service level; UI limits are the client's concern.
 
 Infrastructure:
