@@ -42,7 +42,10 @@
     that a third platform with a different model fits the same contract.
 - No technology is named anywhere: storage, queueing, runtime and transport are all described by the
   behaviour they must deliver, so planning is free to choose them.
-- Out of scope, carried from `spec.md` §14 and not restated as requirements: account connection and
-  post publishing, private replies and direct messages, moderation actions (hide, like, delete, edit),
-  media attachments in comments, adapters for the six non-commenting platforms, and implementations of
-  the notification consumers.
+- Out of scope, carried from `spec.md` §14 in full and not restated as requirements: account
+  connection and post publishing; private replies and direct messages; moderation actions (hide,
+  unhide, like, delete and edit through our API); media attachments in comments; adapters for the six
+  non-commenting platforms; implementations of the notification consumers; the streaming ingestion
+  path, table partitioning, distributed tracing and multi-region deployment; and outbound webhooks to
+  customers together with any admin UI. The last two lines are the likeliest scope creep, which is
+  why they are listed rather than assumed.

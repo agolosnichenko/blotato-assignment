@@ -21,13 +21,18 @@ workspace; every read and write is scoped to it, and another workspace's resourc
 | `POST /v1/posts/:postId/comments/sync` | Request an immediate refresh | `202 SyncJob` |
 | `GET /v1/comment-sync-jobs/:jobId` | Refresh job status | `200 SyncJob` |
 | `GET /v1/platforms` | Capability registry, all nine platforms | `200 { items: PlatformCapabilities[] }` |
-| `GET /webhooks/meta` | Subscription verification (`hub.challenge`) | `200 text/plain` |
+| `GET /webhooks/meta` | Subscription verification: `hub.verify_token` is compared against the configured value first, and only then is `hub.challenge` echoed; a wrong or missing token is `403` and echoes nothing | `200 text/plain` |
 | `POST /webhooks/meta` | Event intake, signature verified over the raw body first | `200` |
 | `GET /healthz`, `GET /readyz` | Liveness / readiness (PostgreSQL + Redis) | `200` / `503` |
 | `GET /docs`, `GET /openapi.json` | Swagger UI and the document | |
 
 `202` rather than `201` is deliberate: the row exists, the platform action has not happened yet
 (A11, FR-009).
+
+A top-level comment on a post not published through the platform is unreachable by construction, not
+by a special rule: both `POST` and `GET /v1/posts/:postId/...` are keyed by the internal `postId`,
+which such a post does not have, so the request is `404 NOT_FOUND`. Replies to comments on those
+posts are addressed by `commentId` and remain available (A7, D13, FR-015).
 
 ## `Comment`
 

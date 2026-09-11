@@ -17,7 +17,9 @@ the platform. The load-bearing requirement is FR-011 / SC-001: a customer-author
 platform exactly once across the whole failure matrix. Everything else in the design — asynchronous
 writes with a conditional state machine, reconciliation before retry, one idempotent upsert path
 shared by push and refresh, a transactional outbox — exists to make that guarantee hold under
-at-least-once infrastructure.
+at-least-once infrastructure. Ingestion follows D4: push is the primary channel where it exists, and
+the refresh job covers backfill and anything push missed; the write surface is the public reply and
+the top-level comment, with private replies out of scope (D10).
 
 Approach: Node 22 / TypeScript ESM, Fastify for the `api` role and BullMQ for the `worker` role out
 of one image (D6, §4.1); PostgreSQL via Drizzle as the source of truth and Redis for queues, rate
@@ -59,7 +61,9 @@ multi-stage `node:22-slim` image, managed Postgres and Redis, migrations as a pr
 **Performance Goals**: read p95 < 300 ms at 100 000 comments in a workspace (SC-005); write
 acknowledgement p95 < 300 ms independent of platform latency (SC-006); webhook intake acknowledged
 in under 1 second so Meta does not treat delivery as failed (FR-016); push-to-readable within 60 s,
-poll-to-readable within one age-band interval, 5 minutes under 24 h (SC-004).
+poll-to-readable within one age-band interval, 5 minutes under 24 h (SC-004). The two percentile
+figures are build-time budgets checked by a seeded benchmark, not deployed service levels — A21
+designs no SLA and A22 puts metrics out of scope, so nothing in production measures them.
 
 **Constraints**: exactly-once publishing under at-least-once queues (SC-001); cursor pagination
 stable under concurrent inserts, in both directions (SC-002, D27); cross-workspace access
@@ -90,12 +94,35 @@ S4 (Bluesky's current `createRecord` and `getPostThread` rate limits). See Compl
 | **IV. Platform Differences Stay in Adapters** | One `CommentPlatformAdapter` port, one capability registry covering all nine platforms, zero platform or `auth_variant` branching in use cases — the IG Graph client resolves host and token from `auth_variant` (D28). Depth and text limits are enforced from registry data, so a new platform is an adapter plus a registry row. | PASS |
 | **V. Tested Behavior, Verified Failures** | `quickstart.md` maps every invariant to the scenario that proves it, including the three where the code must be broken once to confirm the test fails (deduplication, reconciliation, tenancy). Platform HTTP is mocked at the boundary; Postgres and Redis run for real. | PASS |
 
-**Security and tenancy constraints**: satisfied by design — API keys stored as `prefix` +
-`sha256(secret)` with constant-time comparison; platform tokens AES-256-GCM with `key_version`;
-webhook HMAC verified over the raw body *before* JSON parsing, with support for both Meta signing
-secrets (S5); RFC 9457 error bodies with a code from §6.3; pino redaction; Zod-validated config that
-fails fast. `research.md` R-04 records how the raw body is kept available to the verifier under
-Fastify.
+**Security and tenancy constraints** (§10, §12), each with the control stated rather than implied —
+these are the ones that are easy to leave half-built:
+
+| Control | What it means concretely |
+|---------|--------------------------|
+| API key format | `blt_<prefix>_<secret>` with at least 32 bytes of entropy in the secret; the database stores `prefix` + `sha256(secret)`; lookup by `prefix`, comparison constant-time. `scripts/create-api-key` prints the full key **once** and never again — it cannot be recovered from the row |
+| Platform tokens | AES-256-GCM with `key_version` for rotation, decrypted only inside the adapter for the duration of one call, reached only through the `AccountCredentials` port (D26) |
+| Webhook intake | HMAC over the raw bytes *before* JSON parsing (R-04), accepting either configured Meta signing secret (S5). The `GET` half of the handshake checks `hub.verify_token` against the configured value before echoing `hub.challenge` — echoing it unconditionally would let anyone confirm the subscription |
+| Logging | pino redaction covering the `blotato-api-key` header, platform tokens **and comment text** — the last is the PII control that pairs with nulling `text` on deletion (FR-030). Every entry carries `requestId` or `jobId`; under A22 these logs are the entire observability surface, so an unattributable line is a real loss |
+| Container and deploy | One multi-stage `node:22-slim` image running as a **non-root** user; GitHub Actions runs lint, typecheck and tests on pull requests and deploys to Railway from `main`, with migrations as a pre-deploy step |
+| Everything else | RFC 9457 error bodies with a code from §6.3; per-key rate limiting (R-05); Zod-validated config that fails fast on a missing variable |
+
+### Queues and their limits (§9.2)
+
+Redis carries five BullMQ queues. The concurrency figures are not tuning — one of them is load-bearing:
+
+| Queue | Purpose | Concurrency |
+|-------|---------|-------------|
+| `comment-publish` | publishing a comment (§7.1) | per-account token bucket |
+| `webhook-process` | processing a stored delivery (§7.2) | 10 |
+| `comment-sync` | refreshing one target (§7.3) | per-account token bucket |
+| `scheduler` | repeatable jobs: the sync scheduler, both sweepers, the outbox relay, the retention purge | **1** |
+| `domain-events` | external consumers, not implemented here | — |
+
+`scheduler` at concurrency 1 is what keeps the relay's "published once" true (SC-011, quickstart V6):
+the relay selects with `FOR UPDATE SKIP LOCKED`, so a second runner would not corrupt data, but it
+would double-publish events that the first has selected and not yet stamped, and double-run the purge
+and the sweepers. Redis itself runs `maxmemory-policy noeviction` with AOF on — a queue that may
+evict a job is a queue that silently drops accepted work (S3).
 
 **Post-Phase 1 re-evaluation**: unchanged — PASS on all five. Phase 1 added no table that crosses the
 service boundary, no use case that branches on platform, and no synchronous publish path.
@@ -168,6 +195,18 @@ scripts/                          # seed-account, create-api-key, generate-opena
 Tests live beside the code as `*.test.ts` (unit) and `*.integration.test.ts` (testcontainers), the
 convention already established by `src/app/api.integration.test.ts`.
 
+### Deliverables (§13)
+
+Three of the four deliverables are documents, and they are the only place several decisions are ever
+written down for the reader — so they are build output, not a postscript:
+
+| Deliverable | What it must carry | Why it cannot be dropped |
+|-------------|--------------------|--------------------------|
+| `README.md` | What the service is, the deployment link and `/docs`, the curl walkthrough (D25), local run via docker compose, the layout, and a "How I used AI tools" section | §1 makes the AI-usage description part of the original task, and §15 makes the README its home |
+| `DESIGN.md` | Context and scope; architecture in mermaid including the service boundary and why the roles are not split further (§4.1); the ER diagram; the API; reply / webhook / sync sequence diagrams; platforms and registry with what it takes to add one (§8.1); key decisions with trade-offs and alternatives; assumptions; the Meta Standard Access limitation (D23); differences from the current `/v2/comments` (D3); evolution path — Jetstream (D17), partitioning (D15), the remaining platforms, private replies | It is the sole carrier of D3, D15, D17, D23 and §8.1's "how to add a platform": nothing else in the repository states them for a reader |
+| `openapi.json` | Generated from the Zod route schemas, committed, drift-checked in CI | D18, R-03 |
+| Code, migrations, tests, CI | — | — |
+
 **Structure Decision**: single service, two runtime roles from one image, modules split by domain
 rather than by technical layer at the top level — `platform-core` holds everything that belongs to
 other services, `comments` holds what this service owns, `platforms` holds what the outside world
@@ -177,12 +216,13 @@ tables, only to a port.
 
 Three points where this layout resolves something §4.2 states more briefly:
 
-- **`ContactQuota` lives in `comments/infrastructure`**, where §4.2 places it, not in
-  `platform-core/ports.ts`. Only the *limit* crosses the boundary (`workspaces.contact_limit_monthly`, read through
-  the `Workspaces` port, billing entitlements in the real platform — D16); the *usage* is this
-  service's own `contact_quota_usage` table (§5.3), and the reservation is a local transaction with
-  an advisory lock (R-08). Putting the whole thing behind a boundary port would misdescribe a table
-  we own as somebody else's data.
+- **`ContactQuota` is implemented in `comments/infrastructure`**, where §4.2 places it, rather than
+  listed among the boundary ports in `platform-core/ports.ts`. It is still a port in D16's sense —
+  the seam a use case calls to reserve a contact — and it is the port that reads the limit from the
+  projected `workspaces.contact_limit_monthly` (billing entitlements in the real platform, D16). What
+  keeps it out of the boundary file is that the *usage* it records is this service's own
+  `contact_quota_usage` table (§5.3) and the reservation is a local transaction with an advisory lock
+  (R-08); only the limit value originates elsewhere.
 - **`PostPublished` is an inbound port**, the one §7.3 names for creating a refresh target when a
   post is published; in this deployment the seed script calls it instead of the publishing service.
   It is on the boundary list because the event originates outside the service.

@@ -15,7 +15,9 @@ system (status FINAL, decisions D1–D29, assumptions A1–A23, spikes S1–S5).
 > root `spec.md`. `spec.md` stays the source of truth for decisions (§3), assumptions (§16) and
 > spikes (§17); this file expresses the same scope as user journeys, testable requirements and
 > measurable outcomes, so that planning and task generation have a behavioural contract to work
-> from. Where a requirement traces to a decision, the decision id is cited in parentheses.
+> from. Where a requirement traces to a decision, the decision id is cited in parentheses. The scope
+> boundary itself is inherited, not chosen here: it is the product's documented comment
+> functionality (D2).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -25,8 +27,8 @@ A customer has published a post through the platform and wants to see what the a
 They ask for the post's comments and get the top-level comments, newest first, each carrying its
 author, text, and how many direct replies it has. Opening one comment gives its replies, oldest
 first, so the conversation reads in the order it happened. Long conversations are paged through a
-cursor that never repeats or skips a comment, even while new comments keep arriving. Every response
-states how fresh the data is.
+cursor that never repeats or skips a comment, even while new comments keep arriving. The post's own
+list states how fresh its data is and whether a refresh is under way.
 
 **Why this priority**: Reading is the foundation. Without a trustworthy, complete, correctly ordered
 read model there is nothing to reply to and nothing to automate. It is also the only story that
@@ -114,7 +116,9 @@ the platform side and verify a complete refresh marks it deleted.
 **Acceptance Scenarios**:
 
 1. **Given** a signed platform event for a new comment, **When** it is delivered, **Then** the
-   comment is stored and a "comment received" notification is emitted once.
+   comment is stored and a "comment received" notification is emitted once; **Given** a later event
+   says the author edited that comment, **When** it is processed, **Then** the stored text matches
+   the edit and no second comment appears.
 2. **Given** the same event is redelivered (platforms retry for up to 36 hours), **When** it is
    processed again, **Then** no second comment and no second notification appear.
 3. **Given** an event whose signature does not verify, **When** it is received, **Then** it is
@@ -272,9 +276,14 @@ with the same reason the registry gives.
   their authenticity before interpreting them, and MUST acknowledge them fast enough that the
   platform does not consider delivery failed.
 - **FR-017**: The system MUST treat a comment identified by the same platform identifier on the same
-  account as one comment, regardless of how many times or through which channel it arrives.
+  account as one comment, regardless of how many times or through which channel it arrives. When a
+  later arrival carries different content — the author edited the comment — the stored comment MUST
+  be updated to match rather than kept at its first-seen text or stored a second time.
 - **FR-018**: The system MUST refresh each tracked post on a schedule that tightens for recent posts
-  and relaxes as they age, and MUST stop tracking posts past the retention window.
+  and relaxes as they age, and MUST stop tracking posts past the retention window. A post becomes
+  tracked either when it is published through the platform or when the first comment on a post not
+  published through the platform is ingested — so external posts stay as fresh as internal ones
+  (D13, §7.3).
 - **FR-019**: The system MUST mark comments deleted only after a refresh that walked the post
   completely; a refresh interrupted by an error MUST infer no deletions.
 - **FR-020**: The system MUST tag comments found by a post's first refresh as backfill, distinctly
@@ -356,13 +365,22 @@ with the same reason the registry gives.
 - **SC-003**: A comment delivered by push and then found again by a refresh exists once and produces
   one notification; redelivery of the same platform event over a 36-hour window changes neither
   count.
-- **SC-004**: A comment posted on a platform that pushes events is readable through the API within 60
-  seconds of the platform delivering the event; on platforms without push, within one polling
-  interval for the post's age band (5 minutes for posts under a day old).
+- **SC-004**: Where a push channel is actually delivering, a comment is readable through the API
+  within a minute of the platform delivering the event. Otherwise freshness is bounded by the post's
+  age band for that platform — the intervals in §7.3, which differ per platform and are configurable
+  (5 minutes under 24 h where there is no push at all, 30 minutes where polling only reconciles a
+  push channel). This deployment runs under Standard Access, so Instagram and Facebook are reconciled
+  by refresh rather than push (D23), and their freshness is the age-band figure, not the minute.
 - **SC-005**: A read request for a post's comments returns within 300 ms at the 95th percentile on a
-  workspace holding 100,000 comments.
+  workspace seeded with 100,000 comments.
 - **SC-006**: An accepted write is acknowledged within 300 ms at the 95th percentile, independently of
   how long the platform takes to accept it.
+
+SC-005 and SC-006 are **design budgets measured by a seeded benchmark against the local stack**, not
+production service levels: A21 states that no SLA is designed and A22 puts metrics and tracing out of
+scope, so nothing in the running deployment measures a percentile. Their purpose is to fail the build
+if a query plan degrades — which the keyset indexes and the asynchronous write path are what make
+achievable — not to promise a number to a customer.
 - **SC-007**: No request can read or affect another workspace's data: every endpoint returns "not
   found" for a resource belonging to another workspace, asserted by test on 100% of endpoints.
 - **SC-008**: An interrupted refresh marks zero comments as deleted; a complete refresh detects 100%
@@ -407,7 +425,7 @@ Carried from `spec.md` §16; the identifiers are the ones used there.
 - **A13**: Cursors are opaque, encode the ordering direction, and are stable under inserts.
 - **A14**: The contract is versioned by a path prefix; a breaking change becomes a new version
   rather than a changed meaning inside the current one.
-- **A15**: Identifiers are opaque, time-sortable UUIDs with no type prefix.
+- **A15**: Identifiers are opaque and time-sortable, with no type prefix.
 - **A16**: Authentication reuses the platform's existing API-key header so existing clients and
   automation tools need no new configuration.
 - **A17**: The same Instagram account connected through two different login variants is two
@@ -416,14 +434,19 @@ Carried from `spec.md` §16; the identifiers are the ones used there.
 - **A19**: Authorization failure disconnects the account and stops its work; reconnection belongs to
   the accounts service.
 - **A20**: Where a platform allows unlimited nesting, this feature imposes no depth limit of its own.
-- **A21–A23**: One deployment region, structured logs plus health checks as the observability
-  surface, and a reviewer who uses the deployment rather than a local checkout.
+- **A21**: One deployment region; no service level and no scaling beyond a single instance of each
+  role is designed.
+- **A22**: Structured logs plus health checks are the whole observability surface; metrics and
+  tracing are out of scope.
+- **A23**: A local run is supported for development and continuous integration, but the reviewer
+  uses the deployment rather than a local checkout.
 
 **Dependencies on other services** (D8, D29): workspaces, API credentials, connected accounts with
 their platform tokens, and posts are owned elsewhere and are read through ports only — never written,
 never joined to. Three Meta behaviours remain unverified and gate the parts that depend on them:
 delivery of Facebook Page comment events under the app's current access level (S1), readability of
 Instagram comments under each login variant (S2), and which signing secret authenticates events for
-the Instagram login variant (S5). Two further unknowns affect configuration rather than behaviour
-and are tracked in the plan: the managed Redis settings the deployment can actually set (S3) and
-Bluesky's current rate limits, against which the refresh intervals behind SC-004 must be tuned (S4).
+the Instagram login variant (S5). Two further unknowns gate their own parts just as strictly: which
+eviction and persistence settings the managed queueing infrastructure will actually accept, which
+bears on FR-033 (S3), and Bluesky's current rate limits, against which the refresh intervals behind
+FR-018 and SC-004 must be tuned before those intervals can be trusted (S4).

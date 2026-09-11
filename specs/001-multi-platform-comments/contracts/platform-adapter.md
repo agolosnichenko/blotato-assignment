@@ -83,6 +83,9 @@ and throttle that account's jobs. A comment is "own" when `from.id` matches the 
 `platform_post_id` and `platform_comment_id` are AT URIs, with `cid` in `platform_meta`. Reads use
 `getPostThread`, loading truncated branches; writes use `createRecord` with `reply: { root, parent }`.
 Link and mention facets are detected automatically. A comment is "own" when the author DID matches.
+Deletion has two signals, not one: a `notFoundPost` marker in the returned thread is an explicit
+tombstone and may mark that comment deleted on its own, while absence still requires a complete walk
+(FR-019). The explicit marker is the faster of the two and must not be discarded as noise.
 
 **Unverified behaviour** — S1 (Facebook Page feed events under Standard Access), S2 (Instagram
 comment reads per login variant) and S5 (which secret signs Instagram Login events) must be run
