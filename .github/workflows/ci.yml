@@ -35,6 +35,14 @@ jobs:
 
       - run: pnpm typecheck
 
+      - name: openapi-drift
+        run: |
+          pnpm generate-openapi
+          if ! git diff --exit-code -- openapi.json; then
+            echo "::error::openapi.json is out of date. Run \`pnpm generate-openapi\` and commit the result."
+            exit 1
+          fi
+
       - run: pnpm test:unit
 
       # Testcontainers uses the Docker daemon available on ubuntu-latest runners.

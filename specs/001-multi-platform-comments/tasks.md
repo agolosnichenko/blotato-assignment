@@ -56,7 +56,7 @@ convention already set by `src/app/api.integration.test.ts`.
       drift apart (T085) — `SYNC_MANUAL_COOLDOWN_SECONDS` (60), `RATE_LIMIT_READS_PER_MIN` (30) and
       `RATE_LIMIT_WRITES_PER_MIN` (5), the last two being defaults that `api_keys.rate_limit_per_min`
       may lower but never raise (T034). No real secret value — the demo key is never committed (D25)
-- [ ] T005 [P] Add an `openapi-drift` step to `.github/workflows/` that runs `pnpm generate-openapi`
+- [X] T005 [P] Add an `openapi-drift` step to `.github/workflows/` that runs `pnpm generate-openapi`
       and fails if the committed `openapi.json` differs (D18, R-03). **Commit it in the same change
       as T107**, which creates `scripts/generate-openapi.ts` and the first `openapi.json`: a CI step
       calling a script that does not exist yet fails every pull request until Phase 8, and a
@@ -682,10 +682,10 @@ reason the registry gives.
 > FR-030 — nulling a deleted comment's text and author — belongs to the delete path (T076, T086),
 > not here: retention removes whole threads rather than redacting individual comments.
 
-- [ ] T100 [P] Create `src/modules/comments/application/purge-retention.integration.test.ts` (V7): a
+- [X] T100 [P] Create `src/modules/comments/application/purge-retention.integration.test.ts` (V7): a
       thread whose last activity is 46 days old is removed whole; a thread with a comment on day 44
       is untouched **including its older comments**
-- [ ] T101 Create `src/modules/comments/application/purge-retention.ts`: a daily job deleting
+- [X] T101 Create `src/modules/comments/application/purge-retention.ts`: a daily job deleting
       top-level comments with `last_activity_at < now() - RETENTION_DAYS` in batches of 1000, replies
       following by cascade, plus purging `webhook_deliveries` older than 7 days, published
       `outbox_events` older than 7 days and `contact_quota_usage` for periods older than two months;
@@ -693,7 +693,7 @@ reason the registry gives.
 
 ### Tenancy and credentials (SC-007, D20)
 
-- [ ] T102 [P] Create `src/modules/comments/http/tenancy.integration.test.ts` (V5): **every**
+- [X] T102 [P] Create `src/modules/comments/http/tenancy.integration.test.ts` (V5): **every**
       endpoint called with a second workspace's key against the first workspace's resource returns
       `404` — never `403`, never a leak of existence. Then the credential itself: a missing key, an
       unrecognized one and a revoked one each → `401 UNAUTHORIZED`; a key driven past its per-minute
@@ -708,7 +708,7 @@ reason the registry gives.
 
 ### Performance budgets
 
-- [ ] T104 [P] Create `src/modules/comments/http/benchmark.integration.test.ts` (V10): seed a
+- [X] T104 [P] Create `src/modules/comments/http/benchmark.integration.test.ts` (V10): seed a
       workspace with 100,000 comments across many posts, then measure the post-comments read and an
       accepted write at p95 under 300 ms, the write independent of how long the adapter double
       stalls. This is a build-time budget that fails when a query plan degrades, not a service level
@@ -726,16 +726,16 @@ reason the registry gives.
 
 ### Deliverables (§13)
 
-- [ ] T107 Create `scripts/generate-openapi.ts` writing `openapi.json` from the registered Zod route
+- [X] T107 Create `scripts/generate-openapi.ts` writing `openapi.json` from the registered Zod route
       schemas, and commit the generated `openapi.json` at the repository root (D18, R-03)
 - [ ] T108 [P] Create `scripts/smoke.ts` running the SC-012 reviewer walkthrough against the
       deployment: list platforms → read a post's comments → post a reply → poll to `posted` → hit
       `422 REPLY_DEPTH_EXCEEDED` on Instagram and succeed on Bluesky → request a refresh and read the
       job counts
-- [ ] T109 [P] Write `README.md`: what the service is, the deployment link and `/docs`, the curl
+- [X] T109 [P] Write `README.md`: what the service is, the deployment link and `/docs`, the curl
       walkthrough, the local run via docker compose, the layout, and the **"How I used AI tools"**
       section that §1 makes part of the original task (§15)
-- [ ] T110 [P] Write `DESIGN.md` — the sole carrier of several decisions for the reader: context and
+- [X] T110 [P] Write `DESIGN.md` — the sole carrier of several decisions for the reader: context and
       scope; architecture in mermaid including the service boundary and why the roles are not split
       further (§4.1); the ER diagram; the API; reply / webhook / sync sequence diagrams; platforms and
       the registry with what it takes to add one (§8.1); key decisions with trade-offs and rejected

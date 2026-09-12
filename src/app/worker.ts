@@ -1,6 +1,13 @@
+// oxlint-disable max-dependencies -- this is the worker role's composition point for every
+// `scheduler`-queue job (the two sweepers, the sync scheduler, the retention purge) plus the
+// `comment-publish`/`comment-sync` workers; each job's own constructor is a separate import by
+// design (§4.2), so the count rises whenever a job is added here rather than indicating the file
+// itself has grown unfocused.
+
 import { pathToFileURL } from 'node:url';
 import { Queue, Worker } from 'bullmq';
 import { buildContainer, type Container } from '#src/app/container.ts';
+import { createPurgeRetention } from '#src/modules/comments/application/purge-retention.ts';
 import { createPublishWorker } from '#src/modules/comments/infrastructure/publish-worker.ts';
 import {
   createSyncScheduler,
@@ -17,13 +24,15 @@ const SWEEP_STUCK_WORK_JOB = 'sweep-stuck-work';
 const SWEEP_INTERVAL_MS = 60_000;
 const SYNC_SCHEDULER_TICK_JOB = 'sync-due-targets';
 const SYNC_SCHEDULER_TICK_INTERVAL_MS = 60_000;
+const PURGE_RETENTION_JOB = 'purge-retention';
+const PURGE_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Dispatches one `scheduler` queue job by name. Every job this queue will ever carry (the two
- * sweepers, the sync scheduler tick; the outbox relay and the purge job in later tasks) is added
- * here rather than as a separate `Worker`, because **`scheduler` runs at concurrency 1** — a
- * second `Worker` instance on the same queue would defeat that regardless of its own concurrency
- * setting. `FOR UPDATE SKIP LOCKED` (the outbox relay, the sync scheduler tick) and
+ * sweepers, the sync scheduler tick, the retention purge; the outbox relay in a later task) is
+ * added here rather than as a separate `Worker`, because **`scheduler` runs at concurrency 1** —
+ * a second `Worker` instance on the same queue would defeat that regardless of its own
+ * concurrency setting. `FOR UPDATE SKIP LOCKED` (the outbox relay, the sync scheduler tick) and
  * `jobId = comment.id` (the stuck-work sweeper) stop a second runner from corrupting data, but not
  * from doubling work a first runner already selected and has not yet stamped — concurrency 1 is
  * what actually keeps "published once" and "swept once" true (D14, §9.2).
@@ -32,6 +41,7 @@ async function processSchedulerJob(
   jobName: string | undefined,
   sweeper: ReturnType<typeof createStuckWorkSweeper>,
   syncScheduler: SyncScheduler,
+  purgeRetention: ReturnType<typeof createPurgeRetention>,
 ): Promise<void> {
   switch (jobName) {
     case SWEEP_STUCK_WORK_JOB:
@@ -39,6 +49,9 @@ async function processSchedulerJob(
       return;
     case SYNC_SCHEDULER_TICK_JOB:
       await syncScheduler.tick();
+      return;
+    case PURGE_RETENTION_JOB:
+      await purgeRetention.run();
       return;
     default:
       throw new Error(`worker: unknown scheduler job "${String(jobName)}"`);
@@ -82,6 +95,10 @@ function buildRuntime(container: Container, logger: Logger): Runtime {
     container.config,
   );
   const syncScheduler = createSyncScheduler({ database: container.database.drizzle, syncQueue });
+  const purgeRetention = createPurgeRetention({
+    database: container.database.drizzle,
+    retentionDays: container.config.RETENTION_DAYS,
+  });
   const syncWorker = createSyncWorker({
     database: container.database.drizzle,
     redis: container.redis,
@@ -94,7 +111,7 @@ function buildRuntime(container: Container, logger: Logger): Runtime {
 
   const schedulerWorker = new Worker(
     QUEUE_NAMES.scheduler,
-    (job) => processSchedulerJob(job.name, sweeper, syncScheduler),
+    (job) => processSchedulerJob(job.name, sweeper, syncScheduler, purgeRetention),
     { connection: container.redis, concurrency: 1 },
   );
 
@@ -129,6 +146,9 @@ async function main(): Promise<void> {
   });
   await runtime.schedulerQueue.upsertJobScheduler(SYNC_SCHEDULER_TICK_JOB, {
     every: SYNC_SCHEDULER_TICK_INTERVAL_MS,
+  });
+  await runtime.schedulerQueue.upsertJobScheduler(PURGE_RETENTION_JOB, {
+    every: PURGE_RETENTION_INTERVAL_MS,
   });
 
   logger.info('worker ready');
