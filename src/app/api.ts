@@ -238,7 +238,13 @@ function registerCommentRoutes(
     manualCooldownSeconds: deps.config.SYNC_MANUAL_COOLDOWN_SECONDS,
   });
 
-  app.register(registerCommentReadRoutes({ repository, posts: deps.ports.posts }));
+  app.register(
+    registerCommentReadRoutes({
+      repository,
+      posts: deps.ports.posts,
+      accounts: deps.ports.accounts,
+    }),
+  );
   app.register(
     registerCommentWriteRoutes({
       database: deps.database,

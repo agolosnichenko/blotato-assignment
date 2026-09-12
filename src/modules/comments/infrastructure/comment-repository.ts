@@ -4,13 +4,13 @@
  * Every method takes `workspaceId` as a required parameter and puts it in the predicate — a row
  * belonging to another workspace is simply not found, never a `403` (D20, FR-026).
  *
- * `listTopLevelByPost` and `listRepliesByParent` share one keyset-paging implementation
- * ({@link listByPredicate}) driving `comments_post_top_level_idx` and `comments_replies_idx`
- * respectively (data-model.md §2): the `ORDER BY` matches each index's column order exactly, in
- * both directions, so Postgres can scan either index backwards instead of sorting. The keyset
- * comparison is a genuine Postgres row comparison, `(occurred_at, id) < (cursor)`, not the
- * `occurred_at < cursor OR (occurred_at = cursor AND id < cursor)` form that is easy to get
- * subtly wrong (R-02).
+ * `listTopLevelByPost`, `listRepliesByParent` and `listByAccount` share one keyset-paging
+ * implementation ({@link listByPredicate}) driving `comments_post_top_level_idx`,
+ * `comments_replies_idx` and `comments_social_account_idx` respectively (data-model.md §2): the
+ * `ORDER BY` matches each index's column order exactly, in both directions, so Postgres can scan
+ * either index backwards instead of sorting. The keyset comparison is a genuine Postgres row
+ * comparison, `(occurred_at, id) < (cursor)`, not the `occurred_at < cursor OR (occurred_at =
+ * cursor AND id < cursor)` form that is easy to get subtly wrong (R-02).
  *
  * The placeholder rule (FR-005, A4) is applied once, here, for both list methods: a `deleted`
  * comment is included only while `reply_count > 0` (it still has live replies hanging off it) —
@@ -34,7 +34,21 @@
 // would duplicate CommentRecord, COMMENT_COLUMNS and the workspace-scoping discipline documented
 // above instead of removing any of it.
 
-import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { canTransition, type CommentStatus } from '#src/modules/comments/domain/status.ts';
 import type { OutboxTransaction } from '#src/modules/comments/infrastructure/outbox.ts';
@@ -81,6 +95,18 @@ export interface ListResult {
   readonly nextCursor: KeysetCursor | null;
 }
 
+/**
+ * Predicates for the account inbox (T092, FR-008), on top of the `workspaceId`/`socialAccountId`
+ * scope every call carries regardless — `since`/`until` are both inclusive bounds on `occurredAt`
+ * and `isOwn` is an exact match, all optional so the first page of an unfiltered inbox is just the
+ * scope alone.
+ */
+export interface ListByAccountFilters {
+  readonly since?: Date;
+  readonly until?: Date;
+  readonly isOwn?: boolean;
+}
+
 /** `comment_sync_targets` / `comment_sync_jobs` for one post, as reported in a page's `sync` block. */
 export interface SyncStatus {
   readonly lastSyncedAt: Date | null;
@@ -124,6 +150,20 @@ export interface CommentRepository {
   listRepliesByParent(
     workspaceId: string,
     parentCommentId: string,
+    pagination: ListPagination,
+  ): Promise<ListResult>;
+  /**
+   * The account inbox, driving `comments_social_account_idx` (`social_account_id, occurred_at
+   * DESC, id DESC`) — no join to the `posts` projection and no filter on a post resolving (A10a,
+   * D8, D29): a comment is this service's own row, never dependent on the projection to be
+   * listed. Spans every post on the account, internal and external alike (D13) — including
+   * replies, since the index carries no `parent_comment_id` predicate the way
+   * `comments_post_top_level_idx` does.
+   */
+  listByAccount(
+    workspaceId: string,
+    socialAccountId: string,
+    filters: ListByAccountFilters,
     pagination: ListPagination,
   ): Promise<ListResult>;
   getById(workspaceId: string, commentId: string): Promise<CommentRecord | null>;
@@ -299,6 +339,29 @@ function listRepliesByParent(
     ) as SQL,
     pagination,
   );
+}
+
+function listByAccount(
+  db: NodePgDatabase,
+  workspaceId: string,
+  socialAccountId: string,
+  filters: ListByAccountFilters,
+  pagination: ListPagination,
+): Promise<ListResult> {
+  const conditions: SQL[] = [
+    eq(comments.workspaceId, workspaceId),
+    eq(comments.socialAccountId, socialAccountId),
+  ];
+  if (filters.since !== undefined) {
+    conditions.push(gte(comments.occurredAt, filters.since));
+  }
+  if (filters.until !== undefined) {
+    conditions.push(lte(comments.occurredAt, filters.until));
+  }
+  if (filters.isOwn !== undefined) {
+    conditions.push(eq(comments.isOwn, filters.isOwn));
+  }
+  return listByPredicate(db, and(...conditions) as SQL, pagination);
 }
 
 async function getById(
@@ -559,6 +622,8 @@ export function createCommentRepository(db: NodePgDatabase): CommentRepository {
       listTopLevelByPost(db, workspaceId, postId, pagination),
     listRepliesByParent: (workspaceId, parentCommentId, pagination) =>
       listRepliesByParent(db, workspaceId, parentCommentId, pagination),
+    listByAccount: (workspaceId, socialAccountId, filters, pagination) =>
+      listByAccount(db, workspaceId, socialAccountId, filters, pagination),
     getById: (workspaceId, commentId) => getById(db, workspaceId, commentId),
     getSyncStatus: (workspaceId, postId) => getSyncStatus(db, workspaceId, postId),
     findByIdempotencyKey: (workspaceId, idempotencyKey) =>

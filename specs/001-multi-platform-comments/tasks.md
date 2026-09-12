@@ -624,15 +624,15 @@ the external post's comment.
 
 ### Implementation for User Story 4
 
-- [ ] T092 [US4] Add `listByAccount` to `src/modules/comments/infrastructure/comment-repository.ts`
+- [X] T092 [US4] Add `listByAccount` to `src/modules/comments/infrastructure/comment-repository.ts`
       driving the `(social_account_id, occurred_at DESC, id DESC)` index, with optional `since`,
       `until` and `isOwn` predicates, still scoped by `workspaceId`
-- [ ] T093 [US4] Create `src/modules/comments/application/list-account-comments.ts` spanning internal
+- [X] T093 [US4] Create `src/modules/comments/application/list-account-comments.ts` spanning internal
       and external posts, defaulting to `desc` (FR-008, D13)
-- [ ] T094 [US4] Add `GET /v1/accounts/:accountId/comments` with its `limit`, `cursor`, `since`,
+- [X] T094 [US4] Add `GET /v1/accounts/:accountId/comments` with its `limit`, `cursor`, `since`,
       `until`, `isOwn` and `order` query schema to `src/modules/comments/http/routes.ts` and
       `src/modules/comments/http/schemas.ts`
-- [ ] T095 [US4] Set `is_own` from author identity in
+- [X] T095 [US4] Set `is_own` from author identity in
       `src/modules/comments/application/ingest-comments.ts` — the author matching the connected
       account, independent of whether the comment was created through this service (FR-023, A2)
 

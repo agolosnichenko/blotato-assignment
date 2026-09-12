@@ -20,6 +20,7 @@ import type { SortOrder } from '#src/shared/pagination.ts';
 export const postIdParamsSchema = z.object({ postId: z.uuid() });
 export const commentIdParamsSchema = z.object({ commentId: z.uuid() });
 export const syncJobIdParamsSchema = z.object({ jobId: z.uuid() });
+export const accountIdParamsSchema = z.object({ accountId: z.uuid() });
 
 const DEFAULT_LIMIT = 20;
 const MIN_LIMIT = 1;
@@ -33,6 +34,21 @@ export function paginationQuerySchema(defaultOrder: SortOrder) {
     order: z.enum(['asc', 'desc']).default(defaultOrder),
   });
 }
+
+/**
+ * The account inbox's query schema (T094, FR-008, rest-api.md): the shared pagination params plus
+ * `since`/`until` (inclusive ISO 8601 bounds on `occurredAt`) and `isOwn`. `isOwn` is the one
+ * boolean query param in this API — `'true'`/`'false'` strings, not `z.coerce.boolean()`, since
+ * coercion treats every non-empty string (including the literal `'false'`) as `true`.
+ */
+export const accountCommentsQuerySchema = paginationQuerySchema('desc').extend({
+  since: z.iso.datetime().optional(),
+  until: z.iso.datetime().optional(),
+  isOwn: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional(),
+});
 
 const commentAuthorSchema = z
   .object({

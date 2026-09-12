@@ -19,6 +19,13 @@
  *      keeps that promise even if completion itself comes up empty — an absent field is never
  *      written over stored text.
  *
+ * `is_own` (T095, FR-023, A2) is set from author identity, not from how a row entered the
+ * system: `upsert` compares `authorPlatformId` against the connected account's own platform id
+ * (`isOwnFor`) for every row it writes — the original comment and every ancestor the walk
+ * backfills alike — rather than trusting a caller-supplied flag. The same comment read back
+ * through a webhook delivery or a sync walk, or even seeded directly, still resolves to the same
+ * `is_own`, because nothing about the channel enters the comparison.
+ *
  * `delete` is FR-030's privacy control, not a status rename: `text` and the author fields are
  * nulled, the parent's `reply_count` decrements, and `comment.deleted` is written — the same
  * branch a sync walk's own deletions (T086) are meant to call, so that a deletion detected by a
@@ -67,6 +74,12 @@ export interface IngestedComment {
   readonly text: string | undefined;
   readonly platformCreatedAt: Date;
   readonly platformMeta: Record<string, unknown>;
+  /**
+   * Ignored by `upsert` (T095, FR-023, A2): `is_own` must mean "this author is the connected
+   * account", not "whatever the ingestion channel asserted", so `upsert` derives it itself from
+   * `authorPlatformId` via {@link isOwnFor} — the same derivation already used for every
+   * ancestor row the walk backfills — rather than trusting this field either way.
+   */
   readonly isOwn: boolean;
 }
 
@@ -467,7 +480,7 @@ async function runUpsert(tx: OutboxTransaction, input: UpsertInput): Promise<Ups
     resolvedText,
     platformCreatedAt: comment.platformCreatedAt,
     platformMeta: comment.platformMeta,
-    isOwn: comment.isOwn,
+    isOwn: isOwnFor(ctx, comment.authorPlatformId),
   });
 
   return { commentId: id, wasNew };
