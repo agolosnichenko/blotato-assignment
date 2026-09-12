@@ -245,7 +245,7 @@ user story sits on.
 - [X] T038 [P] Create `scripts/create-api-key.ts`: generate a secret with ≥ 32 bytes of entropy,
       store `prefix` + `sha256(secret)`, print the full `blt_<prefix>_<secret>` **once** and never
       again — it cannot be recovered from the row (§10, D25)
-- [ ] T039 [P] Create `scripts/seed-account.ts`: a demo workspace with `contact_limit_monthly`, an
+- [X] T039 [P] Create `scripts/seed-account.ts`: a demo workspace with `contact_limit_monthly`, an
       api key, connected Instagram / Facebook / Bluesky accounts with encrypted credentials, and
       published posts — calling the `PostPublished` port for each so they are registered as refresh
       targets, which is what the publishing service would do in the platform (§7.3)
@@ -701,7 +701,7 @@ reason the registry gives.
       T034 with two keys: one whose `rate_limit_per_min` is below the env default is cut off at the
       column, one whose value is above it is still cut off at the env default — a per-key row must
       not be able to raise a budget (FR-026, FR-027, FR-028)
-- [ ] T103 Run the V11 exercise (Principle V): temporarily remove the deduplication unique index, the
+- [X] T103 Run the V11 exercise (Principle V): temporarily remove the deduplication unique index, the
       `findPublishedComment` reconciliation call and the `workspaceId` predicate **one at a time**,
       confirm T071, T051 and T102 fail respectively, and restore each. A test that has never failed
       proves nothing

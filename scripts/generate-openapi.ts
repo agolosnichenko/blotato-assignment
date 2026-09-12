@@ -35,6 +35,7 @@ import type { Queue } from 'bullmq';
 import type { Config } from '#src/app/config.ts';
 import { buildApi, type ApiDependencies } from '#src/app/api.ts';
 import { createContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
+import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import { createLocalAccountCredentials } from '#src/modules/platform-core/local/account-credentials.ts';
 import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.ts';
 import { createLocalApiKeys } from '#src/modules/platform-core/local/api-keys.ts';
@@ -99,15 +100,19 @@ function buildGeneratorQueue(): Queue {
   return {} as unknown as Queue;
 }
 
-function buildGeneratorPorts(database: ApiDependencies['database']): PlatformCorePorts {
+function buildGeneratorPorts(
+  database: ApiDependencies['database'],
+  config: Config,
+): PlatformCorePorts {
   const keyMaterial = { key: Buffer.alloc(32), keyVersion: 1 };
+  const syncTargetRepository = createSyncTargetRepository(database.drizzle, config);
   return {
     workspaces: createLocalWorkspaces(database.drizzle),
     apiKeys: createLocalApiKeys(database.drizzle),
     accounts: createLocalAccounts(database.drizzle),
     posts: createLocalPosts(database.drizzle),
     accountCredentials: createLocalAccountCredentials(database.drizzle, keyMaterial),
-    postPublished: createLocalPostPublished(database.drizzle),
+    postPublished: createLocalPostPublished(database.drizzle, syncTargetRepository),
   };
 }
 
@@ -115,7 +120,7 @@ function buildGeneratorDependencies(): ApiDependencies {
   const config = buildGeneratorConfig();
   const database = createDatabase(config);
   const redis = buildGeneratorRedis();
-  const ports = buildGeneratorPorts(database);
+  const ports = buildGeneratorPorts(database, config);
   return {
     config,
     database,

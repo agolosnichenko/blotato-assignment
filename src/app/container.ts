@@ -24,6 +24,7 @@ import {
   createContactQuota,
   type ContactQuota,
 } from '#src/modules/comments/infrastructure/contact-quota.ts';
+import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import { createLocalAccountCredentials } from '#src/modules/platform-core/local/account-credentials.ts';
 import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.ts';
 import { createLocalApiKeys } from '#src/modules/platform-core/local/api-keys.ts';
@@ -90,14 +91,24 @@ function toKeyMaterial(config: Config): KeyMaterial {
   };
 }
 
-function buildPorts(database: Database, keyMaterial: KeyMaterial): PlatformCorePorts {
+function buildPorts(
+  database: Database,
+  keyMaterial: KeyMaterial,
+  config: Config,
+): PlatformCorePorts {
+  // `config` carries every `SyncIntervalsConfig` field (plus others this repository does not
+  // read) — see `src/app/config.ts`'s `SYNC_INTERVALS_*`/`RETENTION_DAYS` keys. Built here, not
+  // inside `post-published.ts`, so there remains exactly one `SyncTargetRepository` per process
+  // rather than one per port implementation (module docstring).
+  const syncTargetRepository = createSyncTargetRepository(database.drizzle, config);
+
   return {
     workspaces: createLocalWorkspaces(database.drizzle),
     apiKeys: createLocalApiKeys(database.drizzle),
     accounts: createLocalAccounts(database.drizzle),
     posts: createLocalPosts(database.drizzle),
     accountCredentials: createLocalAccountCredentials(database.drizzle, keyMaterial),
-    postPublished: createLocalPostPublished(database.drizzle),
+    postPublished: createLocalPostPublished(database.drizzle, syncTargetRepository),
   };
 }
 
@@ -115,7 +126,7 @@ export function buildContainer(options: BuildContainerOptions = {}): Container {
   const config = options.config ?? loadConfig();
   const database = createDatabase(config);
   const redis = createRedis(config);
-  const ports = buildPorts(database, toKeyMaterial(config));
+  const ports = buildPorts(database, toKeyMaterial(config), config);
   const contactQuota = createContactQuota(database.drizzle, ports.workspaces);
   const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
   const syncQueue = new Queue(QUEUE_NAMES.commentSync, { connection: redis });
