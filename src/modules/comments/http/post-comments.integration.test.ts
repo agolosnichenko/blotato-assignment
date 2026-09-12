@@ -198,6 +198,10 @@ async function seedSyncTarget(
     nextSyncAt: new Date(Date.now() + 60_000),
     lastError: null,
     manualCooldownUntil: null,
+    // A fixed anchor a few days in the past — this case doesn't exercise age banding, and a
+    // real-looking age (rather than "now") won't drift into a different band depending on when
+    // the suite runs.
+    ageAnchorAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
   });
 }
 

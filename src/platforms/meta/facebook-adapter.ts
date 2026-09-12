@@ -2,9 +2,10 @@
  * Facebook {@link CommentPlatformAdapter} (spec.md §8.2, contracts/platform-adapter.md).
  *
  * `publishComment` and `findPublishedComment` are T068's write path. `listComments` and
- * `fetchComment` are a later wave's read path (T084) and are left throwing rather than stubbed to
- * an empty result: a stub returning nothing would let a sync walk conclude a post has no comments
- * and mark everything `deleted`.
+ * `fetchComment` (T084) are the read path: `GET /{post-id}/comments?filter=stream`, paging on the
+ * Graph API's own `paging.cursors.after` until `paging.next` stops appearing — a page that throws
+ * is never read as an empty-but-complete one, since that would let a sync walk conclude the post
+ * has no more comments and mark the rest `deleted`.
  *
  * The Instagram login-variant distinction (D28) does not apply to Facebook accounts at all —
  * `ctx.credentials` is still passed through to `graph-client.ts` opaquely, the same as the
@@ -12,7 +13,11 @@
  */
 
 import { classifyGraphFailure } from '#src/platforms/meta/errors.ts';
-import { createGraphClient, type GraphClient } from '#src/platforms/meta/graph-client.ts';
+import {
+  createGraphClient,
+  GraphHttpError,
+  type GraphClient,
+} from '#src/platforms/meta/graph-client.ts';
 import type { AccountCredentialsRecord } from '#src/modules/platform-core/ports.ts';
 import {
   AuthError,
@@ -42,11 +47,45 @@ interface FbCommentNode {
   readonly id: string;
   readonly message: string;
   readonly created_time: string;
-  readonly from?: { readonly id: string };
+  readonly from?: { readonly id: string; readonly name?: string };
+  readonly parent?: { readonly id: string };
+}
+
+/** The fields this adapter reads on every comment lookup — read and reply-parent shape alike. */
+const COMMENT_FIELDS = 'id,message,created_time,from{id,name},parent';
+
+interface FbPaging {
+  readonly cursors?: { readonly after?: string };
+  /** Presence, not content, is what means "there is another page" (Graph API convention). */
+  readonly next?: string;
 }
 
 interface FbCommentListResponse {
   readonly data: readonly FbCommentNode[];
+  readonly paging?: FbPaging;
+}
+
+/** Meta's documented shape for "this object id does not exist" (or is not visible to us). */
+function isMissingObjectError(error: GraphHttpError): boolean {
+  const body = error.body;
+  if (body === null || typeof body !== 'object' || !('error' in body)) {
+    return false;
+  }
+  const graphError = (body as { error?: { code?: number; error_subcode?: number } }).error;
+  return graphError?.code === 100 && graphError.error_subcode === 33;
+}
+
+function normalizeFbComment(comment: FbCommentNode): NormalizedComment {
+  return {
+    platformCommentId: comment.id,
+    platformParentId: comment.parent?.id ?? null,
+    authorPlatformId: comment.from?.id ?? '',
+    authorUsername: null,
+    authorDisplayName: comment.from?.name ?? null,
+    text: comment.message,
+    platformCreatedAt: new Date(comment.created_time),
+    platformMeta: {},
+  };
 }
 
 interface FbCreatedComment {
@@ -113,21 +152,62 @@ async function findPublishedComment(
     : { platformCommentId: match.id, platformCreatedAt: new Date(match.created_time) };
 }
 
-const NOT_IMPLEMENTED_MESSAGE = 'facebook read path is not implemented yet (T084)';
-
-function listComments(
-  _ctx: AccountContext,
-  _target: PostTarget,
-  _cursor?: string,
+async function listComments(
+  graphClient: GraphClient,
+  ctx: AccountContext,
+  target: PostTarget,
+  cursor?: string,
 ): Promise<CommentPage> {
-  throw new Error(NOT_IMPLEMENTED_MESSAGE);
+  const credentials = credentialsFrom(ctx);
+  let response;
+  try {
+    response = await graphClient.request<FbCommentListResponse>(
+      credentials,
+      'GET',
+      `/${target.platformPostId}/comments`,
+      {
+        filter: 'stream',
+        fields: COMMENT_FIELDS,
+        ...(cursor === undefined ? {} : { after: cursor }),
+      },
+    );
+  } catch (error) {
+    // A page that fails must never be read as an empty-but-complete one — that would let a sync
+    // walk conclude the post has no more comments and mark the rest deleted.
+    throw classifyGraphFailure(error);
+  }
+
+  const comments = response.data.data.map(normalizeFbComment);
+  const nextCursor =
+    response.data.paging?.next === undefined ? null : (response.data.paging.cursors?.after ?? null);
+  return { comments, nextCursor };
 }
 
-function fetchComment(
-  _ctx: AccountContext,
-  _platformCommentId: string,
+async function fetchComment(
+  graphClient: GraphClient,
+  ctx: AccountContext,
+  platformCommentId: string,
 ): Promise<NormalizedComment | null> {
-  throw new Error(NOT_IMPLEMENTED_MESSAGE);
+  const credentials = credentialsFrom(ctx);
+  let response;
+  try {
+    response = await graphClient.request<FbCommentNode>(
+      credentials,
+      'GET',
+      `/${platformCommentId}`,
+      {
+        fields: COMMENT_FIELDS,
+      },
+    );
+  } catch (error) {
+    if (error instanceof GraphHttpError && isMissingObjectError(error)) {
+      // A deleted or never-existing id — the same "nothing here" the port's `null` already
+      // means, not a failure `ingest-comments.ts` (T077) should be blocked by.
+      return null;
+    }
+    throw classifyGraphFailure(error);
+  }
+  return normalizeFbComment(response.data);
 }
 
 /**
@@ -145,9 +225,9 @@ export function createFacebookAdapter(options: {
 
   return {
     platform: 'facebook',
-    listComments,
+    listComments: (ctx, target, cursor) => listComments(graphClient, ctx, target, cursor),
     publishComment: (ctx, input) => publishComment(graphClient, ctx, input),
     findPublishedComment: (ctx, probe) => findPublishedComment(graphClient, ctx, probe),
-    fetchComment,
+    fetchComment: (ctx, platformCommentId) => fetchComment(graphClient, ctx, platformCommentId),
   };
 }

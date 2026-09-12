@@ -1,14 +1,38 @@
 /**
  * Bluesky {@link CommentPlatformAdapter} (spec.md §8.3, contracts/platform-adapter.md).
  *
- * `publishComment` and `findPublishedComment` are T065; `listComments` and `fetchComment` are a
- * later wave (T083) and are left throwing rather than stubbed — a stub that quietly returned an
- * empty page would let a sync walk conclude a post has no comments and mark everything `deleted`.
+ * `publishComment` and `findPublishedComment` are T065. `listComments` and `fetchComment` (T083)
+ * walk `app.bsky.feed.getPostThread`.
+ *
+ * **Paging a tree, not a list.** `getPostThread` returns a whole subtree up to `depth` levels
+ * (`Config.BLUESKY_THREAD_DEPTH`, spec §8.3 — deployment-tunable since read cost scales with it,
+ * and S4 is the spike that will say what that cost can afford) in one call, not a flat page.
+ * `listComments`'s cursor is therefore a JSON-encoded queue of AT URIs still to expand, not a
+ * platform cursor: the initial call anchors on the post, and any reply node whose `replies` field
+ * came back empty *because the depth budget ran out* (`post.replyCount > 0` with no `replies`
+ * array — a real leaf has `replyCount: 0`) is queued for a later call to re-anchor on and keep
+ * descending ("loading truncated branches"). `nextCursor` is `null` only once that queue is empty,
+ * so a walk interrupted by a thrown error never looks complete.
+ *
+ * **Two deletion signals, kept apart.** A `notFoundPost` in the thread is the AT Protocol's
+ * explicit tombstone: the record existed and is now gone, independent of whether this walk ever
+ * finishes. It is surfaced as a `NormalizedComment` with `platformMeta.tombstone: true` and every
+ * other field an explicit placeholder — `platformMeta` is the port's documented adapter-specific
+ * extension point (`types.ts`). `fetchComment` folds the same signal into the plain `null` the
+ * port already defines for "nothing here" — one comment in play, no list to keep complete. A
+ * `blockedPost` is not a tombstone (unreadable ≠ deleted) and is skipped; ordinary absence from a
+ * *complete* walk is what any other removal falls back to, a decision for the sync walk (T086).
  */
 
 import { AppBskyFeedDefs, AppBskyFeedPost, AtpAgent } from '@atproto/api';
 import { classifyBlueskyFailure } from '#src/platforms/bluesky/errors.ts';
 import { detectFacets } from '#src/platforms/bluesky/facets.ts';
+import {
+  normalizePost,
+  parseFrontier,
+  tombstoneFor,
+  walkThread,
+} from '#src/platforms/bluesky/thread.ts';
 import {
   AuthError,
   PermanentError,
@@ -193,28 +217,83 @@ async function findPublishedComment(
   return null;
 }
 
-const NOT_IMPLEMENTED_MESSAGE =
-  'bluesky read path (listComments/fetchComment) is not implemented yet (T083)';
-
-function listComments(
-  _ctx: AccountContext,
-  _target: PostTarget,
-  _cursor?: string,
+async function listComments(
+  threadDepth: number,
+  ctx: AccountContext,
+  target: PostTarget,
+  cursor?: string,
 ): Promise<CommentPage> {
-  throw new Error(NOT_IMPLEMENTED_MESSAGE);
+  const agent = await sessionFor(ctx);
+  const [uri, ...rest] = parseFrontier(cursor, target.platformPostId);
+  if (uri === undefined) {
+    // An empty queue would mean this call should never have happened — the previous page's
+    // `nextCursor` was already `null` — but returning an empty, complete page is still correct.
+    return { comments: [], nextCursor: null };
+  }
+
+  let response: Awaited<ReturnType<typeof agent.getPostThread>>;
+  try {
+    response = await agent.getPostThread({ uri, depth: threadDepth });
+  } catch (error) {
+    // A page that fails must never be read as an empty-but-complete one — that would let the
+    // caller conclude this branch, or the whole post, has no comments.
+    throw classifyBlueskyFailure(error);
+  }
+  const { thread } = response.data;
+
+  if (!AppBskyFeedDefs.isThreadViewPost(thread)) {
+    if (uri === target.platformPostId) {
+      // The anchor post itself is gone or blocked: there is nothing to list and no walk to
+      // complete. `sync-post.ts` (T087) deactivates the target on a `PermanentError` instead of
+      // inferring deletions from what would otherwise look like an empty page.
+      throw new PermanentError(`bluesky post ${uri} is unavailable (not found or blocked)`);
+    }
+    // A branch queued from an earlier page vanished before this one ran. Only `notFoundPost` is
+    // the explicit tombstone (spec §8.3) — a `blockedPost` here is skipped, not reported deleted.
+    const comments = AppBskyFeedDefs.isNotFoundPost(thread) ? [tombstoneFor(uri, null)] : [];
+    return { comments, nextCursor: rest.length > 0 ? JSON.stringify(rest) : null };
+  }
+
+  const comments: NormalizedComment[] = [];
+  const pendingFrontier: string[] = [];
+  walkThread(thread, comments, pendingFrontier, false);
+
+  const remaining = [...rest, ...pendingFrontier];
+  return { comments, nextCursor: remaining.length > 0 ? JSON.stringify(remaining) : null };
 }
 
-function fetchComment(
-  _ctx: AccountContext,
-  _platformCommentId: string,
+async function fetchComment(
+  ctx: AccountContext,
+  platformCommentId: string,
 ): Promise<NormalizedComment | null> {
-  throw new Error(NOT_IMPLEMENTED_MESSAGE);
+  const agent = await sessionFor(ctx);
+
+  let response: Awaited<ReturnType<typeof agent.getPostThread>>;
+  try {
+    response = await agent.getPostThread({ uri: platformCommentId, depth: 0 });
+  } catch (error) {
+    throw classifyBlueskyFailure(error);
+  }
+  const { thread } = response.data;
+
+  if (!AppBskyFeedDefs.isThreadViewPost(thread)) {
+    // `notFoundPost` (deleted) and `blockedPost` (inaccessible) both mean "no comment to hand
+    // back" for a single lookup — the port's `null` already carries that, so ancestor resolution
+    // (T077) needs no separate tombstone case here the way `listComments`'s page shape does.
+    return null;
+  }
+  return normalizePost(thread.post);
 }
 
-export const blueskyAdapter: CommentPlatformAdapter = {
-  platform: 'bluesky',
-  listComments,
-  publishComment,
-  findPublishedComment,
-  fetchComment,
-};
+/** Builds the Bluesky adapter. `options.threadDepth` is `Config.BLUESKY_THREAD_DEPTH` (see above). */
+export function createBlueskyAdapter(options: {
+  readonly threadDepth: number;
+}): CommentPlatformAdapter {
+  return {
+    platform: 'bluesky',
+    listComments: (ctx, target, cursor) => listComments(options.threadDepth, ctx, target, cursor),
+    publishComment,
+    findPublishedComment,
+    fetchComment,
+  };
+}

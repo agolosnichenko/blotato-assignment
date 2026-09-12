@@ -139,6 +139,15 @@ export const commentSyncTargets = pgTable(
     nextSyncAt: timestamp('next_sync_at', { withTimezone: true }),
     lastError: text('last_error'),
     manualCooldownUntil: timestamp('manual_cooldown_until', { withTimezone: true }),
+    // The instant §7.3's age bands are measured from — not `published_at`, because for a post
+    // first seen through an ingested comment (never published through this service) it is only
+    // that comment's `occurred_at`, a lower bound on the post's age, not a publication time
+    // (spec.md §18). For a post registered through the `PostPublished` port it is that post's
+    // real `published_at`. No default: a row with no real anchor should fail loudly at insert
+    // rather than silently claim the post was just published (the most aggressive polling band) —
+    // every write path (`ensureTarget`, and any fixture seeding this table directly) must supply
+    // one explicitly.
+    ageAnchorAt: timestamp('age_anchor_at', { withTimezone: true }).notNull(),
   },
   (table) => [
     uniqueIndex('comment_sync_targets_social_account_platform_post_id_key').on(

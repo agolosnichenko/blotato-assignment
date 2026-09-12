@@ -1,5 +1,9 @@
 // oxlint-disable max-dependencies -- an integration test against real Postgres, real Redis and a
 // second disposable Redis needs the harness, queue and modules under test all named here.
+// oxlint-disable max-lines -- four independent failure scenarios (commit visibility, no
+// double-relay, surviving a dropped queue, T075's four event-payload cases), each needing its own
+// seed data and its own Redis/queue setup, is the file's actual scope — the same reasoning
+// `publish-comment.integration.test.ts` and `create-reply.integration.test.ts` give for their length.
 
 /**
  * The transactional outbox under failure (T054, FR-025, FR-033, SC-011, D9): (1) invisible
@@ -272,12 +276,124 @@ function registerDroppedQueueTests(getHarness: () => Harness): void {
   });
 }
 
-// T075 adds `registerEventPayloadTests(getHarness: () => Harness): void`, wrapping one `it` per
-// event type (comment.received, comment.posted, comment.failed, comment.deleted) in its own
-// `describe('event payloads', ...)`, asserting the published envelope's `data` matches
-// contracts/domain-events.md — called from the suite below alongside the other `register*` calls,
-// an addition rather than a rewrite of this file. Vitest errors on an empty `describe`, so there
-// is no placeholder block here to call yet.
+/**
+ * T075: one `it` per event type in contracts/domain-events.md's payload table, each appending an
+ * outbox row carrying every field that type's row documents, relaying it, and asserting the
+ * envelope the queue receives — `{ id, type, version, occurredAt, workspaceId, data }` — matches
+ * exactly, `data` included. This pins the relay's own contract (it must not drop, rename or add a
+ * field between the outbox row and the queue envelope); whether a *producer* like
+ * `publish-comment.ts` fills `data` correctly for its own event types is that producer's own test
+ * (`publish-comment.integration.test.ts` already asserts `comment.posted`/`comment.failed` land
+ * with one row each — this file adds the exact-shape assertion those tests don't make).
+ */
+/** Appends one outbox row of `type`/`data`, relays it, and returns the envelope the queue received. */
+async function relayAndFetchEnvelope(
+  harness: Harness,
+  type: string,
+  aggregateId: string,
+  data: Record<string, unknown>,
+): Promise<unknown> {
+  const { queue, connection } = buildQueue(harness.containers.redisUrl);
+  try {
+    const workspaceId = generateId();
+    let eventId = '';
+    await harness.database.drizzle.transaction(async (tx: OutboxTransaction) => {
+      eventId = await appendToOutbox(tx, { workspaceId, type, aggregateId, data });
+    });
+
+    await relayOutboxBatch(harness.database, queue);
+    const job = await queue.getJob(eventId);
+
+    return { job, eventId, workspaceId };
+  } finally {
+    await queue.close();
+    connection.disconnect();
+  }
+}
+
+/**
+ * Asserts the envelope the queue received for one event `type` matches `data` exactly — the
+ * `{ id, type, version, occurredAt, workspaceId, data }` shape contracts/domain-events.md defines,
+ * `data` field for field, nothing dropped and nothing added.
+ */
+async function assertEnvelopeMatchesContract(
+  harness: Harness,
+  type: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const result = (await relayAndFetchEnvelope(harness, type, generateId(), data)) as {
+    job?: { data: unknown };
+    eventId: string;
+    workspaceId: string;
+  };
+  expect(result.job?.data).toEqual({
+    id: result.eventId,
+    type,
+    version: 1,
+    occurredAt: expect.any(String),
+    workspaceId: result.workspaceId,
+    data,
+  });
+}
+
+/** T075's four cases — one payload per `contracts/domain-events.md` row, asserted exactly. */
+const EVENT_PAYLOAD_CASES: ReadonlyArray<{
+  readonly type: string;
+  readonly description: string;
+  readonly data: Record<string, unknown>;
+}> = [
+  {
+    type: 'comment.received',
+    description:
+      'carries every field contracts/domain-events.md lists, including isOwn and ingestionSource',
+    data: {
+      commentId: generateId(),
+      socialAccountId: generateId(),
+      platform: 'bluesky',
+      postId: generateId(),
+      platformPostId: 'at://did:plc:test/app.bsky.feed.post/post-1',
+      parentCommentId: null,
+      isOwn: false,
+      authorPlatformId: 'author-1',
+      text: 'a comment discovered by ingestion',
+      ingestionSource: 'sync',
+    },
+  },
+  {
+    type: 'comment.posted',
+    description: 'carries every field contracts/domain-events.md lists',
+    data: {
+      commentId: generateId(),
+      socialAccountId: generateId(),
+      platform: 'bluesky',
+      postId: generateId(),
+      parentCommentId: null,
+      platformCommentId: 'at://did:plc:test/app.bsky.feed.post/comment-1',
+    },
+  },
+  {
+    type: 'comment.failed',
+    description: 'carries every field contracts/domain-events.md lists',
+    data: {
+      commentId: generateId(),
+      errorCode: 'PLATFORM_REJECTED',
+      errorMessage: 'the platform rejected the comment',
+    },
+  },
+  {
+    type: 'comment.deleted',
+    description: 'carries every field contracts/domain-events.md lists',
+    data: { commentId: generateId(), socialAccountId: generateId(), platform: 'bluesky' },
+  },
+];
+
+function registerEventPayloadTests(getHarness: () => Harness): void {
+  describe('event payloads (FR-024, D9) — the envelope the queue receives, field for field', () => {
+    it.each(EVENT_PAYLOAD_CASES)('$type $description', async ({ type, data }) => {
+      await assertEnvelopeMatchesContract(getHarness(), type, data);
+    });
+  });
+}
 
 describe('outbox under failure', () => {
   let harness: Harness;
@@ -297,4 +413,5 @@ describe('outbox under failure', () => {
   registerCommitVisibilityTests(() => harness);
   registerRelayTests(() => harness);
   registerDroppedQueueTests(() => harness);
+  registerEventPayloadTests(() => harness);
 });

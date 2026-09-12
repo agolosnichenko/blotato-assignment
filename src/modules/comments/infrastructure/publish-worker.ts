@@ -54,7 +54,7 @@ import { createAccountHealth } from '#src/modules/comments/infrastructure/accoun
 import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { createContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import { comments } from '#src/modules/comments/infrastructure/schema.ts';
-import { blueskyAdapter } from '#src/platforms/bluesky/adapter.ts';
+import { createBlueskyAdapter } from '#src/platforms/bluesky/adapter.ts';
 import { createFacebookAdapter } from '#src/platforms/meta/facebook-adapter.ts';
 import { createInstagramAdapter } from '#src/platforms/meta/instagram-adapter.ts';
 import type { AccountCredentials, Accounts, Workspaces } from '#src/modules/platform-core/ports.ts';
@@ -159,7 +159,7 @@ function buildAdapterRegistry(config: Config): (platform: Platform) => CommentPl
   const adapters: Partial<Record<Platform, CommentPlatformAdapter>> = {
     instagram: createInstagramAdapter({ apiVersion: config.META_GRAPH_API_VERSION }),
     facebook: createFacebookAdapter({ apiVersion: config.META_GRAPH_API_VERSION }),
-    bluesky: blueskyAdapter,
+    bluesky: createBlueskyAdapter({ threadDepth: config.BLUESKY_THREAD_DEPTH }),
   };
 
   return (platform: Platform): CommentPlatformAdapter => {

@@ -8,6 +8,13 @@
       "when": 1789141354441,
       "tag": "0000_oval_sage",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789252687380,
+      "tag": "0001_daffy_garia",
+      "breakpoints": true
     }
   ]
 }

@@ -485,7 +485,7 @@ platform side and verify a complete refresh marks it deleted.
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T071 [P] [US3] Create `src/modules/comments/application/ingest-comments.integration.test.ts`
+- [X] T071 [P] [US3] Create `src/modules/comments/application/ingest-comments.integration.test.ts`
       (V4): the same comment arriving by push and then by refresh exists once and produces one
       `comment.received`; a later event carrying edited text updates the stored comment rather than
       inserting a second; redelivery over a 36-hour window changes neither count; a reply whose
@@ -500,7 +500,7 @@ platform side and verify a complete refresh marks it deleted.
       SC-004, which acknowledgement latency does not cover: with the clock under test control,
       a delivered event is **readable through the API within 60 seconds** of delivery — intake plus
       `webhook-process` plus the upsert, end to end, not just the `200` (FR-016, SC-004, §7.2)
-- [ ] T073 [P] [US3] Create `src/modules/comments/application/sync-post.integration.test.ts` (V4): a
+- [X] T073 [P] [US3] Create `src/modules/comments/application/sync-post.integration.test.ts` (V4): a
       complete walk marks platform-side deletions **with `text` and the author fields nulled and the
       parent's `reply_count` decremented, identical to a webhook delete** (FR-030, T086); a walk
       interrupted midway marks **zero**; a post's first walk tags its comments `backfill`; a post
@@ -508,11 +508,11 @@ platform side and verify a complete refresh marks it deleted.
       not polled — asserted against a non-default `RETENTION_DAYS` so a hard-coded 45 fails the test
       (U3, T085); an ingested comment on a post never published through the platform creates a
       refresh target of its own (FR-018, FR-019, FR-020, FR-030, SC-004, SC-008)
-- [ ] T074 [P] [US3] Create `src/modules/comments/http/sync-request.integration.test.ts` (V4): a
+- [X] T074 [P] [US3] Create `src/modules/comments/http/sync-request.integration.test.ts` (V4): a
       manual refresh returns `202` with a trackable job; a second request inside the 60-second
       cooldown → `429 SYNC_COOLDOWN`; a request while a job is running → `202` carrying that same
       job; a deactivated target is run anyway and its schedule restored on success (FR-021, D19)
-- [ ] T075 [P] [US3] Assert in `src/modules/comments/infrastructure/outbox.integration.test.ts` that
+- [X] T075 [P] [US3] Assert in `src/modules/comments/infrastructure/outbox.integration.test.ts` that
       one `comment.received`, one `comment.posted`, one `comment.failed` and one `comment.deleted`
       reach the queue carrying exactly the fields contracts/domain-events.md lists, including
       `isOwn` and `ingestionSource` (FR-024, D9)
@@ -554,7 +554,7 @@ platform side and verify a complete refresh marks it deleted.
 - [ ] T082 [P] [US3] Add the unprocessed-delivery sweeper to
       `src/modules/comments/infrastructure/sweepers.ts`: re-enqueue `webhook_deliveries` unprocessed
       for more than five minutes (§7.2 step 5)
-- [ ] T083 [US3] Implement `listComments` and `fetchComment` in
+- [X] T083 [US3] Implement `listComments` and `fetchComment` in
       `src/platforms/bluesky/adapter.ts`: `app.bsky.feed.getPostThread` with the configured depth,
       loading truncated branches, normalizing AT URIs and `cid`, deciding "own" by matching the
       author DID, and surfacing a `notFoundPost` marker as an **explicit tombstone** that may mark
@@ -566,7 +566,7 @@ platform side and verify a complete refresh marks it deleted.
       `from.id` against the account (§8.2). *(The Instagram half is blocked by T070 — S2 is the spike
       that establishes whether those reads return data at all; the Facebook half is not gated, since
       S1 concerns webhook delivery rather than reads)*
-- [ ] T085 [US3] Create `src/modules/comments/infrastructure/sync-target-repository.ts`:
+- [X] T085 [US3] Create `src/modules/comments/infrastructure/sync-target-repository.ts`:
       create-or-get a target from the `PostPublished` port and from the first ingested comment on an
       external post — **the only way an external post becomes tracked** — plus the age-band
       `next_sync_at` computation reading the configurable §7.3 intervals (< 24 h, 1–7 d,
@@ -613,7 +613,7 @@ the external post's comment.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T091 [P] [US4] Create `src/modules/comments/http/inbox.integration.test.ts` (V8): comments on
+- [X] T091 [P] [US4] Create `src/modules/comments/http/inbox.integration.test.ts` (V8): comments on
       an internal and an external post both appear newest first, the external one with
       `postId: null`; `since` / `until` return only what occurred inside the window; `isOwn`
       separates the account's own comments from the audience's, **including an own comment that

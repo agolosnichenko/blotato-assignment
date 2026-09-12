@@ -1,0 +1,1 @@
+ALTER TABLE "comment_sync_targets" ADD COLUMN "age_anchor_at" timestamp with time zone NOT NULL;

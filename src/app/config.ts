@@ -41,6 +41,7 @@ const envSchema = z.object({
   META_APP_SECRET_INSTAGRAM: z.string().min(1),
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(1),
   META_GRAPH_API_VERSION: z.string().min(1).default('v21.0'),
+  BLUESKY_THREAD_DEPTH: positiveInt().default(10),
 
   RETENTION_DAYS: positiveInt().default(45),
 

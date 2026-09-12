@@ -248,7 +248,7 @@ Constraints and indexes:
 
 | Table | Purpose and columns |
 |-------|---------------------|
-| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`. `UNIQUE (social_account_id, platform_post_id)` |
+| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`, `age_anchor_at` (§18). `UNIQUE (social_account_id, platform_post_id)` |
 | `comment_sync_jobs` | API resource (D19): `id`, `workspace_id`, `target_id`, `trigger` (`manual` / `scheduled` / `post_published`), `status` (`queued` / `running` / `succeeded` / `failed`), `stats` (jsonb: fetched / inserted / updated / deleted), `error`, `created_at`, `started_at`, `finished_at`. At most one active job per target (partial unique index) |
 | `webhook_deliveries` | Raw deliveries: `id`, `provider` (`meta`), `payload` (jsonb), `received_at`, `processed_at`, `attempts`, `error`. Retention 7 days |
 | `outbox_events` | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` (jsonb), `created_at`, `published_at`, `attempts` |
@@ -682,3 +682,16 @@ implementation.
   "An unhandled failure in the service; `detail` carries no internal text." It is a synchronous code
   and never appears as a comment's `error.code`. This extends the catalogue rather than revising any
   decision, so no D-number changes.
+- **`comment_sync_targets.age_anchor_at` (extends §5.3 and §7.3).** §7.3 schedules a refresh by
+  **post age**, but the table as specified carries no timestamp to measure that age from, and the
+  alternatives both fail: reading `posts.published_at` through the `Posts` port would be one
+  cross-boundary call per due target on every scheduler tick (an N+1 across a service boundary, every
+  minute), and for a post never published through the platform there is no projection row to read at
+  all — while §7.3 requires exactly those posts to be tracked. Added: `age_anchor_at timestamptz not
+  null` — the instant the age bands are measured from. For a post registered through the
+  `PostPublished` port it is that post's `published_at`; for an external post first seen through an
+  ingested comment it is that comment's `occurred_at`, which establishes only that the post existed by
+  then. The column is named for what it is used for rather than `published_at`, because for an
+  external post it is a lower bound and not a publication time, and a name that implied otherwise
+  would invite a reader to treat it as one. This adds a column; it revises no decision, so no
+  D-number changes.
