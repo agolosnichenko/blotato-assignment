@@ -48,7 +48,10 @@ import { and, eq } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createIngestComments } from '#src/modules/comments/application/ingest-comments.ts';
+import {
+  createIngestComments,
+  type IngestTarget,
+} from '#src/modules/comments/application/ingest-comments.ts';
 import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import {
   comments,
@@ -139,7 +142,11 @@ function ingestedComment(overrides: {
   };
 }
 
-function target(account: SeededAccount, platformPostId: string, postId: string | null = null) {
+function target(
+  account: SeededAccount,
+  platformPostId: string,
+  postId: string | null = null,
+): IngestTarget {
   return {
     workspaceId: account.workspaceId,
     socialAccountId: account.socialAccountId,

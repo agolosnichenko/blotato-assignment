@@ -28,6 +28,11 @@
  * by "restoring" a value that was never set.
  */
 
+// oxlint-disable max-lines -- one repository implementing the age-band schedule (T085) plus the
+// lifecycle writes T086/T087/T089 need (`deactivate`, `setManualCooldown`, `computeNextSyncAtFor`)
+// — splitting the lifecycle methods out would duplicate `TARGET_COLUMNS` and the concurrency-safe
+// `ensureTarget` pattern they all share instead of removing any of it.
+
 import { and, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
@@ -91,8 +96,27 @@ export interface SyncTargetRepository {
    */
   ensureTarget(input: EnsureTargetInput): Promise<SyncTargetRecord>;
   findById(targetId: string): Promise<SyncTargetRecord | null>;
+  /** Resolves the target for a post this service published (`request-sync.ts`, T089). */
+  findByPostId(postId: string): Promise<SyncTargetRecord | null>;
   /** `lastSyncedAt`/`nextSyncAt` are supplied by the caller, not recomputed here (T086 owns that). */
   markSyncSucceeded(targetId: string, input: MarkSyncSucceededInput): Promise<void>;
+  /**
+   * §7.3: a `PermanentError` from the platform (the post is gone or no longer accessible)
+   * deactivates the target — `next_sync_at = null`, `reason` recorded in `last_error` — without
+   * touching `last_synced_at` (T087). A manual request (`request-sync.ts`) still runs against a
+   * deactivated target; only a *successful* walk's own `markSyncSucceeded` call restores the
+   * schedule, by computing a real `next_sync_at` again.
+   */
+  deactivate(targetId: string, reason: string): Promise<void>;
+  /** D19's 60-second manual cooldown: the instant a second manual request starts being rejected. */
+  setManualCooldown(targetId: string, manualCooldownUntil: Date): Promise<void>;
+  /**
+   * The §7.3 age-band schedule for one target, bound to this repository's own `config` — the seam
+   * that lets `sync-post.ts` (T086) compute `markSyncSucceeded`'s `nextSyncAt` without needing a
+   * `SyncIntervalsConfig` of its own in its dependency shape (the contract test's `deps` has none).
+   * A thin wrapper over the exported pure {@link computeNextSyncAt}, not a second implementation.
+   */
+  computeNextSyncAtFor(platform: Platform, ageAnchorAt: Date, now: Date): Date | null;
 }
 
 const MS_PER_MINUTE = 60_000;
@@ -231,6 +255,15 @@ async function findById(db: NodePgDatabase, targetId: string): Promise<SyncTarge
   return row ?? null;
 }
 
+async function findByPostId(db: NodePgDatabase, postId: string): Promise<SyncTargetRecord | null> {
+  const [row] = await db
+    .select(TARGET_COLUMNS)
+    .from(commentSyncTargets)
+    .where(eq(commentSyncTargets.postId, postId))
+    .limit(1);
+  return row ?? null;
+}
+
 async function markSyncSucceeded(
   db: NodePgDatabase,
   targetId: string,
@@ -247,6 +280,25 @@ async function markSyncSucceeded(
     .where(eq(commentSyncTargets.id, targetId));
 }
 
+/** §7.3: deactivates a target — `next_sync_at = null`, `reason` recorded — without touching `last_synced_at`. */
+async function deactivate(db: NodePgDatabase, targetId: string, reason: string): Promise<void> {
+  await db
+    .update(commentSyncTargets)
+    .set({ nextSyncAt: null, lastError: reason })
+    .where(eq(commentSyncTargets.id, targetId));
+}
+
+async function setManualCooldown(
+  db: NodePgDatabase,
+  targetId: string,
+  manualCooldownUntil: Date,
+): Promise<void> {
+  await db
+    .update(commentSyncTargets)
+    .set({ manualCooldownUntil })
+    .where(eq(commentSyncTargets.id, targetId));
+}
+
 /** Backs {@link SyncTargetRepository}; construct once per database handle and config (T085). */
 export function createSyncTargetRepository(
   db: NodePgDatabase,
@@ -255,6 +307,12 @@ export function createSyncTargetRepository(
   return {
     ensureTarget: (input) => ensureTarget(db, config, input),
     findById: (targetId) => findById(db, targetId),
+    findByPostId: (postId) => findByPostId(db, postId),
     markSyncSucceeded: (targetId, input) => markSyncSucceeded(db, targetId, input),
+    deactivate: (targetId, reason) => deactivate(db, targetId, reason),
+    setManualCooldown: (targetId, manualCooldownUntil) =>
+      setManualCooldown(db, targetId, manualCooldownUntil),
+    computeNextSyncAtFor: (platform, ageAnchorAt, now) =>
+      computeNextSyncAt({ platform, ageAnchorAt, now, config }),
   };
 }

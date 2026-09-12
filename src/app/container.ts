@@ -67,7 +67,14 @@ export interface Container {
    */
   readonly contactQuota: ContactQuota;
   readonly publishQueue: Queue;
-  /** Closes the Postgres pool, the publish queue's own connections, and disconnects Redis. */
+  /**
+   * The `comment-sync` queue handle (§7.3, §9.2, D19) — the api role's manual-refresh route
+   * (`request-sync.ts`) enqueues onto it, the worker role's `sync-scheduler.ts` both enqueues
+   * (from the scheduler tick) and consumes it. Built once here for the same reason `publishQueue`
+   * is (module docstring).
+   */
+  readonly syncQueue: Queue;
+  /** Closes the Postgres pool, both queues' own connections, and disconnects Redis. */
   close(): Promise<void>;
 }
 
@@ -111,6 +118,7 @@ export function buildContainer(options: BuildContainerOptions = {}): Container {
   const ports = buildPorts(database, toKeyMaterial(config));
   const contactQuota = createContactQuota(database.drizzle, ports.workspaces);
   const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
+  const syncQueue = new Queue(QUEUE_NAMES.commentSync, { connection: redis });
 
   return {
     config,
@@ -119,8 +127,10 @@ export function buildContainer(options: BuildContainerOptions = {}): Container {
     ports,
     contactQuota,
     publishQueue,
+    syncQueue,
     async close() {
       await publishQueue.close();
+      await syncQueue.close();
       await database.close();
       redis.disconnect();
     },

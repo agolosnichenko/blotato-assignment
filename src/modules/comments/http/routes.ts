@@ -2,6 +2,8 @@
  * Read routes (T049): `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies`,
  * `GET /v1/comments/:commentId`. Write routes (T069): `POST /v1/posts/:postId/comments`,
  * `POST /v1/comments/:commentId/replies`. Capability registry route (T098): `GET /v1/platforms`.
+ * Sync routes (T090, D19): `POST /v1/posts/:postId/comments/sync`,
+ * `GET /v1/comment-sync-jobs/:jobId`.
  *
  * Registered from `src/app/api.ts` as `app.register(registerCommentReadRoutes(deps))` /
  * `app.register(registerCommentWriteRoutes(deps))` / `app.register(registerPlatformRoutes())` —
@@ -27,6 +29,7 @@ import { createTopLevelComment } from '#src/modules/comments/application/create-
 import { getComment } from '#src/modules/comments/application/get-comment.ts';
 import { listPostComments } from '#src/modules/comments/application/list-post-comments.ts';
 import { listReplies } from '#src/modules/comments/application/list-replies.ts';
+import type { RequestSync } from '#src/modules/comments/application/request-sync.ts';
 import type { CommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { ContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import {
@@ -38,8 +41,11 @@ import {
   platformsPageSchema,
   postCommentsPageSchema,
   postIdParamsSchema,
+  syncJobIdParamsSchema,
+  syncJobSchema,
   toCommentResponse,
   toPlatformCapabilitiesResponse,
+  toSyncJobResponse,
 } from '#src/modules/comments/http/schemas.ts';
 import type { Accounts, Posts } from '#src/modules/platform-core/ports.ts';
 import { platformRegistry } from '#src/platforms/registry.ts';
@@ -65,6 +71,10 @@ export interface CommentWriteRoutesDeps {
   readonly contactQuota: ContactQuota;
   readonly publishQueue: Queue;
   readonly logger: Logger;
+}
+
+export interface SyncRoutesDeps {
+  readonly requestSync: RequestSync;
 }
 
 const postCommentsQuerySchema = paginationQuerySchema('desc');
@@ -266,6 +276,62 @@ function registerCreateReplyRoute(
         .send(toCommentResponse(comment));
     },
   );
+}
+
+/**
+ * Builds the `POST /v1/posts/:postId/comments/sync` route (T090, D19) — `request-sync.ts`'s own
+ * `RequestSync.request` already decides `202` (active job, or a freshly created one) vs.
+ * `429 SYNC_COOLDOWN`; this handler only maps its result/thrown `ApiError` onto the response.
+ */
+function registerRequestSyncRoute(
+  app: Parameters<FastifyPluginAsyncZod>[0],
+  deps: SyncRoutesDeps,
+): void {
+  app.post(
+    '/v1/posts/:postId/comments/sync',
+    { schema: { params: postIdParamsSchema, response: { 202: syncJobSchema } } },
+    async (request, reply) => {
+      const job = await deps.requestSync.request({
+        workspaceId: request.workspaceId,
+        postId: request.params.postId,
+      });
+      return reply.code(202).send(toSyncJobResponse(job));
+    },
+  );
+}
+
+/** Builds the `GET /v1/comment-sync-jobs/:jobId` route (T090). */
+function registerGetSyncJobRoute(
+  app: Parameters<FastifyPluginAsyncZod>[0],
+  deps: SyncRoutesDeps,
+): void {
+  app.get(
+    '/v1/comment-sync-jobs/:jobId',
+    { schema: { params: syncJobIdParamsSchema, response: { 200: syncJobSchema } } },
+    async (request) => {
+      const job = await deps.requestSync.getJob({
+        workspaceId: request.workspaceId,
+        jobId: request.params.jobId,
+      });
+      return toSyncJobResponse(job);
+    },
+  );
+}
+
+/**
+ * Builds the plugin `src/app/api.ts` registers for the two sync routes (T090, D19) — registered
+ * inside its own plugin, not as bare `app.post()`/`app.get()` calls, for the same rate-limit-hook
+ * ordering reason the module docstring gives for the write routes.
+ *
+ * Returns:
+ *   A Fastify plugin, meant to be passed to `app.register(...)`.
+ */
+export function registerSyncRoutes(deps: SyncRoutesDeps): FastifyPluginAsyncZod {
+  return (app) => {
+    registerRequestSyncRoute(app, deps);
+    registerGetSyncJobRoute(app, deps);
+    return Promise.resolve();
+  };
 }
 
 /**

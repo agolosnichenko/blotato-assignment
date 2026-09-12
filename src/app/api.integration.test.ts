@@ -76,6 +76,7 @@ async function assertReadinessDegradesWhenRedisIsGone(harness: Harness): Promise
   // A fresh queue handle on this test's own disposable Redis — `harness.ports`/`harness.contactQuota`
   // only ever touch Postgres, so they are safe to reuse against the shared `harness.database`.
   const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
+  const syncQueue = new Queue(QUEUE_NAMES.commentSync, { connection: redis });
   const app = buildApi({
     config,
     database: harness.database,
@@ -83,6 +84,7 @@ async function assertReadinessDegradesWhenRedisIsGone(harness: Harness): Promise
     ports: harness.ports,
     contactQuota: harness.contactQuota,
     publishQueue,
+    syncQueue,
   });
   await app.ready();
 
@@ -101,6 +103,7 @@ async function assertReadinessDegradesWhenRedisIsGone(harness: Harness): Promise
   } finally {
     await app.close();
     await publishQueue.close();
+    await syncQueue.close();
     redis.disconnect();
   }
 }

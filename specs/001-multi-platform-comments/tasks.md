@@ -519,13 +519,13 @@ platform side and verify a complete refresh marks it deleted.
 
 ### Implementation for User Story 3
 
-- [ ] T076 [US3] Create `src/modules/comments/application/ingest-comments.ts` — **the single upsert
+- [X] T076 [US3] Create `src/modules/comments/application/ingest-comments.ts` — **the single upsert
       path shared by push and refresh**: `INSERT ... ON CONFLICT (social_account_id,
       platform_comment_id) DO UPDATE` so an edit updates the text; on a new comment increment the
       parent's `reply_count` and the root's `last_activity_at` and write outbox `comment.received`;
       on a delete event set `status = deleted`, null `text` and the author fields, decrement the
       parent's `reply_count` and write outbox `comment.deleted` (§7.2 steps 3–4, FR-017, FR-030)
-- [ ] T077 [US3] Implement ancestor resolution in
+- [X] T077 [US3] Implement ancestor resolution in
       `src/modules/comments/application/ingest-comments.ts`: when the parent is unknown locally, walk
       up with `adapter.fetchComment` until a known ancestor or the top-level comment is found, rather
       than storing an orphan; set `depth` and `root_comment_id` from the resolved chain (FR-022)
@@ -559,7 +559,7 @@ platform side and verify a complete refresh marks it deleted.
       loading truncated branches, normalizing AT URIs and `cid`, deciding "own" by matching the
       author DID, and surfacing a `notFoundPost` marker as an **explicit tombstone** that may mark
       that comment deleted on its own — while absence still requires a complete walk (§8.3, FR-019)
-- [ ] T084 [US3] Implement `listComments` and `fetchComment` in
+- [X] T084 [US3] Implement `listComments` and `fetchComment` in
       `src/platforms/meta/instagram-adapter.ts` (`GET /{media-id}/comments` with the `replies`
       expansion) and `src/platforms/meta/facebook-adapter.ts`
       (`GET /{post-id}/comments?filter=stream`), paging to exhaustion and deciding "own" by matching
@@ -574,7 +574,7 @@ platform side and verify a complete refresh marks it deleted.
       `RETENTION_DAYS`, never from a literal 45**: FR-018 ties "stop tracking" to the retention
       window, so a deployment that shortens retention would otherwise keep polling posts whose
       threads the purge has already removed (FR-018, D13, D15)
-- [ ] T086 [US3] Create `src/modules/comments/application/sync-post.ts`: walk every page through the
+- [X] T086 [US3] Create `src/modules/comments/application/sync-post.ts`: walk every page through the
       adapter, run each item through the shared upsert path, and only after a **complete** successful
       walk mark absent comments `deleted`; an interrupted walk infers nothing. Tag everything found
       by a target's first walk `backfill`, and everything later `sync`. The deletion goes through the
@@ -582,18 +582,18 @@ platform side and verify a complete refresh marks it deleted.
       author fields are nulled, the parent's `reply_count` is decremented and outbox
       `comment.deleted` is written here exactly as there. A deletion detected by refresh must not be
       a second, weaker code path that leaves PII behind (FR-019, FR-020, FR-030, SC-008, A10)
-- [ ] T087 [US3] Handle target lifecycle in `src/modules/comments/application/sync-post.ts`: a
+- [X] T087 [US3] Handle target lifecycle in `src/modules/comments/application/sync-post.ts`: a
       `PermanentError` deactivates the target (`next_sync_at = null`, reason in `last_error`) without
       inferring deletions, while a `RetryableError` keeps the schedule (§7.3)
-- [ ] T088 [US3] Create `src/modules/comments/infrastructure/sync-scheduler.ts`: a repeatable job
+- [X] T088 [US3] Create `src/modules/comments/infrastructure/sync-scheduler.ts`: a repeatable job
       running every minute that selects `next_sync_at <= now()` with `FOR UPDATE SKIP LOCKED` and
       enqueues `comment-sync`, plus the `comment-sync` worker with a per-account token bucket;
       register both in `src/app/worker.ts` (§7.3, §9.2)
-- [ ] T089 [US3] Create `src/modules/comments/application/request-sync.ts` implementing D19: an
+- [X] T089 [US3] Create `src/modules/comments/application/request-sync.ts` implementing D19: an
       active job exists → return that job; `manual_cooldown_until > now()` → `429 SYNC_COOLDOWN`;
       otherwise create a `comment_sync_jobs` row with `trigger: manual`, set the cooldown, and run a
       deactivated target too, restoring its schedule on success
-- [ ] T090 [US3] Add `POST /v1/posts/:postId/comments/sync` (`202 SyncJob`) and
+- [X] T090 [US3] Add `POST /v1/posts/:postId/comments/sync` (`202 SyncJob`) and
       `GET /v1/comment-sync-jobs/:jobId` (`200 SyncJob` with `stats` carrying `fetched`, `inserted`,
       `updated`, `deleted`) to `src/modules/comments/http/routes.ts`
 

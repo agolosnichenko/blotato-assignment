@@ -2,6 +2,12 @@ import { pathToFileURL } from 'node:url';
 import { Queue, Worker } from 'bullmq';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { createPublishWorker } from '#src/modules/comments/infrastructure/publish-worker.ts';
+import {
+  createSyncScheduler,
+  createSyncWorker,
+  type SyncScheduler,
+} from '#src/modules/comments/infrastructure/sync-scheduler.ts';
+import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import { createStuckWorkSweeper } from '#src/modules/comments/infrastructure/sweepers.ts';
 import { createLogger } from '#src/shared/logger.ts';
 import type { Logger } from 'pino';
@@ -9,24 +15,30 @@ import { QUEUE_NAMES } from '#src/shared/queues.ts';
 
 const SWEEP_STUCK_WORK_JOB = 'sweep-stuck-work';
 const SWEEP_INTERVAL_MS = 60_000;
+const SYNC_SCHEDULER_TICK_JOB = 'sync-due-targets';
+const SYNC_SCHEDULER_TICK_INTERVAL_MS = 60_000;
 
 /**
- * Dispatches one `scheduler` queue job by name. Every job this queue will ever carry (this
- * sweeper today; the sync scheduler, the outbox relay and the purge job in later tasks) is added
+ * Dispatches one `scheduler` queue job by name. Every job this queue will ever carry (the two
+ * sweepers, the sync scheduler tick; the outbox relay and the purge job in later tasks) is added
  * here rather than as a separate `Worker`, because **`scheduler` runs at concurrency 1** — a
  * second `Worker` instance on the same queue would defeat that regardless of its own concurrency
- * setting. `FOR UPDATE SKIP LOCKED` (outbox relay) and `jobId = comment.id` (this sweeper) stop a
- * second runner from corrupting data, but not from doubling work a first runner already selected
- * and has not yet stamped — concurrency 1 is what actually keeps "published once" and "swept
- * once" true (D14, §9.2).
+ * setting. `FOR UPDATE SKIP LOCKED` (the outbox relay, the sync scheduler tick) and
+ * `jobId = comment.id` (the stuck-work sweeper) stop a second runner from corrupting data, but not
+ * from doubling work a first runner already selected and has not yet stamped — concurrency 1 is
+ * what actually keeps "published once" and "swept once" true (D14, §9.2).
  */
 async function processSchedulerJob(
   jobName: string | undefined,
   sweeper: ReturnType<typeof createStuckWorkSweeper>,
+  syncScheduler: SyncScheduler,
 ): Promise<void> {
   switch (jobName) {
     case SWEEP_STUCK_WORK_JOB:
       await sweeper.sweep();
+      return;
+    case SYNC_SCHEDULER_TICK_JOB:
+      await syncScheduler.tick();
       return;
     default:
       throw new Error(`worker: unknown scheduler job "${String(jobName)}"`);
@@ -35,14 +47,17 @@ async function processSchedulerJob(
 
 interface Runtime {
   readonly publishWorker: Worker;
+  readonly syncWorker: Worker;
   readonly schedulerWorker: Worker;
   readonly publishQueue: Queue;
+  readonly syncQueue: Queue;
   readonly schedulerQueue: Queue;
 }
 
-/** Builds and starts every BullMQ worker this role owns, on the container's `commentPublish` queue. */
+/** Builds and starts every BullMQ worker this role owns, on the container's queues. */
 function buildRuntime(container: Container, logger: Logger): Runtime {
   const publishQueue = container.publishQueue;
+  const syncQueue = container.syncQueue;
   const schedulerQueue = new Queue(QUEUE_NAMES.scheduler, { connection: container.redis });
 
   const publishWorker = createPublishWorker({
@@ -60,21 +75,39 @@ function buildRuntime(container: Container, logger: Logger): Runtime {
     publishQueue,
   });
 
+  // `container.config` carries every `SyncIntervalsConfig` field (plus others this repository
+  // does not read) — see `src/app/config.ts`'s `SYNC_INTERVALS_*`/`RETENTION_DAYS` keys.
+  const syncTargetRepository = createSyncTargetRepository(
+    container.database.drizzle,
+    container.config,
+  );
+  const syncScheduler = createSyncScheduler({ database: container.database.drizzle, syncQueue });
+  const syncWorker = createSyncWorker({
+    database: container.database.drizzle,
+    redis: container.redis,
+    config: container.config,
+    accounts: container.ports.accounts,
+    accountCredentials: container.ports.accountCredentials,
+    syncTargetRepository,
+    logger,
+  });
+
   const schedulerWorker = new Worker(
     QUEUE_NAMES.scheduler,
-    (job) => processSchedulerJob(job.name, sweeper),
+    (job) => processSchedulerJob(job.name, sweeper, syncScheduler),
     { connection: container.redis, concurrency: 1 },
   );
 
-  return { publishWorker, schedulerWorker, publishQueue, schedulerQueue };
+  return { publishWorker, syncWorker, schedulerWorker, publishQueue, syncQueue, schedulerQueue };
 }
 
 async function shutdown(runtime: Runtime, container: Container, logger: Logger): Promise<void> {
   logger.info('shutting down');
-  // `runtime.publishQueue` is `container.publishQueue` (see `buildRuntime`) — `container.close()`
-  // below closes it, so it is not closed a second time here.
+  // `runtime.publishQueue`/`runtime.syncQueue` are `container.publishQueue`/`container.syncQueue`
+  // (see `buildRuntime`) — `container.close()` below closes both, so neither is closed twice.
   await Promise.all([
     runtime.publishWorker.close(),
+    runtime.syncWorker.close(),
     runtime.schedulerWorker.close(),
     runtime.schedulerQueue.close(),
   ]);
@@ -93,6 +126,9 @@ async function main(): Promise<void> {
   // dedicated scheduler API; `add`'s `JobsOptions` no longer accepts `repeat` at all.
   await runtime.schedulerQueue.upsertJobScheduler(SWEEP_STUCK_WORK_JOB, {
     every: SWEEP_INTERVAL_MS,
+  });
+  await runtime.schedulerQueue.upsertJobScheduler(SYNC_SCHEDULER_TICK_JOB, {
+    every: SYNC_SCHEDULER_TICK_INTERVAL_MS,
   });
 
   logger.info('worker ready');

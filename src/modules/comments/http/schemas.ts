@@ -13,11 +13,13 @@
 
 import { z } from 'zod';
 import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import type { SyncJobRecord } from '#src/modules/comments/application/request-sync.ts';
 import type { PlatformCapabilities } from '#src/platforms/registry.ts';
 import type { SortOrder } from '#src/shared/pagination.ts';
 
 export const postIdParamsSchema = z.object({ postId: z.uuid() });
 export const commentIdParamsSchema = z.object({ commentId: z.uuid() });
+export const syncJobIdParamsSchema = z.object({ jobId: z.uuid() });
 
 const DEFAULT_LIMIT = 20;
 const MIN_LIMIT = 1;
@@ -106,6 +108,51 @@ export const platformCapabilitiesSchema = z.object({
 export type PlatformCapabilitiesResponse = z.infer<typeof platformCapabilitiesSchema>;
 
 export const platformsPageSchema = z.object({ items: z.array(platformCapabilitiesSchema) });
+
+/** `SyncJob` (contracts/rest-api.md, D19, T090) — the `POST .../sync` and `GET .../comment-sync-jobs/:jobId` response body. */
+const syncJobStatsSchema = z
+  .object({
+    fetched: z.number().int().nonnegative(),
+    inserted: z.number().int().nonnegative(),
+    updated: z.number().int().nonnegative(),
+    deleted: z.number().int().nonnegative(),
+  })
+  .nullable();
+
+export const syncJobSchema = z.object({
+  id: z.uuid(),
+  status: z.enum(['queued', 'running', 'succeeded', 'failed']),
+  trigger: z.enum(['manual', 'scheduled', 'post_published']),
+  stats: syncJobStatsSchema,
+  error: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+  startedAt: z.iso.datetime().nullable(),
+  finishedAt: z.iso.datetime().nullable(),
+});
+
+export type SyncJobResponse = z.infer<typeof syncJobSchema>;
+
+/**
+ * Maps one `RequestSync` job record to the `SyncJob` wire shape.
+ *
+ * Args:
+ *   record: The job as read by `request-sync.ts`.
+ *
+ * Returns:
+ *   The `SyncJob` representation contracts/rest-api.md documents.
+ */
+export function toSyncJobResponse(record: SyncJobRecord): SyncJobResponse {
+  return {
+    id: record.id,
+    status: record.status,
+    trigger: record.trigger,
+    stats: record.stats,
+    error: record.error,
+    createdAt: record.createdAt.toISOString(),
+    startedAt: record.startedAt === null ? null : record.startedAt.toISOString(),
+    finishedAt: record.finishedAt === null ? null : record.finishedAt.toISOString(),
+  };
+}
 
 /**
  * Maps one `platformRegistry` entry to the `PlatformCapabilities` wire shape (T098) — serialized

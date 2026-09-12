@@ -1,6 +1,9 @@
 // oxlint-disable max-dependencies -- this is the HTTP composition root: its job is registering
 // every cross-cutting plugin (auth, rate limiting, error mapping, docs) a route module will
 // inherit, so a low fan-in here would mean one of those is being wired somewhere else instead.
+// oxlint-disable max-lines -- the composition root's scope grows with every route module it
+// wires (T090 adds the sync routes' own repository/use-case construction); splitting it would
+// hide that wiring behind re-exports rather than remove any of it.
 
 import { pathToFileURL } from 'node:url';
 import fastifyRateLimit from '@fastify/rate-limit';
@@ -17,13 +20,16 @@ import {
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
 import { buildContainer, type Container } from '#src/app/container.ts';
+import { createRequestSync } from '#src/modules/comments/application/request-sync.ts';
 import { registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
 import {
   registerCommentReadRoutes,
   registerCommentWriteRoutes,
   registerPlatformRoutes,
+  registerSyncRoutes,
 } from '#src/modules/comments/http/routes.ts';
 import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import type { Database } from '#src/shared/db.ts';
 import { ApiError, toProblemDetails, type ProblemDetails } from '#src/shared/errors.ts';
 import { createLogger } from '#src/shared/logger.ts';
@@ -37,7 +43,7 @@ import { createLogger } from '#src/shared/logger.ts';
  */
 export type ApiDependencies = Pick<
   Container,
-  'config' | 'database' | 'redis' | 'ports' | 'contactQuota' | 'publishQueue'
+  'config' | 'database' | 'redis' | 'ports' | 'contactQuota' | 'publishQueue' | 'syncQueue'
 >;
 
 type CheckResult = { ok: true } | { ok: false; error: string };
@@ -213,13 +219,24 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
   });
 }
 
-/** Registers the three read routes, the two write routes and `GET /v1/platforms` (T049, T069, T098). */
+/**
+ * Registers the three read routes, the two write routes, the two sync routes and
+ * `GET /v1/platforms` (T049, T069, T090, T098).
+ */
 function registerCommentRoutes(
   app: ReturnType<typeof Fastify>,
   deps: ApiDependencies,
   logger: ReturnType<typeof createLogger>,
 ): void {
   const repository = createCommentRepository(deps.database.drizzle);
+  const syncTargetRepository = createSyncTargetRepository(deps.database.drizzle, deps.config);
+  const requestSync = createRequestSync({
+    database: deps.database.drizzle,
+    posts: deps.ports.posts,
+    syncTargetRepository,
+    syncQueue: deps.syncQueue,
+    manualCooldownSeconds: deps.config.SYNC_MANUAL_COOLDOWN_SECONDS,
+  });
 
   app.register(registerCommentReadRoutes({ repository, posts: deps.ports.posts }));
   app.register(
@@ -233,6 +250,7 @@ function registerCommentRoutes(
       logger,
     }),
   );
+  app.register(registerSyncRoutes({ requestSync }));
   app.register(registerPlatformRoutes());
 }
 
