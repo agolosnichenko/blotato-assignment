@@ -160,7 +160,7 @@ function registerListCommentsRoute(
       );
       return {
         items: result.items.map(toCommentResponse),
-        nextCursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
+        nextCursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor, order),
         ...(result.sync !== undefined && {
           sync: {
             lastSyncedAt:

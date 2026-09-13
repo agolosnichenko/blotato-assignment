@@ -9,23 +9,36 @@ const arbitraryCursor = record({
     noInvalidDate: true,
   }),
   id: uuid(),
-  order: constantFrom('asc' as const, 'desc' as const),
 });
+
+const arbitraryOrder = constantFrom('asc' as const, 'desc' as const);
 
 const sampleCursor: KeysetCursor = {
   occurredAt: new Date('2026-01-01T00:00:00.000Z'),
   id: '018f6f3e-2f1a-7c4a-9c1a-1234567890ab',
-  order: 'desc',
 };
 
 describe('pagination cursor round-trip', () => {
   it('decodes what it encoded for any keyset position and order', () => {
     assert(
-      property(arbitraryCursor, (cursor) => {
-        const encoded = encodeCursor(cursor);
-        const result = decodeCursor(encoded, cursor.order);
+      property(arbitraryCursor, arbitraryOrder, (cursor, order) => {
+        const encoded = encodeCursor(cursor, order);
+        const result = decodeCursor(encoded, order);
 
         expect(result).toEqual({ ok: true, cursor });
+      }),
+    );
+  });
+
+  it('round-trips the position without handing the direction back', () => {
+    assert(
+      property(arbitraryCursor, arbitraryOrder, (cursor, order) => {
+        const result = decodeCursor(encodeCursor(cursor, order), order);
+
+        // The decoded cursor carries no `order`: the direction was checked during decoding and has
+        // one home afterwards, the repository's pagination argument. A second copy here is what let
+        // a caller pair a cursor minted under `asc` with a `desc` read.
+        expect(result.ok && 'order' in result.cursor).toBe(false);
       }),
     );
   });
@@ -39,7 +52,7 @@ describe('pagination cursor hostile input', () => {
   });
 
   it('rejects a truncated cursor payload', () => {
-    const encoded = encodeCursor(sampleCursor);
+    const encoded = encodeCursor(sampleCursor, 'desc');
     const truncated = encoded.slice(0, encoded.length - 6);
 
     const result = decodeCursor(truncated, 'desc');
@@ -59,7 +72,7 @@ describe('pagination cursor hostile input', () => {
   });
 
   it('rejects a desc cursor replayed as asc', () => {
-    const encoded = encodeCursor(sampleCursor);
+    const encoded = encodeCursor(sampleCursor, 'desc');
 
     const result = decodeCursor(encoded, 'asc');
 

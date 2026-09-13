@@ -346,9 +346,7 @@ async function listByPredicate(
   const items = hasMore ? rows.slice(0, pagination.limit) : rows;
   const last = items.at(-1);
   const nextCursor =
-    hasMore && last !== undefined
-      ? { occurredAt: last.occurredAt, id: last.id, order: pagination.order }
-      : null;
+    hasMore && last !== undefined ? { occurredAt: last.occurredAt, id: last.id } : null;
 
   return { items, nextCursor };
 }

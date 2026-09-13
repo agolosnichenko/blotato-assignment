@@ -698,7 +698,7 @@ function registerPagingValidationTests(getHarness: () => Harness): void {
     it('rejects a truncated cursor', async () => {
       const harness = getHarness();
       const fixture = await setUpPagingFixture(harness.database);
-      const validCursor = encodeCursor({ occurredAt: new Date(), id: generateId(), order: 'desc' });
+      const validCursor = encodeCursor({ occurredAt: new Date(), id: generateId() }, 'desc');
       const truncated = validCursor.slice(0, Math.max(1, Math.floor(validCursor.length / 2)));
       const response = await fetchComments(harness, fixture.apiKey, {
         cursor: truncated,
@@ -710,7 +710,7 @@ function registerPagingValidationTests(getHarness: () => Harness): void {
     it('rejects a desc cursor replayed with order=asc', async () => {
       const harness = getHarness();
       const fixture = await setUpPagingFixture(harness.database);
-      const descCursor = encodeCursor({ occurredAt: new Date(), id: generateId(), order: 'desc' });
+      const descCursor = encodeCursor({ occurredAt: new Date(), id: generateId() }, 'desc');
       const response = await fetchComments(harness, fixture.apiKey, {
         cursor: descCursor,
         order: 'asc',
