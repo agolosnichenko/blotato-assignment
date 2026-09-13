@@ -25,7 +25,8 @@
     "seed:account": "tsx scripts/seed-account.ts",
     "create-api-key": "tsx scripts/create-api-key.ts",
     "generate-openapi": "tsx scripts/generate-openapi.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "bench:listing": "tsx scripts/bench-listing.ts"
   },
   "dependencies": {
     "@atproto/api": "0.20.42",
