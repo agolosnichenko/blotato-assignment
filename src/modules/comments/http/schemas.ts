@@ -51,6 +51,15 @@ export const accountCommentsQuerySchema = paginationQuerySchema('desc').extend({
     .optional(),
 });
 
+/**
+ * The flat `GET /v1/comments` listing's query schema (T013, D31, research.md R-06). Built on the
+ * shared pagination schema with `order` defaulting to `desc` for every selection — unlike the
+ * removed replies route, this collection has one address and so one default, not one that varies
+ * by which filter is present. Filters (`postId`, `accountId`, `platforms`, …) arrive in a later
+ * phase; this schema is `limit`/`cursor`/`order` alone until then.
+ */
+export const listCommentsQuerySchema = paginationQuerySchema('desc');
+
 const commentAuthorSchema = z
   .object({
     platformId: z.string(),
@@ -90,9 +99,21 @@ export const commentSchema = z.object({
 
 export type CommentResponse = z.infer<typeof commentSchema>;
 
+/**
+ * `sync` (T014) is optional so the serialized body can **omit the key entirely** for a page that
+ * has no single post to report freshness for — the flat `GET /v1/comments` listing, absent since
+ * a collection spanning every post has no one `lastSyncedAt`/`activeJobId` to report. Port
+ * resolution that would populate it for a `postId`-filtered selection arrives in a later phase.
+ */
 export const commentsPageSchema = z.object({
   items: z.array(commentSchema),
   nextCursor: z.string().nullable(),
+  sync: z
+    .object({
+      lastSyncedAt: z.iso.datetime().nullable(),
+      activeJobId: z.uuid().nullable(),
+    })
+    .optional(),
 });
 
 export const postCommentsPageSchema = commentsPageSchema.extend({

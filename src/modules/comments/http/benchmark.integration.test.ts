@@ -34,7 +34,7 @@
 
 import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Worker, type Job } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -209,6 +209,11 @@ async function seedManyPostsAndComments(
     await database.drizzle.insert(comments).values(pending);
   }
 
+  // Without this, the planner works off the empty-table defaults autovacuum has not yet
+  // replaced with real statistics, and picks bitmap/sort plans no production table this size
+  // would run — a seed artifact, not a claim about the indexes themselves (T017).
+  await database.drizzle.execute(sql`ANALYZE ${comments}`);
+
   return benchmarkPostId;
 }
 
@@ -277,49 +282,73 @@ async function measureReadLatencies(
   return samplesMs;
 }
 
+/** The `visibleInList` placeholder filter (`comment-repository.ts`), spelled out as raw SQL. */
+const VISIBLE_IN_LIST_SQL = sql`(status <> 'deleted' OR reply_count > 0)`;
+
+/** The predicate `listTopLevelByPost` runs — workspace + post + top-level, plus the placeholder filter. */
+function topLevelPredicate(workspaceId: WorkspaceId, postId: string): SQL {
+  return sql`workspace_id = ${workspaceId}
+    AND post_id = ${postId}
+    AND parent_comment_id IS NULL
+    AND ${VISIBLE_IN_LIST_SQL}`;
+}
+
+/** The predicate `listRepliesByParent` runs — workspace + parent, plus the placeholder filter. */
+function repliesPredicate(workspaceId: WorkspaceId, parentCommentId: string): SQL {
+  return sql`workspace_id = ${workspaceId}
+    AND parent_comment_id = ${parentCommentId}
+    AND ${VISIBLE_IN_LIST_SQL}`;
+}
+
+/** The predicate `listByAccount` runs with no filter present — workspace + account, plus the placeholder filter. */
+function accountPredicate(workspaceId: WorkspaceId, socialAccountId: string): SQL {
+  return sql`workspace_id = ${workspaceId}
+    AND social_account_id = ${socialAccountId}
+    AND ${VISIBLE_IN_LIST_SQL}`;
+}
+
+/** The predicate `list` runs for the unfiltered `GET /v1/comments` selection — workspace scope alone (D31). */
+function workspacePredicate(workspaceId: WorkspaceId): SQL {
+  return sql`workspace_id = ${workspaceId} AND ${VISIBLE_IN_LIST_SQL}`;
+}
+
+const DESC_ORDER_SQL = sql`occurred_at DESC, id DESC`;
+const ASC_ORDER_SQL = sql`occurred_at ASC, id ASC`;
+
 /**
- * `EXPLAIN (FORMAT JSON)` on exactly the predicate `listTopLevelByPost` runs (workspace + post +
- * top-level + the `visibleInList` placeholder filter, ordered and limited the same way) — the
- * structural half of the read budget (module docstring). Returns the root plan node.
+ * `EXPLAIN (FORMAT JSON)` on one predicate/order pair, limited the same way `listByPredicate`
+ * limits its own query (`limit + 1`, here a fixed 21 to match the harness's `limit=20` reads) —
+ * the structural half of the read budget (module docstring). Returns the root plan node.
  */
-async function explainTopLevelQuery(
+async function explainQuery(
   db: NodePgDatabase,
-  workspaceId: WorkspaceId,
-  postId: string,
+  predicate: SQL,
+  order: SQL,
 ): Promise<Record<string, unknown>> {
   const rows = await db.execute<{ 'QUERY PLAN': [{ Plan: Record<string, unknown> }] }>(sql`
     EXPLAIN (FORMAT JSON)
     SELECT id FROM comments
-    WHERE workspace_id = ${workspaceId}
-      AND post_id = ${postId}
-      AND parent_comment_id IS NULL
-      AND (status <> 'deleted' OR reply_count > 0)
-    ORDER BY occurred_at DESC, id DESC
+    WHERE ${predicate}
+    ORDER BY ${order}
     LIMIT 21
   `);
   const [row] = rows.rows;
   if (row === undefined) {
-    throw new Error('explainTopLevelQuery: EXPLAIN returned no row');
+    throw new Error('explainQuery: EXPLAIN returned no row');
   }
   return row['QUERY PLAN'][0].Plan;
 }
 
-/** Walks the plan tree looking for any node whose name matches `predicate`. */
-function planContains(
-  plan: Record<string, unknown>,
-  predicate: (nodeType: string) => boolean,
-): boolean {
-  const nodeType = plan['Node Type'];
-  if (typeof nodeType === 'string' && predicate(nodeType)) {
-    return true;
-  }
+/** Flattens a plan tree into every node it contains, root first. */
+function planNodes(plan: Record<string, unknown>): Record<string, unknown>[] {
+  const nodes = [plan];
   const children = plan['Plans'];
-  if (!Array.isArray(children)) {
-    return false;
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      nodes.push(...planNodes(child as Record<string, unknown>));
+    }
   }
-  return children.some((child: unknown) =>
-    planContains(child as Record<string, unknown>, predicate),
-  );
+  return nodes;
 }
 
 // oxlint-disable require-await -- `listComments`/`findPublishedComment`/`fetchComment` implement
@@ -431,15 +460,25 @@ async function measureWriteLatencies(
   return samplesMs;
 }
 
-/** Asserts the plan used an index and, separately, that it used no sequential scan. */
-function assertPlanUsesIndex(plan: Record<string, unknown>): void {
+/**
+ * Asserts the plan scans `indexName` by name (T017) — not just *some* index, which a flip to
+ * `comments_workspace_idx` on one of the three preserved reads would satisfy just as well
+ * (research.md R-04) — and that it does so with no `Seq Scan` and no `Sort` node: the index must
+ * supply both the rows and the ordering, not just one of the two.
+ */
+function assertPlanUsesIndex(plan: Record<string, unknown>, indexName: string): void {
+  const nodes = planNodes(plan);
   expect(
-    planContains(plan, (nodeType) => nodeType.includes('Index')),
-    `expected an index scan in the plan, got: ${JSON.stringify(plan)}`,
+    nodes.some((node) => node['Index Name'] === indexName),
+    `expected index ${indexName} in the plan, got: ${JSON.stringify(plan)}`,
   ).toBe(true);
   expect(
-    planContains(plan, (nodeType) => nodeType === 'Seq Scan'),
+    nodes.some((node) => node['Node Type'] === 'Seq Scan'),
     `expected no sequential scan in the plan, got: ${JSON.stringify(plan)}`,
+  ).toBe(false);
+  expect(
+    nodes.some((node) => node['Node Type'] === 'Sort'),
+    `expected no sort node in the plan, got: ${JSON.stringify(plan)}`,
   ).toBe(false);
 }
 
@@ -453,12 +492,12 @@ function registerReadBenchmarkTest(getHarness: () => Harness): void {
     const harness = getHarness();
     const apiKey = await mintApiKey(harness.database, harness.workspaceId);
 
-    const plan = await explainTopLevelQuery(
+    const plan = await explainQuery(
       harness.database.drizzle,
-      harness.workspaceId,
-      harness.benchmarkPostId,
+      topLevelPredicate(harness.workspaceId, harness.benchmarkPostId),
+      DESC_ORDER_SQL,
     );
-    assertPlanUsesIndex(plan);
+    assertPlanUsesIndex(plan, 'comments_post_top_level_idx');
 
     // Warm up the connection pool and query plan cache before timing — the first request on a
     // fresh pool measures connection setup, not the query (module docstring).
@@ -505,6 +544,49 @@ function registerWriteBenchmarkTest(getHarness: () => Harness): void {
   }, 60_000);
 }
 
+/**
+ * T017 (FR-013, research.md R-04, quickstart.md V7): the three EXPLAIN assertions the preserved
+ * reads gained once `comments_workspace_idx` became a candidate for them too — each pinned to the
+ * narrower index it had before the flat listing's index was added, not just to "some" index.
+ */
+function registerPreservedReadPlanTests(getHarness: () => Harness): void {
+  it('lists replies via an index scan on comments_replies_idx', async () => {
+    const harness = getHarness();
+    const plan = await explainQuery(
+      harness.database.drizzle,
+      repliesPredicate(harness.workspaceId, generateId()),
+      ASC_ORDER_SQL,
+    );
+    assertPlanUsesIndex(plan, 'comments_replies_idx');
+  });
+
+  it('lists an account inbox via an index scan on comments_social_account_idx', async () => {
+    const harness = getHarness();
+    const plan = await explainQuery(
+      harness.database.drizzle,
+      accountPredicate(harness.workspaceId, harness.socialAccountId),
+      DESC_ORDER_SQL,
+    );
+    assertPlanUsesIndex(plan, 'comments_social_account_idx');
+  });
+}
+
+/**
+ * T017 (FR-013, D31, research.md R-05, quickstart.md V7): the unfiltered `GET /v1/comments`
+ * selection — no filter beyond the workspace scope — via `comments_workspace_idx`.
+ */
+function registerFlatListingPlanTest(getHarness: () => Harness): void {
+  it('lists the unfiltered workspace collection via an index scan on comments_workspace_idx', async () => {
+    const harness = getHarness();
+    const plan = await explainQuery(
+      harness.database.drizzle,
+      workspacePredicate(harness.workspaceId),
+      DESC_ORDER_SQL,
+    );
+    assertPlanUsesIndex(plan, 'comments_workspace_idx');
+  });
+}
+
 describe('seeded performance budget (T104, SC-005, SC-006)', () => {
   let harness: Harness;
 
@@ -518,4 +600,6 @@ describe('seeded performance budget (T104, SC-005, SC-006)', () => {
 
   registerReadBenchmarkTest(() => harness);
   registerWriteBenchmarkTest(() => harness);
+  registerPreservedReadPlanTests(() => harness);
+  registerFlatListingPlanTest(() => harness);
 });
