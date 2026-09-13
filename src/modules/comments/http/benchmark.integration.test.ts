@@ -702,9 +702,11 @@ function registerWriteBenchmarkTest(getHarness: () => Harness): void {
 }
 
 /**
- * T017 (FR-013, research.md R-04, quickstart.md V7): the two EXPLAIN assertions for filters that
- * gained `comments_workspace_idx` as a candidate once the flat listing's index was added — each
- * pinned to the narrower index it had before, not just to "some" index.
+ * T017 (FR-013, research.md R-04, quickstart.md V7): two of the three EXPLAIN assertions pinning
+ * what index each preserved-read predicate still uses now that `comments_workspace_idx` is a
+ * candidate for all of them — each pinned to the narrower index it had before the flat listing's
+ * index was added, not just to "some" index. The third (`comments_post_top_level_idx`) is
+ * asserted above, inside {@link registerReadBenchmarkTest}, alongside that read's timing budget.
  */
 function registerPreservedReadPlanTests(getHarness: () => Harness): void {
   it('lists replies via an index scan on comments_replies_idx', async () => {

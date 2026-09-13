@@ -151,8 +151,7 @@ export interface CommentRepository {
    * The flat `GET /v1/comments` listing (D31), driving `comments_workspace_idx` (`workspace_id,
    * occurred_at DESC, id DESC`) — or whichever other comment index `selectionPredicate`'s
    * resulting filter set makes more selective — via {@link selectionPredicate}. The one read path
-   * for the collection; the three per-identifier reads it replaced (`listTopLevelByPost`,
-   * `listRepliesByParent`, `listByAccount`) are gone (D31, R-11).
+   * for the collection; the three per-identifier reads it replaced (D31, R-11).
    */
   list(
     workspaceId: WorkspaceId,

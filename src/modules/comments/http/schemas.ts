@@ -15,6 +15,7 @@ import { z } from 'zod';
 import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { SyncJobRecord } from '#src/modules/comments/application/request-sync.ts';
 import { platformRegistry, type PlatformCapabilities } from '#src/platforms/registry.ts';
+import type { Platform } from '#src/platforms/types.ts';
 import type { SortOrder } from '#src/shared/pagination.ts';
 import { COMMENT_STATUSES } from '#src/modules/comments/domain/status.ts';
 
@@ -26,8 +27,8 @@ const DEFAULT_LIMIT = 20;
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 100;
 
-/** The shared `limit`/`cursor`/`order` query schema (T048) — `order`'s default varies by route. */
-export function paginationQuerySchema(defaultOrder: SortOrder) {
+/** The `limit`/`cursor`/`order` query schema `listCommentsQuerySchema` extends (T048). */
+function paginationQuerySchema(defaultOrder: SortOrder) {
   return z.object({
     limit: z.coerce.number().int().min(MIN_LIMIT).max(MAX_LIMIT).default(DEFAULT_LIMIT),
     cursor: z.string().min(1).optional(),
@@ -37,7 +38,7 @@ export function paginationQuerySchema(defaultOrder: SortOrder) {
 
 /** The registry's own platform keys (`Object.keys`, not a hand-written literal union) — adding a
  * platform must not require editing this schema (Principle IV, research.md R-02). */
-const PLATFORM_KEYS = Object.keys(platformRegistry) as [string, ...string[]];
+const PLATFORM_KEYS = Object.keys(platformRegistry) as [Platform, ...Platform[]];
 
 /**
  * Normalizes the repeatable `platform` query parameter to an array before validation (T023,
@@ -49,11 +50,8 @@ function toPlatformArray(value: unknown): unknown {
   return value === undefined || Array.isArray(value) ? value : [value];
 }
 
-/**
- * The `'true'`/`'false'` string-enum boolean query param this API uses everywhere, transformed to
- * a real boolean — never `z.coerce.boolean()`, which treats every non-empty string (including the
- * literal `'false'`) as `true`. Absent means "no filter", not `false`.
- */
+/** The `'true'`/`'false'` string-enum boolean query param this API uses everywhere — never
+ * `z.coerce.boolean()`, which treats every non-empty string (including `'false'`) as `true`. */
 function booleanQueryParam() {
   return z
     .enum(['true', 'false'])

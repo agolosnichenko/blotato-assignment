@@ -121,18 +121,21 @@ export async function listComments(
   deps: ListCommentsDeps,
   input: ListCommentsInput,
 ): Promise<ListCommentsResult> {
+  // Tenancy must be resolved before either query below runs (a foreign postId/accountId/
+  // parentCommentId must 404, never leak a page or a sync block) — but once it has, the list read
+  // and the sync lookup are independent and belong in the same round trip, the same concurrency
+  // listPostComments (the use case this one replaces) gave them (FR-013).
   await resolveIdentifierFilters(deps, input.workspaceId, input.selection);
 
-  const page = await deps.repository.list(input.workspaceId, input.selection, {
-    limit: input.limit,
-    cursor: input.cursor,
-    order: input.order,
-  });
-
-  const sync =
-    input.selection.postId === undefined
-      ? undefined
-      : await deps.repository.getSyncStatus(input.workspaceId, input.selection.postId);
+  const postId = input.selection.postId;
+  const [page, sync] = await Promise.all([
+    deps.repository.list(input.workspaceId, input.selection, {
+      limit: input.limit,
+      cursor: input.cursor,
+      order: input.order,
+    }),
+    postId === undefined ? undefined : deps.repository.getSyncStatus(input.workspaceId, postId),
+  ]);
 
   return {
     items: page.items,
