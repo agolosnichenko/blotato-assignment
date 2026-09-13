@@ -338,8 +338,13 @@ function keysetPredicate(cursor: KeysetCursor | null, order: SortOrder): SQL | u
  * ordering — but the coupling is stated explicitly here rather than left to two defaults that
  * happen to agree for `ASC` (which is why `comments_replies_idx` alone was never affected) and
  * disagree for `DESC`.
+ *
+ * Exported so `benchmark.integration.test.ts`'s `EXPLAIN` assertions can build their `ORDER BY`
+ * from this function directly rather than keeping a second, hand-typed copy of it in sync by hand
+ * (T017 fix round 3) — a copy the compiler cannot catch drifting the moment either side's column
+ * reference changes.
  */
-function orderByFor(order: SortOrder): SQL[] {
+export function orderByFor(order: SortOrder): SQL[] {
   return order === 'desc'
     ? [sql`${comments.occurredAt} DESC NULLS LAST`, sql`${comments.id} DESC NULLS LAST`]
     : [sql`${comments.occurredAt} ASC NULLS LAST`, sql`${comments.id} ASC NULLS LAST`];

@@ -43,7 +43,10 @@ import { loadConfig } from '#src/app/config.ts';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { createPublishComment } from '#src/modules/comments/application/publish-comment.ts';
 import { createAccountHealth } from '#src/modules/comments/infrastructure/account-health.ts';
-import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import {
+  createCommentRepository,
+  orderByFor,
+} from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { createContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import {
@@ -56,6 +59,7 @@ import type { CommentPlatformAdapter, Platform, PublishedComment } from '#src/pl
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
 import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
+import type { SortOrder } from '#src/shared/pagination.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_CREDENTIALS_ENCRYPTION_KEY, TEST_ENV } from '#src/shared/testing/test-env.ts';
@@ -439,7 +443,10 @@ function repliesPredicate(workspaceId: WorkspaceId, parentCommentId: string): SQ
     AND ${VISIBLE_IN_LIST_SQL}`;
 }
 
-/** The predicate `listByAccount` runs with no filter present — workspace + account, plus the placeholder filter. */
+/**
+ * The predicate `listByAccount` runs with its own optional `since`/`until`/`isOwn` filters absent —
+ * workspace + account, plus the placeholder filter.
+ */
 function accountPredicate(workspaceId: WorkspaceId, socialAccountId: string): SQL {
   return sql`workspace_id = ${workspaceId}
     AND social_account_id = ${socialAccountId}
@@ -452,14 +459,15 @@ function workspacePredicate(workspaceId: WorkspaceId): SQL {
 }
 
 /**
- * `NULLS LAST` explicitly on both, matching `orderByFor` (`comment-repository.ts`) — not the bare
- * `DESC`/`ASC` `listByPredicate` would get from a naive `ORDER BY`. Postgres defaults `DESC` to
- * `NULLS FIRST`, which does not match the `NULLS LAST` every `occurred_at`/`id` index in
- * `schema.ts` carries; without stating it here too, this file would be asserting against a query
- * `orderByFor` does not actually run.
+ * The `ORDER BY` for one direction, built from `orderByFor` (`comment-repository.ts`) itself
+ * rather than a second, hand-typed copy of its `NULLS LAST` column list (T017 fix round 3) — a
+ * hand-typed copy agrees with `orderByFor` only until one side's column reference changes, and
+ * nothing but a human re-reading both would catch the drift; calling the same function the
+ * repository calls makes that impossible instead of merely unlikely.
  */
-const DESC_ORDER_SQL = sql`occurred_at DESC NULLS LAST, id DESC NULLS LAST`;
-const ASC_ORDER_SQL = sql`occurred_at ASC NULLS LAST, id ASC NULLS LAST`;
+function explainOrderBy(order: SortOrder): SQL {
+  return sql.join(orderByFor(order), sql`, `);
+}
 
 /**
  * `EXPLAIN (FORMAT JSON)` on one predicate/order pair, limited the same way `listByPredicate`
@@ -641,7 +649,7 @@ function registerReadBenchmarkTest(getHarness: () => Harness): void {
     const plan = await explainQuery(
       harness.database.drizzle,
       topLevelPredicate(harness.workspaceId, harness.benchmarkPostId),
-      DESC_ORDER_SQL,
+      explainOrderBy('desc'),
     );
     assertPlanUsesIndex(plan, 'comments_post_top_level_idx');
 
@@ -701,7 +709,7 @@ function registerPreservedReadPlanTests(getHarness: () => Harness): void {
     const plan = await explainQuery(
       harness.database.drizzle,
       repliesPredicate(harness.workspaceId, generateId()),
-      ASC_ORDER_SQL,
+      explainOrderBy('asc'),
     );
     assertPlanUsesIndex(plan, 'comments_replies_idx');
   });
@@ -711,7 +719,7 @@ function registerPreservedReadPlanTests(getHarness: () => Harness): void {
     const plan = await explainQuery(
       harness.database.drizzle,
       accountPredicate(harness.workspaceId, harness.socialAccountId),
-      DESC_ORDER_SQL,
+      explainOrderBy('desc'),
     );
     assertPlanUsesIndex(plan, 'comments_social_account_idx');
   });
@@ -727,7 +735,7 @@ function registerFlatListingPlanTest(getHarness: () => Harness): void {
     const plan = await explainQuery(
       harness.database.drizzle,
       workspacePredicate(harness.workspaceId),
-      DESC_ORDER_SQL,
+      explainOrderBy('desc'),
     );
     assertPlanUsesIndex(plan, 'comments_workspace_idx');
   });
