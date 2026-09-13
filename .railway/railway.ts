@@ -48,7 +48,10 @@ export default defineRailway((ctx) => {
   // old resource rather than a create — including its leftover volume, which failed the "a service
   // can only have one volume" invariant even after the database itself was deleted. A distinct name
   // makes this unambiguously a new resource.
-  const cacheVolume = volume('cache-data', { sizeMB: 1024 });
+  // 500 MB is the ceiling this Railway plan allows; a larger request fails the apply with
+  // "Max size of 500 MB on current plan". It is far more than an AOF of this queue needs —
+  // the file holds in-flight jobs, not history, and `domain-events` is trimmed on a timer.
+  const cacheVolume = volume('cache-data', { sizeMB: 500 });
   const cache = service('cache', {
     source: image('redis:8.10.1-alpine'),
     start: 'redis-server --maxmemory-policy noeviction --appendonly yes --appendfsync everysec',
