@@ -11,13 +11,10 @@
  * replaces `GET /v1/comments/:commentId/replies`. `order=asc` is explicit — the collection's own
  * default is `desc` for every selection (D31, research.md R-06), unlike the removed route.
  *
- * `GET /v1/comments` is registered and answers `200` unfiltered today, but `parentCommentId` is
- * not accepted by `listCommentsQuerySchema` yet and `selectionPredicate` ignores every key of
- * `CommentSelection` it is given — every scenario below that relies on the filter actually
- * narrowing the result set fails today, seeing the *unfiltered* workspace listing (in `desc`
- * order unless `order=asc` is itself honoured) instead of just the parent's replies. The old
- * address's `404` assertion also fails today: the nested route is still registered and still
- * answers `200`.
+ * Every scenario asserts the page holds the parent's replies and nothing else, in the `asc` order it
+ * asks for. Both halves matter: a `parentCommentId` accepted but dropped would answer the whole
+ * workspace in `desc`, and both mistakes are invisible in a status code. The nested address is
+ * asserted to be gone (`404`), so a replacement that left it answering would not pass.
  *
  * The placeholder rule (FR-005, A4) is a privacy control, not a display convenience: FR-030 nulls
  * a deleted comment's text and author, and a deleted comment is kept visible only while it still

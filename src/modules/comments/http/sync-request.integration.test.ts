@@ -1,9 +1,5 @@
 /**
- * Contract tests for `POST /v1/posts/:postId/comments/sync` (T074, V4, D19) — the route does not
- * exist yet (T090, blocked on `request-sync.ts`/T089), so every case here reaches Fastify's own
- * `setNotFoundHandler` today. That `404 NOT_FOUND` is the intended RED failure: it names exactly
- * what is missing (the route), the same relationship `create-reply.integration.test.ts` had to the
- * write route before T058/T069 landed.
+ * Contract tests for `POST /v1/posts/:postId/comments/sync` (T074, V4, D19).
  *
  * Unlike `ingest-comments.integration.test.ts` / `sync-post.integration.test.ts`, this file invents
  * no application-layer contract: it seeds `comment_sync_targets` / `comment_sync_jobs` directly

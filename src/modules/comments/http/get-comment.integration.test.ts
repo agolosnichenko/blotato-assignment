@@ -5,9 +5,6 @@
 /**
  * Contract tests for `GET /v1/comments/:commentId` (T042).
  *
- * Fails today the same way its siblings do: no route is registered at this path, so every request
- * 404s through Fastify's own not-found handler rather than the assertions below.
- *
  * The tenancy assertion (D20, FR-026) is the point of this file: a comment belonging to another
  * workspace must come back exactly like a comment that does not exist at all — `404 NOT_FOUND`,
  * never `403`, and nothing in the body distinguishing the two cases. The two workspaces here use

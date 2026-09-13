@@ -11,13 +11,10 @@
  * (T019/T040, US2, quickstart.md V3, per D31): `GET /v1/comments?postId=:id&topLevelOnly=true`
  * replaces `GET /v1/posts/:postId/comments`.
  *
- * `GET /v1/comments` is registered and answers `200` unfiltered today, but
- * `postId`/`topLevelOnly` are not accepted by `listCommentsQuerySchema` yet (schemas.ts) and
- * `selectionPredicate` ignores every key of `CommentSelection` it is given
- * (comment-repository.ts) — every scenario below that relies on the filter actually narrowing
- * the result set fails today, seeing the *unfiltered* workspace listing instead. The old
- * address's `404` assertion also fails today: the nested route is still registered and still
- * answers `200`, removal is a later task.
+ * Every scenario below reads the post's top level through `?postId=…&topLevelOnly=true` and asserts
+ * the page is genuinely narrowed to it. The nested address is asserted to be gone (`404`): a
+ * replacement that left the old route answering alongside the new one would satisfy every other
+ * assertion in this file.
  *
  * The load-bearing scenario is SC-002: keyset pagination must not repeat or skip a pre-existing
  * comment when rows are inserted between two page requests, in either `order` direction — the

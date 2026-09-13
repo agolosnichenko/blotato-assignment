@@ -122,8 +122,8 @@ function reportFailure(logger: RelayLogger, rowId: string, attempts: number, err
  * Single-runner assumption: each row's `publishRow` call takes its own `FOR UPDATE SKIP LOCKED`
  * lock, so a second concurrent runner is safe from a data-corruption standpoint — but SKIP LOCKED
  * means it would simply claim whatever this pass has not yet reached, doubling delivery beyond
- * what the at-least-once contract already allows. The caller (the `scheduler` queue processor,
- * wired in a later task per plan.md §9.2) MUST run this at concurrency 1.
+ * what the at-least-once contract already allows. The caller — the `scheduler` queue processor in
+ * `src/app/worker.ts` (plan.md §9.2) — MUST run this at concurrency 1.
  *
  * Safe to re-run after a crash: a row's publish and stamp commit together. If the process dies
  * after `domainEventsQueue.add` but before that row's transaction commits, the row is still

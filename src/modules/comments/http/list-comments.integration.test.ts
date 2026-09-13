@@ -11,23 +11,20 @@
 /**
  * Contract tests for `GET /v1/comments` (T008-T012, US1, quickstart.md V1-V2, per D31).
  *
- * Nothing under `src/modules/comments/http` registers this route yet — `routes.ts` has no
- * `registerListCommentsRoute` and `api.ts` never calls one — so every request here 404s through
- * Fastify's own not-found handler (`app.setNotFoundHandler` in `src/app/api.ts`), which itself
- * answers `application/problem+json` with `code: NOT_FOUND`. That is why every assertion below
- * checks `statusCode`/`code` before anything else: a case that expects `400 VALIDATION_ERROR`
- * still fails today, but for a distinguishable reason (`404 NOT_FOUND`), not a coincidental match.
+ * Every assertion checks `code` alongside `statusCode`, never the status alone. Both the route's own
+ * `400 VALIDATION_ERROR` and Fastify's not-found handler (`app.setNotFoundHandler` in
+ * `src/app/api.ts`) answer `application/problem+json`, so a status-only assertion would accept a
+ * request that never reached the route as though the route had rejected it.
  *
- * `CommentRepository.list` and `CommentSelection` already exist (comment-repository.ts) — this
- * file drives the route, not the repository, per "test behaviour, not implementation" (brief).
+ * This file drives the route, not the repository — `CommentRepository.list` and `CommentSelection`
+ * have their own coverage, per "test behaviour, not implementation" (brief).
  *
  * Filter semantics (T020, US2, quickstart.md V3-V4, per D31) are below the identifier-free US1
  * cases: `platforms` union/validation, `topLevelOnly`+`parentCommentId` and `postId`+
  * `parentCommentId` intersections, `since`/`until` inversion, `isOwn=false`, status visibility and
- * the `sync` block's presence rule (R-08). `listCommentsQuerySchema` accepts none of these query
- * keys yet and `selectionPredicate` ignores every key of `CommentSelection` it is given
- * (comment-repository.ts), so every filter-dependent assertion below fails today, seeing the
- * *unfiltered* workspace listing instead of the narrowed one.
+ * the `sync` block's presence rule (R-08). Each pins that the filter genuinely *narrows* the
+ * result, which is the claim that fails if a key is accepted by the schema but dropped before the
+ * predicate: the page would come back unfiltered, `200`, and plausible.
  */
 
 import { randomBytes } from 'node:crypto';

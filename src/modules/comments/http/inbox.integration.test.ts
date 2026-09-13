@@ -12,15 +12,11 @@
  * quickstart.md V3, per D31): `GET /v1/comments?accountId=:id` replaces
  * `GET /v1/accounts/:accountId/comments`.
  *
- * `GET /v1/comments` is registered and answers `200` unfiltered today, but `accountId` is not
- * accepted by `listCommentsQuerySchema` yet and `selectionPredicate` ignores every key of
- * `CommentSelection` it is given (comment-repository.ts) — every scenario below that relies on
- * the filter actually narrowing the result set fails today, seeing the *unfiltered* workspace
- * listing instead of just this account's comments; `since`/`until`/`isOwn` are likewise not yet
- * accepted by this schema. The old address's `404` assertion also fails today: the nested route
- * is still registered and still answers `200` — the same relationship
- * `post-comments.integration.test.ts` and `replies.integration.test.ts` have to their own
- * removed routes.
+ * Every scenario asserts the page is narrowed to this one account, and the `since`/`until`/`isOwn`
+ * cases that each of those filters narrows it further — the claim that fails if a key is accepted by
+ * the schema but dropped before the predicate, since the answer would then be the whole workspace's
+ * history under a `200`. The nested address is asserted to be gone (`404`), the same way
+ * `post-comments.integration.test.ts` and `replies.integration.test.ts` assert their own.
  *
  * D13 is why this endpoint exists at all: a comment on a post never published through this
  * platform has `post_id: null` (data-model.md §2) because there is no `posts` row to reference,

@@ -26,10 +26,9 @@
  * `GET /v1/comments/:commentId/replies` and `GET /v1/accounts/:accountId/comments` are dropped
  * from `TENANCY_ENDPOINTS` here — the collection replaces them — and one case per
  * identifier-shaped filter (`postId`, `accountId`, `parentCommentId`) is added below instead,
- * each asserting `404 NOT_FOUND` for a foreign workspace's resource. `selectionPredicate`
- * (comment-repository.ts) ignores every `CommentSelection` key it is given today, so
- * `GET /v1/comments` never resolves tenancy for these filters yet — every case below sees a
- * `200` (the unfiltered listing) instead of the `404` it asserts.
+ * each asserting `404 NOT_FOUND` for a foreign workspace's resource. A filter resolved without a
+ * tenancy check would answer `200` with an empty page here, which is why these cases assert the
+ * status and body shape rather than merely that no foreign row came back.
  *
  * The credential section pins that "no header", "unrecognized prefix" and "revoked key" are truly
  * the same failure as far as a caller can tell (`auth.ts`'s single `unauthorized()` call site).

@@ -14,8 +14,8 @@
  * `X-Hub-Signature-256` header value that came with it. It computes `hmac-sha256(body)` under
  * each configured secret and reports which one produces the signature Meta sent, using a
  * constant-time comparison (`secureCompare` from `src/shared/crypto.ts` — the same helper
- * `src/modules/comments/http/auth.ts` uses for its own secret comparison; the webhook verifier
- * this spike gates does not exist yet).
+ * `src/modules/comments/http/auth.ts` uses for its own secret comparison, and the one the webhook
+ * verifier this spike gated now uses in `src/modules/comments/http/webhook-routes.ts`).
  *
  * Read-only: this only hashes local input; it makes no request to Meta at all.
  *
