@@ -411,6 +411,45 @@ function registerIdempotencyConflictTest(getHarness: () => Harness): void {
   });
 }
 
+function registerIdempotencyConcurrentTest(getHarness: () => Harness): void {
+  describe('idempotency (A12) — concurrent requests, same key', () => {
+    it('both return 202 naming the same comment, with exactly one row inserted', async () => {
+      const harness = getHarness();
+      const thread = await seedPostedTopLevel(harness, 'instagram');
+      const idempotencyKey = randomUUID();
+
+      // Genuinely concurrent — Promise.all, not two sequential awaits. A sequential version would
+      // pass even against an implementation with no unique-violation handling at all: the second
+      // call would simply find the first one's already-committed row through the normal
+      // resolveIdempotency read path. Firing both at once forces them through insertQueued
+      // together, so only the unique-violation catch in createReply can make both resolve to the
+      // same comment.
+      const [first, second] = await Promise.all([
+        postReply(harness, {
+          parentCommentId: thread.topLevelId,
+          text: 'concurrent idempotent body',
+          idempotencyKey,
+        }),
+        postReply(harness, {
+          parentCommentId: thread.topLevelId,
+          text: 'concurrent idempotent body',
+          idempotencyKey,
+        }),
+      ]);
+
+      expect(first.statusCode).toBe(202);
+      expect(second.statusCode).toBe(202);
+      expect(second.body['id']).toBe(first.body['id']);
+
+      const rows = await harness.database.drizzle
+        .select({ id: comments.id })
+        .from(comments)
+        .where(eq(comments.idempotencyKey, idempotencyKey));
+      expect(rows).toHaveLength(1);
+    });
+  });
+}
+
 function registerPlatformCapabilityTests(getHarness: () => Harness): void {
   describe('platform capability (FR-031) — nothing sent on rejection', () => {
     it('rejects a write against a platform the registry marks unsupported with 422 PLATFORM_NOT_SUPPORTED', async () => {
@@ -494,6 +533,7 @@ describe('POST /v1/comments/:commentId/replies', () => {
   registerTextLengthTests(() => harness);
   registerIdempotencySameBodyTest(() => harness);
   registerIdempotencyConflictTest(() => harness);
+  registerIdempotencyConcurrentTest(() => harness);
   registerPlatformCapabilityTests(() => harness);
   registerParentStatusTests(() => harness);
   registerAccountDisconnectedTests(() => harness);

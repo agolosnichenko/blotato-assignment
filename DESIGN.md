@@ -40,7 +40,7 @@ flowchart TB
             PUB["comment-publish"]
             SYNC["comment-sync"]
             WHP["webhook-process"]
-            SCHED["scheduler\n(sweepers, sync tick,\noutbox relay, purge)\nconcurrency 1"]
+            SCHED["scheduler\n(stuck-work sweeper, sync tick,\noutbox relay, purge)\nconcurrency 1"]
         end
         PG[(PostgreSQL\nsource of truth)]
         REDIS[(Redis\nqueues, rate limits,\nlocks only)]

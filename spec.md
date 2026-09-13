@@ -479,7 +479,7 @@ batch of 100), publishes them and sets `published_at`.
 | `comment-publish` | comment publishing (7.1) | per-account token bucket in Redis |
 | `webhook-process` | delivery processing (7.2) | 10 |
 | `comment-sync` | target sync (7.3) | per-account token bucket |
-| `scheduler` | repeatable: sync scheduler, sweepers, outbox relay, purge | 1 |
+| `scheduler` | repeatable: sync scheduler, stuck-work sweeper, outbox relay, purge. The webhook-delivery sweeper of §7.2 step 5 joins this queue when it is built (Meta spike gate) | 1 |
 | `domain-events` | external consumers (not implemented) | — |
 
 Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).

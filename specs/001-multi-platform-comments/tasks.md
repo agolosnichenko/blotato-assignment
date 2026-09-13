@@ -745,7 +745,7 @@ reason the registry gives.
 - [X] T111 Configure the Railway deployment (D24): `api` and `worker` services from the one
       multi-stage `node:22-slim` image running as a **non-root** user, managed Postgres 18 and Redis
       8, migrations as a pre-deploy command, and deployment from `main` in `.github/workflows/`
-- [ ] T112 Run the full gate — `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test:unit`,
+- [X] T112 Run the full gate — `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test:unit`,
       `pnpm test:integration` — and fix everything; oxlint warnings count as failures (D21)
 
 ---

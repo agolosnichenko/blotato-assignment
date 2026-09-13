@@ -368,6 +368,9 @@ async function insertOrUpdateRow(
         text: sql`CASE WHEN ${liveRow} THEN coalesce(${insertedText}, ${comments.text}) ELSE ${comments.text} END`,
         authorUsername: sql`CASE WHEN ${liveRow} THEN ${input.authorUsername} ELSE ${comments.authorUsername} END`,
         authorDisplayName: sql`CASE WHEN ${liveRow} THEN ${input.authorDisplayName} ELSE ${comments.authorDisplayName} END`,
+        // Not guarded by `liveRow` like the three fields above — FR-030 is about PII-bearing
+        // fields, and `platformMeta` carries none: for Bluesky it is only the record `cid`, a
+        // non-identifying pointer, so there is nothing here for a redelivery to revive.
         platformMeta: input.platformMeta,
         updatedAt: new Date(),
       },
