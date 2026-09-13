@@ -135,12 +135,18 @@ Comments posted through the API appear under those posts within seconds of the s
 
 ### What was already verified there
 
-The whole SC-012 walkthrough has been run against that URL with those accounts, not fixtures:
+The whole SC-012 walkthrough has been run against that URL with those accounts, not fixtures.
+
+**This run predates D31**, which replaced the three nested reads with the filtered collection. Every
+write, sync and depth result below is unaffected — those addresses did not change — but the read step
+was made at the old address; its replacement is `GET /v1/comments?postId=…&topLevelOnly=true`, which
+the walkthrough above uses and the integration suite covers. The deployment has not been re-verified
+since.
 
 | step | what happened |
 | --- | --- |
 | `GET /v1/platforms` | nine platforms, three supporting comments |
-| `GET /v1/posts/:postId/comments` | the post's real Instagram comments, newest first, one with a reply |
+| `GET /v1/posts/:postId/comments` (now `GET /v1/comments?postId=…&topLevelOnly=true`) | the post's real Instagram comments, newest first, one with a reply |
 | `POST /v1/comments/:id/replies` | `202 queued` with a `Location` |
 | poll to `posted` | Instagram comment `18112975520094858` — posted on the platform |
 | reply to a reply (Instagram) | `422 REPLY_DEPTH_EXCEEDED`, `maxReplyDepth 1` (D12) |

@@ -5,11 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 Take-home for Blotato: design and partially implement a multi-platform comment system (original
-brief in `task.md`). The repository is **pre-implementation** — only `task.md` and `spec.md` exist.
+brief in `task.md`). The service is implemented: API, worker, two platform adapters, migrations and
+an integration suite that runs against real containers.
 
-`spec.md` is the source of truth. Decisions live in §3 (D1–D28), assumptions in §16 (A1–A23),
-spikes in §17. Any change to a decision or assumption is recorded in `spec.md` (§18) **before** the
-code diverges from it. Cite decision ids (e.g. "per D14") in commits, PRs and DESIGN.md.
+`spec.md` is the source of truth. Decisions live in §3 (D1–D31), assumptions in §16 (A1–A23),
+spikes in §17. Any change to a decision or assumption is recorded in `spec.md` §18 ("Recorded
+changes") **before** the code diverges from it. Cite decision ids (e.g. "per D14") in commits, PRs
+and DESIGN.md.
 
 All deliverables (README, DESIGN.md, OpenAPI, code comments) are in English (D18).
 
@@ -27,6 +29,12 @@ pnpm test:integration         # testcontainers, needs a Docker daemon
 pnpm test src/app/config.test.ts               # a single file — no `--`, pnpm 10 forwards
 pnpm test:unit -t 'applies defaults'           # a single test by name
 pnpm build && pnpm start:api  # bundles to dist/*.mjs via tsdown
+pnpm db:generate              # drizzle-kit: a migration from the schema.ts diff
+pnpm db:migrate               # apply pending migrations
+pnpm generate-openapi         # regenerate openapi.json from the Zod schemas — commit the result
+pnpm check:status-claims      # fails on prose claiming something unbuilt that the tree has built
+pnpm smoke                    # end-to-end walkthrough against a running deployment
+pnpm bench:listing            # SC-005 listing budget
 ```
 
 Versions are pinned exactly and `.npmrc` sets `minimum-release-age=1440`: a release younger than
@@ -38,8 +46,8 @@ Versions are pinned exactly and `.npmrc` sets `minimum-release-age=1440`: a rele
 integration tests with `DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
 TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`.
 
-Not set up yet, add with the first migration: `drizzle-kit` (`db:generate`, `db:migrate`) and
-OpenAPI generation from the Zod schemas (CI has to check the committed `openapi.json` is current).
+`openapi.json` is committed and generated from the Zod schemas: after changing a request or response
+schema, run `pnpm generate-openapi` and commit the diff, or CI's check of the committed file fails.
 
 ## Commits
 
@@ -91,8 +99,16 @@ These are spread across the spec and are easy to break:
   deletions. First walk of a post tags events `backfill`.
 - **Reply depth (D12):** strict check against `maxReplyDepth` → `422 REPLY_DEPTH_EXCEEDED`; no
   silent re-parenting. Bluesky text limits count graphemes, Meta counts characters.
-- **Pagination (D27, A13):** keyset on `(occurred_at, id)`; the opaque cursor encodes direction; a
-  cursor used with a different `order` → `400`. Defaults: top-level and inbox `desc`, replies `asc`.
+- **Pagination (D27, A13, D31):** keyset on `(occurred_at, id)`; the opaque cursor encodes direction;
+  a cursor used with a different `order` → `400`. One collection, so one default: `order=desc` for
+  every selection — a reply thread asks for `order=asc` explicitly. Neither the index DDL nor the
+  `ORDER BY` may name a NULL placement: both stay at Postgres's default for the direction, which is
+  what lets one index serve both `order` values.
+- **Read filters (D31):** `GET /v1/comments` is the only read collection; `postId`,
+  `parentCommentId`, `accountId`, `platform`, `topLevelOnly`, `isOwn`, `since`, `until` all optional
+  and combinable. Filters intersect and never override each other; an unsatisfiable combination is an
+  empty `200`, but an unrecognized *parameter name* is a `400` — the schema is strict, because a
+  silently dropped filter answers with the whole workspace.
 - **Errors:** RFC 9457 `application/problem+json` with a machine-readable `code` from §6.3.
 - **Secrets:** API keys stored as prefix + sha256; platform tokens AES-256-GCM with `key_version`;
   webhook HMAC verified over the raw body before JSON parsing; pino redacts keys, tokens and comment

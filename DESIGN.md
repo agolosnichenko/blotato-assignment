@@ -619,11 +619,17 @@ what they left open, decides what is claimed below.
   code shape: §17 requires the verifier to accept either configured secret, and it does.
 **Deployed** at https://api-production-6ef5.up.railway.app (D24 — `api` and `worker` from one
 Dockerfile, managed Postgres 18 and Redis 8.2, the migration as api's pre-deploy command). Both
-services reached `SUCCESS`, the migration applied, and the full SC-012 walkthrough runs there
+services reached `SUCCESS`, the migration applied, and the full SC-012 walkthrough ran there
 against real connected accounts: Instagram's sync ingested the post's three real comments, a reply
 published to Instagram (`18112975520094858`) and two to Bluesky, and the reply-depth check answered
 `422 REPLY_DEPTH_EXCEEDED` on Instagram while Bluesky accepted the same shape (D12). README has the
 step-by-step result.
+
+That run predates D31 and migration `0005`: the walkthrough's read step used
+`GET /v1/posts/:postId/comments`, which no longer exists, and the deployment has not been
+re-verified since. The writes, sync and depth results are unaffected — those addresses did not
+change — and the collection that replaced the read is covered by the integration suite, but the
+deployed build is behind this branch.
 
 Facebook now runs there too: its sync ingested the Page post's three comments, a reply published
 (`122093382351485339_936214829041858`) and the second level came back `422`. It took a detour worth

@@ -22,7 +22,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { createRequestSync } from '#src/modules/comments/application/request-sync.ts';
-import { isPublicRoute, registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
+import { isFullyPublicRoute, registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
 import {
   registerCommentReadRoutes,
   registerCommentWriteRoutes,
@@ -148,14 +148,17 @@ function registerErrorHandler(app: Api): void {
  * `/docs` assets are served entirely by `@fastify/swagger-ui`, outside this document.
  *
  * Wraps rather than replaces `jsonSchemaTransform`, so Zod remains the single source of the
- * request/response schemas (R-03 of the 001 plan); reads {@link isPublicRoute} rather than
+ * request/response schemas (R-03 of the 001 plan); reads {@link isFullyPublicRoute} rather than
  * re-checking `PUBLIC_ROUTES` itself, so the exempt list stays the one the auth hook enforces
  * (FR-012) — this function only decides whether to *publish* that exemption, never redefines it.
+ *
+ * `isFullyPublicRoute`, not a check of one method: this transform runs once per route, so the
+ * `security` it clears is cleared for every operation that route produces. A route whose `GET` is
+ * exempt and whose `POST` is not would otherwise be published as unauthenticated on both.
  */
 const transformWithPublicRoutes: SwaggerTransform = (input) => {
   const { schema, url } = jsonSchemaTransform(input);
-  const method = Array.isArray(input.route.method) ? input.route.method[0] : input.route.method;
-  if (method !== undefined && isPublicRoute(method, url)) {
+  if (isFullyPublicRoute(input.route.method, url)) {
     return { schema: { ...schema, security: [] }, url };
   }
   return { schema, url };

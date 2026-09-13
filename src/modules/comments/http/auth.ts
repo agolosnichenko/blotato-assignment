@@ -90,9 +90,16 @@ const DUMMY_KEY_HASH = hashSecret('blt-dummy-key-hash-used-when-no-record-is-fou
  * future exempt route carrying a path parameter must write its entry to match `/v1/x/:id`, not a
  * concrete id, or the template comparison silently stops matching.
  *
- * The field is required, not defaulted, so a new entry cannot be added without answering it —
- * that requirement is what keeps this array and the document's `security: []` annotations one
- * list instead of two hand-kept copies (FR-012).
+ * Nothing at runtime reads `published`: `api.ts`'s `transform` clears `security` from whatever
+ * {@link isPublicRoute} matches, and that function looks only at `method`/`matches`. Its one reader
+ * is `openapi-security.integration.test.ts`, which uses it to assert both directions — every
+ * published exemption appears in the document with `security: []`, and every unpublished one appears
+ * nowhere in it. So the field does not *cause* the document and this array to agree; it is what lets
+ * a test prove they do, and a hidden-but-exempt route previously passed every check in that file
+ * (FR-012).
+ *
+ * Being required rather than defaulted is the point: a new entry cannot be added without stating
+ * whether the document contains the operation, which is the fact the assertion needs.
  */
 interface PublicRoute {
   readonly method: string;
@@ -128,6 +135,27 @@ export const PUBLIC_ROUTES: readonly PublicRoute[] = [
 
 export function isPublicRoute(method: string, path: string): boolean {
   return PUBLIC_ROUTES.some((route) => route.method === method && route.matches(path));
+}
+
+/**
+ * Whether *every* method a route answers is exempt — what the OpenAPI `transform` must ask.
+ *
+ * `@fastify/swagger` calls `transform` once per route, not once per operation, so clearing
+ * `security` there clears it for every method that route declares. Asking about one method (the
+ * first, say) would publish a route whose `GET` is exempt and whose `POST` is not as
+ * unauthenticated on both, contradicting the `onRequest` hook, which decides per method. An empty
+ * method list is not exempt: there is no method to have checked.
+ *
+ * Args:
+ *   method: The route's `method`, one string or the array Fastify allows.
+ *   path: The request path, or the OpenAPI path template for a published operation.
+ *
+ * Returns:
+ *   Whether the auth hook exempts every method named.
+ */
+export function isFullyPublicRoute(method: string | readonly string[], path: string): boolean {
+  const methods = typeof method === 'string' ? [method] : method;
+  return methods.length > 0 && methods.every((one) => isPublicRoute(one, path));
 }
 
 /** `request.url` includes the query string; only the path is checked against {@link PUBLIC_ROUTES}. */
