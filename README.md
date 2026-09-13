@@ -18,10 +18,15 @@ UI) and `worker` (BullMQ — publishing, sync, webhook processing, the outbox re
 [`/healthz`](https://api-production-6ef5.up.railway.app/healthz) and `/readyz` (the latter pings
 Postgres and Redis and reports each).
 
-What is verified there: both services deployed from this commit's image, the migration applied
-through api's pre-deploy command, and `/readyz` answering `200` with both dependencies reachable.
-What is **not**: no social account is seeded yet, so the walkthrough below has not been run against
-this URL. Every response quoted in it is real output from a local run, as the next section says.
+Verified against that URL: `/readyz` reports Postgres and Redis reachable; the demo workspace is
+seeded, so `GET /v1/platforms` returns the nine platforms with three supporting comments,
+`GET /v1/posts/:postId/comments` returns a page with its freshness block, a request without a key
+is `401`, and another workspace's post is `404` rather than `403` (D20).
+
+Not verified there: publishing a reply and the sync walkthrough. The seeded demo accounts carry
+placeholder credentials and invented platform post ids (`scripts/seed-account.ts` explains why —
+no real secret is ever in source, D25), so steps 3-6 below would fail at the platform, not in this
+service. Their responses are quoted from the local run described in the next section.
 
 A demo API key for trying the endpoints above is sent separately (by email), never committed to
 this repository (D25) — it's scoped to a demo workspace with a reduced rate limit and can be

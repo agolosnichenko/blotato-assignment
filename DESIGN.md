@@ -540,9 +540,11 @@ what they left open, decides what is claimed below.
   code shape: §17 requires the verifier to accept either configured secret, and it does.
 **Deployed** at https://api-production-6ef5.up.railway.app (D24 — `api` and `worker` from one
 Dockerfile, managed Postgres 18 and Redis 8.2, the migration as api's pre-deploy command). Both
-services reached `SUCCESS` and `/readyz` reports Postgres and Redis reachable. No social account is
-seeded there yet, so the README's walkthrough is still evidenced by a local run rather than by this
-URL.
+services reached `SUCCESS`, the migration applied (the seed script writes against that schema), and
+the read walkthrough answers there: nine platforms, a comments page with its freshness block, `401`
+without a key, `404` for another workspace's post. The seeded accounts hold placeholder credentials
+and invented platform post ids, so publishing and sync are the parts the deployment cannot
+demonstrate — that gap is credentials, not code.
 
 **Two honest gaps in what's running today, not design decisions:**
 
