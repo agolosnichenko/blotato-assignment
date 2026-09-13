@@ -15,12 +15,7 @@
  * size instead. `MAX_RATIO` is the pass line quickstart.md V7 sets.
  *
  * Deliberately not a vitest test and not a CI step (research.md R-10): timing on a shared runner is
- * too noisy to gate on, and the ratio this script prints is only meaningful measured on one quiet
- * machine, run by a human, on demand.
- *
- * The `EXPLAIN`-based structural claim — that the unfiltered selection actually chooses
- * `comments_workspace_idx` — is a different, deterministic claim and lives in
- * `src/modules/comments/http/benchmark.integration.test.ts` (quickstart.md V7), not here.
+ * too noisy to gate on, and this ratio is only meaningful measured on one quiet machine, on demand.
  *
  * The measured latencies are **in-process**: this script builds its own `Container`/`Api` and
  * calls `app.inject(...)` directly (no `pnpm dev:api`, no HTTP, no network layer) — the same
@@ -28,17 +23,28 @@
  * It needs only the backing store: `docker compose up -d` and a populated `.env` (copy from
  * `.env.example`).
  *
- * **Calibration.** The pass line (`MAX_RATIO`) is only trustworthy if this harness can actually
- * trip it for the failure SC-005 guards against — an unbounded scan of the larger history. Verify
- * that once, on any machine, by forcing the planner off the index it would otherwise choose and
- * re-running:
+ * **What this harness can and cannot catch.** Both workspaces share one table, so a plain
+ * sequential scan (e.g. every index dropped) costs the same regardless of which workspace is
+ * queried — a function of the table's total size, not the queried workspace's history — and this
+ * ratio cannot separate that regression from noise. It does catch a regression whose cost scales
+ * with the *queried workspace's own* history, which is what SC-005 actually compares and is not
+ * hypothetical: the `NULLS LAST` pathkey mismatch this feature found and fixed. The deterministic
+ * structural check for "which index" stays `benchmark.integration.test.ts`'s `EXPLAIN` assertions;
+ * this script does not replace them.
  *
- *   psql "$DATABASE_URL" -c 'ALTER SYSTEM SET enable_indexscan = off; SELECT pg_reload_conf();'
- *   pnpm bench:listing
- *   psql "$DATABASE_URL" -c 'ALTER SYSTEM RESET enable_indexscan; SELECT pg_reload_conf();'
+ * **Calibration**, verified once at 10,000/100,000: after `pnpm bench:listing` has seeded data,
+ * find the two workspace ids (`SELECT workspace_id, count(*) FROM comments GROUP BY workspace_id
+ * ORDER BY 2 DESC LIMIT 2`) and, per id, run the same predicate via `psql` with the `ORDER BY`
+ * mismatched against the index's own `NULLS LAST` (no `src/` change needed — the mismatch is
+ * entirely in the query text):
  *
- * (add `enable_bitmapscan = off` too if the planner still finds a way around) — the ratio should
- * climb well past `MAX_RATIO`. See the report for this script's own calibration run.
+ *   EXPLAIN ANALYZE SELECT id FROM comments WHERE workspace_id = '<id>'
+ *     AND (status <> 'deleted' OR reply_count > 0)
+ *     ORDER BY occurred_at DESC NULLS FIRST, id DESC NULLS FIRST LIMIT 21;
+ *
+ * The mismatch forces a `Sort` over the whole filtered set instead of the index supplying the
+ * order, scaling with the queried workspace's row count — this moved the ratio from ~1.3 (matching
+ * order) to ~4.5 (mismatched); see the report for the full run.
  *
  * Usage:
  *   pnpm bench:listing
@@ -58,10 +64,9 @@ import { closeQuietly, reportFatal } from './script-failure.ts';
 
 const PLATFORM = 'bluesky';
 /**
- * 10,000 and 100,000 (below), not 1,000/10,000: at the smaller scale a full unbounded scan of the
- * larger history is itself cheap enough (low single-digit ms) to sit near `app.inject`'s own fixed
- * cost, so a genuine regression and measurement noise would be indistinguishable — the same reason
- * `benchmark.integration.test.ts` calibrates its structural claim at 100,000 rows.
+ * 10,000/100,000, not 1,000/10,000: at the smaller scale a full unbounded scan of the larger
+ * history sits near `app.inject`'s own fixed cost, making a regression indistinguishable from
+ * noise — the same reason `benchmark.integration.test.ts` calibrates at 100,000 rows.
  */
 const SMALL_HISTORY_COMMENTS = 10_000;
 /** Ten times {@link SMALL_HISTORY_COMMENTS} — the factor-of-ten spread R-10 asks for. */
@@ -143,10 +148,7 @@ function buildComment(
   };
 }
 
-/**
- * Bulk-inserts `count` comments for `workspaceId` in `SEED_CHUNK_SIZE` multi-row chunks — one
- * round trip per row would make a 10,000-row seed too slow for anyone to actually run this script.
- */
+/** Bulk-inserts `count` comments in `SEED_CHUNK_SIZE` chunks — one round trip per row would be too slow. */
 async function seedComments(
   database: Database,
   workspaceId: WorkspaceId,
@@ -191,10 +193,8 @@ function percentile(samplesMs: readonly number[], p: number): number {
 
 /**
  * Issues `count` sequential, unfiltered `GET /v1/comments` requests and returns their latencies.
- *
- * Sequential, not concurrent: a p95 over concurrent requests measures queueing under load, not
- * the per-request cost this script exists to compare (same reasoning as the read benchmark in
- * `benchmark.integration.test.ts`).
+ * Sequential, not concurrent: concurrent requests would measure queueing under load, not the
+ * per-request cost this script compares (same reasoning as `benchmark.integration.test.ts`'s).
  */
 async function measureListingLatencies(app: Api, apiKey: string, count: number): Promise<number[]> {
   const samplesMs: number[] = [];
@@ -224,9 +224,8 @@ async function measureP95(app: Api, workspace: SeededWorkspace): Promise<number>
 }
 
 function buildContainerWithHeadroom(): Container {
-  // The script issues far more requests per minute than the production default (30 reads/min per
-  // key) allows — raising it here is how this avoids minting one key per sample just to stay under
-  // a limit unrelated to what it measures (same reasoning as `benchmark.integration.test.ts`).
+  // This issues far more requests/min than the production default (30 reads/min per key) allows —
+  // raised here so a limit unrelated to what it measures doesn't force minting one key per sample.
   const config = loadConfig({ ...process.env, RATE_LIMIT_READS_PER_MIN: '100000' });
   return buildContainer({ config });
 }
