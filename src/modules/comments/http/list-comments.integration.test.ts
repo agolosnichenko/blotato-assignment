@@ -422,6 +422,85 @@ function registerNoPortCallTest(getHarness: () => Harness): void {
 }
 
 /**
+ * The mirror of {@link registerNoPortCallTest}: FR-005's other half, and the one that actually
+ * proves tenancy is resolved through the port rather than some other mechanism (a SQL join, say)
+ * that could produce the same `404`/`200` shape without ever asking `Posts`/`Accounts` anything
+ * (fix round 1 — the spy above only ever asserted the identifier-free negative, so a join in place
+ * of the port would leave both it and the tenancy test green). Split into two registrars, one per
+ * port, since each seeds and asserts independently.
+ */
+function registerPostIdPortCallTest(getHarness: () => Harness): void {
+  it('calls the Posts port when postId is present', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const seededPost = await seedPostRow(
+      harness.database,
+      workspaceId,
+      socialAccountId,
+      'instagram',
+    );
+    await seedComment(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      postId: seededPost.postId,
+      platformPostId: seededPost.platformPostId,
+      occurredAt: new Date(),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const spyHarness = startSpyApiHarness(harness.containers);
+    await spyHarness.app.ready();
+
+    try {
+      const response = await spyHarness.app.inject({
+        method: 'GET',
+        url: `/v1/comments?postId=${seededPost.postId}`,
+        headers: { 'blotato-api-key': apiKey },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(spyHarness.postsFindByIdSpy).toHaveBeenCalledWith(seededPost.postId);
+    } finally {
+      await spyHarness.close();
+    }
+  });
+}
+
+function registerAccountIdPortCallTest(getHarness: () => Harness): void {
+  it('calls the Accounts port when accountId is present', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'bluesky');
+    await seedComment(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'bluesky',
+      platformPostId: `bluesky-external-${generateId()}`,
+      occurredAt: new Date(),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const spyHarness = startSpyApiHarness(harness.containers);
+    await spyHarness.app.ready();
+
+    try {
+      const response = await spyHarness.app.inject({
+        method: 'GET',
+        url: `/v1/comments?accountId=${socialAccountId}`,
+        headers: { 'blotato-api-key': apiKey },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(spyHarness.accountsFindByIdSpy).toHaveBeenCalledWith(socialAccountId);
+    } finally {
+      await spyHarness.close();
+    }
+  });
+}
+
+/**
  * T010 (FR-008, acceptance 1.4): a comment outlives its post reference. Seeded by deleting the
  * `posts` projection row (not by nulling the comment's own `postId`) — the point is that a
  * dangling reference stays readable, the same split `inbox.integration.test.ts`'s stale-projection
@@ -1030,6 +1109,8 @@ describe('GET /v1/comments', () => {
 
   registerCrossAccountInboxTest(() => harness);
   registerNoPortCallTest(() => harness);
+  registerPostIdPortCallTest(() => harness);
+  registerAccountIdPortCallTest(() => harness);
   registerDanglingPostReferenceTest(() => harness);
   registerNoSyncKeyTest(() => harness);
   registerExactPagingUnderConcurrentInsertsTest(() => harness);

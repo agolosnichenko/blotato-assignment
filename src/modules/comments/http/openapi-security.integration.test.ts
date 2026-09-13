@@ -2,6 +2,10 @@
 // does (config, both composition roots' ports, the publish queue) plus its own live-route
 // collector — see the same justification on that file and the other integration tests in this
 // module.
+// oxlint-disable max-lines -- fix round 1 adds `liveRouteTemplates` and the positive-half
+// "published entry maps to a real, documented operation" assertion it enables, closing a real gap
+// (a published-and-hidden route previously passed every check in this file); splitting the helpers
+// into a second file would duplicate `LiveRoute`/`publicRouteKeys` rather than remove anything.
 
 /**
  * The published OpenAPI document declares the `blotato-api-key` scheme the `onRequest` auth hook
@@ -9,9 +13,8 @@
  * R-09, D31). The document and the enforced exempt list must be **one** list (FR-012): every
  * expectation here is computed from `PUBLIC_ROUTES` itself, never re-typed, and the "every route
  * is documented" sweep is computed from the app's own live route table (collected via an `onRoute`
- * hook added before `app.ready()` runs its boot queue) rather than a hand-written path list — a
- * second track is concurrently removing three read routes from `routes.ts`, and a hand-written
- * list would break the moment that merges.
+ * hook added before `app.ready()` runs its boot queue), not a hand-written path list that would go
+ * stale the moment a route is added or removed.
  */
 
 import type { Queue } from 'bullmq';
@@ -158,12 +161,9 @@ function operationsWithClearedSecurity(document: OpenApiDocument): ReadonlySet<s
   return keys;
 }
 
-/**
- * The (method, OpenAPI-template path) pairs `PUBLIC_ROUTES` exempts, restricted to `published`
- * entries and to methods/paths that survive the given predicate — used both to compute the
- * expected `security: []` set (against every path template `PUBLIC_ROUTES.matches` accepts) and to
- * compute what a published exempt route should look like among registered, non-hidden routes.
- */
+/** (method, path) pairs `PUBLIC_ROUTES` exempts, restricted to `published` entries and to
+ * `candidateUrls` matching `route.matches` — used for both the `security: []` and route-coverage
+ * expectations, against whichever candidate space (document paths vs. registered routes) fits. */
 function publicRouteKeys(
   published: boolean,
   candidateUrls: readonly string[],
@@ -192,6 +192,17 @@ function registeredRouteKeys(liveRoutes: readonly LiveRoute[]): ReadonlySet<stri
     keys.add(`${route.method} ${toOpenApiTemplate(route.url)}`);
   }
   return keys;
+}
+
+/**
+ * Every path template Fastify registered, hidden routes included (fix round 1) — the candidate
+ * space "clears security on exactly the published entries" must match against, instead of
+ * `documentPaths`: matching there let a `published: true` entry naming a hidden route silently
+ * contribute nothing to `expected` (built by intersecting with what the document contains), so a
+ * published-but-undocumented entry could never disagree with `actual`.
+ */
+function liveRouteTemplates(liveRoutes: readonly LiveRoute[]): readonly string[] {
+  return [...registeredRouteKeys(liveRoutes)].map((key) => key.slice(key.indexOf(' ') + 1));
 }
 
 /** Registered, non-hidden route keys that are not an unpublished `PUBLIC_ROUTES` exemption. */
@@ -230,9 +241,8 @@ function registerSchemeTests(getHarness: () => Harness): void {
 function registerExemptionTests(getHarness: () => Harness): void {
   describe('PUBLIC_ROUTES exemptions', () => {
     it('clears security on exactly the published entries, no more and no fewer', () => {
-      const { document } = getHarness();
-      const documentPaths = Object.keys(operationsOf(document));
-      const expected = publicRouteKeys(true, documentPaths);
+      const { document, liveRoutes } = getHarness();
+      const expected = publicRouteKeys(true, liveRouteTemplates(liveRoutes));
       const actual = operationsWithClearedSecurity(document);
 
       expect(actual).toEqual(expected);

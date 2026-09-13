@@ -284,16 +284,20 @@ the indexes; the sharpest thing this feature learned is that the ordering clause
 definition are two places stating the same fact, and either one drifting silently costs the other
 its purpose.
 
-**SC-005 measurement (`pnpm bench:listing`, quickstart.md V7).** Run on a quiet MacBook Pro
-(Apple M-series, arm64, 12 cores, 24 GB RAM, macOS 26), nothing else of the author's running: the
-unfiltered `GET /v1/comments` against a 10,000-comment workspace measured p95 = 3.95ms, against a
-100,000-comment workspace (ten times the history) p95 = 3.01ms — ratio 1.31, under the 1.5 pass
-line. Both figures are **in-process** (`app.inject`, no HTTP or network layer), not end-to-end
-against a deployed server. The harness detects a regression whose cost scales with the *queried
-workspace's own* history (the `NULLS LAST` mismatch above is exactly such a regression, reproduced
-in the script's own docstring at ratio ~4.5); it structurally cannot detect one scaling with the
-*total* table size, since both seeded workspaces share one table and a plain sequential scan costs
-the same regardless of which workspace is queried.
+**SC-005 measurement (`pnpm bench:listing`, quickstart.md V7).** Run on a MacBook Pro (Apple
+M-series, arm64, 12 cores, 24 GB RAM, macOS 26), quiet of anything of the author's — no test suite
+or other container workload of mine running during the measurement. The machine was not a
+cleanroom: several unrelated Docker containers from other, unrelated projects were already running
+throughout (idle, not started or stopped for this run). The unfiltered `GET /v1/comments` against a
+10,000-comment workspace measured p95 = 3.95ms, against a 100,000-comment workspace (ten times the
+history) p95 = 3.01ms — ratio 1.31, under the 1.5 pass line, with the *larger* history measuring
+*faster* than the smaller one, which is not a result background noise plausibly flips. Both figures
+are **in-process** (`app.inject`, no HTTP or network layer), not end-to-end against a deployed
+server. The harness detects a regression whose cost scales with the *queried workspace's own*
+history (the `NULLS LAST` mismatch above is exactly such a regression, reproduced in the script's
+own docstring at ratio ~4.5); it structurally cannot detect one scaling with the *total* table
+size, since both seeded workspaces share one table and a plain sequential scan costs the same
+regardless of which workspace is queried.
 
 ## 5. Flows
 
