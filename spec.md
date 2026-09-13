@@ -643,6 +643,20 @@ Infrastructure:
 - **S1. FB Page `feed` webhooks in development mode.** Check whether comment events from a user with a
   role on the app are delivered. If not, the webhook path is demoed only with test events from the
   dashboard, and real data arrives through sync (D23).
+  - **Result (2026-09-13).** Page token valid, `expires_at=never`, all scopes present; the Page is
+    subscribed to `feed` (`subscribed_apps` reports our app and only ours). A tunnelled receiver
+    answered the `hub.challenge` handshake and the callback URL verified.
+    - **A dashboard `Test` send for `feed` was delivered** — payload recorded, `object: "page"`,
+      `entry[].changes[].field: "feed"`, with the synthetic `Test Page` author and `post_id`
+      `44444444_444444444`. So the Meta → endpoint path works end to end.
+    - **A real comment was not delivered.** Two comments on a real Page post — one by the app's own
+      admin (an app-role account), one by an account with no role — produced no delivery in the
+      following minutes, with the receiver verified live before and after by a direct `POST`
+      through the same tunnel. The negative is therefore about Meta, not about the tract.
+    - **Consequence (confirms D23).** The webhook path is demonstrated with dashboard test events;
+      real IG/FB comment data arrives through the sync job. The intake, its signature check and its
+      normalizer are built and tested against the recorded test payload, whose envelope
+      (`object`/`entry[]/changes[]/field`/`value`) is the same envelope a real delivery carries.
 - **S2. Reading IG comments in Standard Access for both login variants.** The Meta forum has reports of
   empty `data` for `/comments` in Standard Access via Instagram Login. Test both variants and use
   whichever works for the live demo. If neither works, IG is covered by fixture-based tests, the live
@@ -670,6 +684,15 @@ Infrastructure:
 - **S5. Webhook signing secret for Instagram Login.** Check which secret (Meta App Secret or Instagram
   App Secret) signs webhooks for the `instagram_login` variant. The verifier must support both secrets
   from config.
+  - **Partial result (2026-09-13).** On a captured `page` delivery, `X-Hub-Signature-256` matched
+    `HMAC-SHA256(META_APP_SECRET, <raw body bytes>)` exactly — confirming both the secret and that
+    the digest is over the unparsed body, not a re-serialization of it.
+  - **The `instagram_login` half stays open.** That variant needs a second Meta App (the two login
+    variants cannot coexist in one), which was not created. What is unresolved is a *configuration
+    value*, not the shape of the code: this spike's own requirement — "the verifier must support
+    both secrets from config" — means the verifier takes the secret per variant from configuration
+    either way. The webhook path is therefore built, with the `instagram_login` secret left as a
+    deployment-time setting and this gap recorded rather than guessed.
 
 ## 18. Open questions
 
@@ -678,6 +701,16 @@ implementation.
 
 ### Recorded changes
 
+- **A17's two-variant equivalence test runs against one live fixture (narrows T097).** A17 asserts
+  the two D28 login variants normalize identically, and the test was specified as one parameterized
+  body over a fixture per variant. S2 produced the `facebook_login` fixture; the `instagram_login`
+  one does not exist, because that variant needs a second Meta App and its own OAuth flow (§17).
+  The test therefore runs both arms over the **same** recorded body, differing only in host and
+  credential — which still proves the property A17 is about (the adapter does not branch on variant,
+  Principle IV) while making no claim about what `graph.instagram.com` actually returns. The
+  alternative — hand-writing the second fixture — would assert a response shape nobody observed, the
+  exact failure mode the spike gate exists to prevent. When the `instagram_login` fixture is
+  recorded, it replaces the duplicated body with no change to the test body.
 - **D30 (amends §7.1 step 6 and A19).** "The account is marked `disconnected`" is kept as a
   *behaviour*, not as a write to `social_accounts`. That table is a read-only projection of the
   accounts service (D8, D29, Constitution Principle II), and writing its `status` column would make
