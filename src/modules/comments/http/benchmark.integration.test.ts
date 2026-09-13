@@ -718,10 +718,11 @@ async function measureWriteLatencies(
  *
  * Matches any `Node Type` containing `Sort`, not only the exact `'Sort'` node (T017 fix round 4,
  * I-1) — Postgres emits a distinct node type, `Incremental Sort`, when an index supplies only a
- * prefix of the required ordering. An exact match let that node type through silently: this
- * assertion is the only automatic guard on the `NULLS LAST` coupling between `schema.ts`'s index
- * DDL and `orderByFor`'s explicit `NULLS LAST`, and a plan that gained an `Incremental Sort` would
- * have passed every check here.
+ * prefix of the required ordering. An exact match let that node type through silently: together
+ * with {@link registerPlanMatrixTests}'s selection × direction matrix, this assertion is the only
+ * automatic guard on the NULL-placement coupling between `schema.ts`'s index DDL and
+ * `orderByFor`'s `ORDER BY`, and a plan that gained an `Incremental Sort` would have passed every
+ * check here.
  */
 function assertPlanUsesIndex(plan: Record<string, unknown>, indexName: string): void {
   const nodes = planNodes(plan);
@@ -804,49 +805,68 @@ function registerWriteBenchmarkTest(getHarness: () => Harness): void {
   }, 60_000);
 }
 
-/**
- * T017 (FR-013, research.md R-04, quickstart.md V7): two of the three EXPLAIN assertions pinning
- * what index each preserved-read predicate still uses now that `comments_workspace_idx` is a
- * candidate for all of them — each pinned to the narrower index it had before the flat listing's
- * index was added, not just to "some" index. The third (`comments_post_top_level_idx`) is
- * asserted above, inside {@link registerReadBenchmarkTest}, alongside that read's timing budget.
- */
-function registerPreservedReadPlanTests(getHarness: () => Harness): void {
-  it('lists replies via an index scan on comments_replies_idx', async () => {
-    const harness = getHarness();
-    const plan = await explainQuery(
-      harness.database.drizzle,
-      explainPredicate(harness.workspaceId, { parentCommentId: harness.benchmarkParentCommentId }),
-      explainOrderBy('asc'),
-    );
-    assertPlanUsesIndex(plan, 'comments_replies_idx');
-  });
-
-  it('lists an account inbox via an index scan on comments_social_account_idx', async () => {
-    const harness = getHarness();
-    const plan = await explainQuery(
-      harness.database.drizzle,
-      explainPredicate(harness.workspaceId, { accountId: harness.socialAccountId }),
-      explainOrderBy('desc'),
-    );
-    assertPlanUsesIndex(plan, 'comments_social_account_idx');
-  });
+/** One selection the listing supports, and the index it must be answered from in both directions. */
+interface PlanCase {
+  readonly name: string;
+  readonly selection: (harness: Harness) => CommentSelection;
+  readonly index: string;
 }
 
 /**
- * T017 (FR-013, D31, research.md R-05, quickstart.md V7): the unfiltered `GET /v1/comments`
- * selection — no filter beyond the workspace scope — via `comments_workspace_idx`.
+ * Every selection `GET /v1/comments` has a dedicated index for (T017, FR-013, research.md R-04,
+ * R-05, quickstart.md V7) — each pinned to the narrower index it had before the flat listing's
+ * index was added, not just to "some" index, which a flip to `comments_workspace_idx` would
+ * satisfy just as well.
  */
-function registerFlatListingPlanTest(getHarness: () => Harness): void {
-  it('lists the unfiltered workspace collection via an index scan on comments_workspace_idx', async () => {
-    const harness = getHarness();
-    const plan = await explainQuery(
-      harness.database.drizzle,
-      explainPredicate(harness.workspaceId, {}),
-      explainOrderBy('desc'),
-    );
-    assertPlanUsesIndex(plan, 'comments_workspace_idx');
-  });
+const PLAN_CASES: readonly PlanCase[] = [
+  {
+    name: "a post's top level",
+    selection: (harness) => ({ postId: harness.benchmarkPostId, topLevelOnly: true }),
+    index: 'comments_post_top_level_idx',
+  },
+  {
+    name: "a comment's replies",
+    selection: (harness) => ({ parentCommentId: harness.benchmarkParentCommentId }),
+    index: 'comments_replies_idx',
+  },
+  {
+    name: 'an account inbox',
+    selection: (harness) => ({ accountId: harness.socialAccountId }),
+    index: 'comments_social_account_idx',
+  },
+  { name: 'the unfiltered collection', selection: () => ({}), index: 'comments_workspace_idx' },
+];
+
+/**
+ * The full selection × direction matrix, because `order` is a client-chosen parameter on one
+ * collection (D27, D31) and every selection must be answered from its index in *both* directions.
+ *
+ * Asserting only the direction that happens to match each index's declared sort order is what let
+ * a real regression through: while `orderByFor` emitted an explicit `NULLS LAST` and the DDL
+ * declared `DESC NULLS LAST`, `order=asc` on the three `DESC` indexes — and `order=desc` on
+ * `comments_replies_idx`, which is the collection's *default* for a `parentCommentId` selection —
+ * planned as a `Seq Scan`/`Bitmap Heap Scan` plus a `Sort` of the whole selection. A pathkey in
+ * Postgres includes NULL placement, and the planner does not use a column's `NOT NULL` to match
+ * one: the backward scan of a `DESC NULLS LAST` index yields `ASC NULLS FIRST`, which no
+ * `ASC NULLS LAST` request can use. Each index now declares the placement Postgres already
+ * defaults to for its direction, and `orderByFor` emits no `NULLS` clause, so every index reads
+ * forwards and backwards.
+ */
+function registerPlanMatrixTests(getHarness: () => Harness): void {
+  const orders: readonly SortOrder[] = ['desc', 'asc'];
+  for (const planCase of PLAN_CASES) {
+    for (const order of orders) {
+      it(`lists ${planCase.name} in ${order} order via an index scan on ${planCase.index}`, async () => {
+        const harness = getHarness();
+        const plan = await explainQuery(
+          harness.database.drizzle,
+          explainPredicate(harness.workspaceId, planCase.selection(harness)),
+          explainOrderBy(order),
+        );
+        assertPlanUsesIndex(plan, planCase.index);
+      });
+    }
+  }
 }
 
 describe('seeded performance budget (T104, SC-005, SC-006)', () => {
@@ -862,6 +882,5 @@ describe('seeded performance budget (T104, SC-005, SC-006)', () => {
 
   registerReadBenchmarkTest(() => harness);
   registerWriteBenchmarkTest(() => harness);
-  registerPreservedReadPlanTests(() => harness);
-  registerFlatListingPlanTest(() => harness);
+  registerPlanMatrixTests(() => harness);
 });

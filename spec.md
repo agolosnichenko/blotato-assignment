@@ -247,7 +247,14 @@ Constraints and indexes:
 - `(social_account_id, occurred_at DESC, id DESC)` — one account's inbox (`accountId`).
 - `(last_activity_at) WHERE parent_comment_id IS NULL` — retention purge.
 - `(status, last_attempt_started_at) WHERE status IN ('queued', 'processing')` — finding stuck rows.
-- List indexes serve both `order` values (D27): Postgres scans B-trees backwards.
+- List indexes serve both `order` values (D27): Postgres scans B-trees backwards. This holds only
+  while each index and the listing's `ORDER BY` agree on NULL placement, so both are left at
+  Postgres's own default for the direction (`NULLS FIRST` for `DESC`, `NULLS LAST` for `ASC`) and
+  neither names one. A pathkey includes NULL placement and the planner does not use a column's
+  `NOT NULL` to match one, so naming `NULLS LAST` on a `DESC` index costs `order=asc` that index
+  entirely — its backward scan yields `ASC NULLS FIRST` — and the read degrades to a full `Sort` of
+  the selection. `benchmark.integration.test.ts` asserts the whole selection × direction matrix
+  through `EXPLAIN`, which is the only automatic guard on this.
 
 ### 5.3. Module-internal tables
 

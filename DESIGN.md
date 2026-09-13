@@ -274,15 +274,31 @@ walkthrough of this API against a local instance.
   comments are being reconciled — so there is nothing to filter and nothing gained by moving it
   under the collection.
 
-**`NULLS LAST` ordering coupling (found and fixed during this feature).** All four `DESC` comment
-indexes are created `... occurred_at DESC NULLS LAST` (`occurred_at` is never null, but `id` orders
-ties, and Postgres's default for a `DESC` index column is `NULLS FIRST`). A bare `ORDER BY
-occurred_at DESC, id DESC` in a query means `NULLS FIRST` by default — a mismatch with the index's
-own ordering, so the planner has to add a sort node to reconcile the two instead of walking the
-index in order. The predicate builder writes `NULLS LAST` explicitly on every `DESC` clause to match
-the indexes; the sharpest thing this feature learned is that the ordering clause and the index
-definition are two places stating the same fact, and either one drifting silently costs the other
-its purpose.
+**NULL-placement ordering coupling (found and fixed twice during this feature).** An index's sort
+order and a query's `ORDER BY` are two places stating the same fact, and a Postgres pathkey includes
+NULL placement — not just the direction. The planner does not use a column's `NOT NULL` to match a
+pathkey either, so "`occurred_at` is never null" does not rescue a mismatch: the two must agree
+textually or the index stops supplying the ordering and the planner adds a sort node.
+
+The first round of this fix made the ordering clause name `NULLS LAST` to match indexes declared
+`DESC NULLS LAST`. That repaired `order=desc` and quietly broke the other half of the matrix: the
+backward scan of a `DESC NULLS LAST` index yields `ASC NULLS FIRST`, which cannot answer an
+`ASC NULLS LAST` request, so `order=asc` lost `comments_workspace_idx`,
+`comments_post_top_level_idx` and `comments_social_account_idx` — and, mirroring it,
+`comments_replies_idx` (declared `ASC`) could not answer the collection's own default `desc`. Each
+of those planned a full `Sort` of the selection, at 100,000 rows a `Seq Scan` or a two-index
+`BitmapAnd` underneath it.
+
+What holds now: **neither side names a placement.** Every listing index is declared with the
+placement Postgres already defaults to for its direction (`NULLS FIRST` for `DESC`, `NULLS LAST` for
+`ASC`, migration `0005`), and `orderByFor` emits a clause-free `ORDER BY`. Every index then reads
+forwards for its own direction and backwards for the other, which is what D27 claims and what makes
+`order` a free parameter rather than one cheap value and one expensive one.
+
+The lesson generalizes past this coupling: a test that asserts only the direction matching each
+index's declaration will pass on exactly the half of the matrix that works. The guard is the full
+selection × direction matrix in `benchmark.integration.test.ts`, which fails on four of its eight
+cases against either earlier version.
 
 **SC-005 measurement (`pnpm bench:listing`, quickstart.md V7).** Run on a MacBook Pro (Apple
 M-series, arm64, 12 cores, 24 GB RAM, macOS 26), quiet of anything of the author's — no test suite

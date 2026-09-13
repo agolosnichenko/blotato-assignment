@@ -8,6 +8,13 @@
  * a table this same file defines, so a real foreign key is used there.
  */
 
+// oxlint-disable max-lines -- the module's six tables, with each table's columns, constraints and
+// indexes in one place. Splitting it would separate a column from the CHECK that constrains it and
+// from the index that serves it, which is where this file's correctness actually lives.
+// oxlint-disable max-lines-per-function -- `pgTable`'s extra-config callback is a declaration list,
+// not logic: `comments` declares eleven constraints and indexes, each one line to three. Breaking it
+// into helpers would hide which table a constraint belongs to for no reduction in what to read.
+
 import { sql } from 'drizzle-orm';
 import {
   boolean,
@@ -115,17 +122,21 @@ export const comments = pgTable(
       'comments_depth_matches_parent',
       sql`(${table.parentCommentId} is null) = (${table.depth} = 0)`,
     ),
+    // Each listing index declares the NULL placement Postgres defaults to for its direction, which
+    // is what lets `orderByFor`'s clause-free `ORDER BY` read it in both — see that function for
+    // why naming a placement on either side costs one direction its index.
+    //
     // A post's top-level page, both scan directions (FR-001, D27).
     index('comments_post_top_level_idx')
-      .on(table.postId, table.occurredAt.desc(), table.id.desc())
+      .on(table.postId, table.occurredAt.desc().nullsFirst(), table.id.desc().nullsFirst())
       .where(sql`${table.parentCommentId} is null`),
     // A replies page, both scan directions (FR-002, D27).
     index('comments_replies_idx').on(table.parentCommentId, table.occurredAt.asc(), table.id.asc()),
     // The account inbox (FR-008).
     index('comments_social_account_idx').on(
       table.socialAccountId,
-      table.occurredAt.desc(),
-      table.id.desc(),
+      table.occurredAt.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
     ),
     // The retention purge selector (FR-029).
     index('comments_last_activity_idx')
@@ -136,7 +147,11 @@ export const comments = pgTable(
       .on(table.status, table.lastAttemptStartedAt)
       .where(sql`${table.status} in ('queued', 'processing')`),
     // The flat GET /v1/comments listing, both scan directions (D31).
-    index('comments_workspace_idx').on(table.workspaceId, table.occurredAt.desc(), table.id.desc()),
+    index('comments_workspace_idx').on(
+      table.workspaceId,
+      table.occurredAt.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
+    ),
   ],
 );
 
