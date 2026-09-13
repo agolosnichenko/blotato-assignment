@@ -34,11 +34,26 @@
  *      drop the `post_id` association for a comment arriving by webhook on a post this service
  *      *did* publish — `ingest-comments.ts` trusts whatever `IngestTarget.postId` it is given
  *      verbatim, it does not re-derive it.
- *
- * Any other failure (a database error, a platform error fetching a thin comment, anything
- * unexpected) propagates out of the job processor uncaught: `processed_at` stays `null`, BullMQ
- * retries the job under its own backoff, and the T082 sweeper is a second, independent backstop if
- * the job itself is lost rather than merely slow.
+ *   5. **An `AuthError` for one account is that account's own terminal outcome, never a retry of
+ *      the whole delivery** (D30, spec.md §18 "An undecryptable credential is an `AuthError`").
+ *      It can surface two ways: `AccountCredentials.findBySocialAccountId` now raises it when the
+ *      stored token will not decrypt (a botched key rotation, a corrupted row), and
+ *      `adapter.fetchComment` raises it on a 401/403 while completing a thin payload (point 3).
+ *      Either way, `processEventForAccount` catches it, records `account_health` plus outbox
+ *      `account.auth_failed` (never a write to `social_accounts`, D8/D29), logs, and returns —
+ *      the same classification `publish-comment.ts`'s `settleAuthFailed` and `sync-post.ts`'s
+ *      `recordAuthFailure` already give it. Crucially this is caught *per account*, inside the
+ *      fan-out loop (point 1), not around the whole delivery: one account's bad credential must
+ *      not abandon another workspace's otherwise-good ingestion of the same delivery. Because the
+ *      failure is recorded rather than rethrown, the delivery still reaches `markProcessed` at the
+ *      end — an `AuthError` is exactly as unretryable as an unknown account (point 2), so leaving
+ *      `processed_at` null here would only requeue a delivery no later attempt can resolve either.
+ *      Any *other* exception (a database error, a transport failure, anything not classified as
+ *      `AuthError`) still propagates uncaught out of the job processor: `processed_at` stays
+ *      `null`, BullMQ retries the job under its own backoff, and the T082 sweeper is a second,
+ *      independent backstop if the job itself is lost rather than merely slow. Re-running an
+ *      account that already succeeded on a retried delivery is safe — `ingestComments.upsert`'s
+ *      `ON CONFLICT DO UPDATE` is idempotent either way.
  */
 
 // oxlint-disable max-dependencies, max-lines -- this worker wires every port `ingest-comments.ts`
@@ -59,6 +74,11 @@ import type {
   IngestTarget,
 } from '#src/modules/comments/application/ingest-comments.ts';
 import {
+  createAccountHealth,
+  type AccountHealth,
+} from '#src/modules/comments/infrastructure/account-health.ts';
+import { appendToOutbox } from '#src/modules/comments/infrastructure/outbox.ts';
+import {
   commentSyncTargets,
   webhookDeliveries,
 } from '#src/modules/comments/infrastructure/schema.ts';
@@ -68,8 +88,16 @@ import type {
   WebhookIngestionEvent,
   WebhookNormalizer,
 } from '#src/platforms/meta/webhook-normalizer.ts';
-import type { AccountCredentials, Accounts } from '#src/modules/platform-core/ports.ts';
-import type { AccountContext, CommentPlatformAdapter } from '#src/platforms/types.ts';
+import type {
+  AccountCredentials,
+  Accounts,
+  SocialAccountRecord,
+} from '#src/modules/platform-core/ports.ts';
+import {
+  AuthError,
+  type AccountContext,
+  type CommentPlatformAdapter,
+} from '#src/platforms/types.ts';
 import { forJob } from '#src/shared/logger.ts';
 import { JOB_NAMES, QUEUE_NAMES } from '#src/shared/queues.ts';
 
@@ -145,39 +173,54 @@ async function resolvePostId(
 }
 
 /**
- * Every local account this event's `(platform, platformAccountId)` names (spec.md §18, module
- * docstring point 1) — an *empty* array means the account is unknown to every workspace (§7.2
- * step 2), the caller's job, not this function's, to decide is a skip rather than a failure.
- * Credentials missing for a *known* account is a local data problem (the two rows are supposed to
- * be written together), so that case still throws.
+ * Builds one account's `AccountContext`, or raises `AuthError` if its credential will not decrypt
+ * (module docstring point 5) — the caller's job to record and skip, never this function's.
+ * Credentials missing *entirely* for a known account is a different, local data problem (the two
+ * rows are supposed to be written together), so that case still throws a plain `Error`.
  */
-async function resolveAccountContexts(
+async function buildAccountContext(
   deps: WebhookWorkerDeps,
+  account: SocialAccountRecord,
   event: WebhookIngestionEvent,
-): Promise<readonly AccountContext[]> {
-  const accounts = await deps.accounts.listByPlatformAccount(
-    event.platform,
-    event.platformAccountId,
-  );
-  const contexts: AccountContext[] = [];
-  for (const account of accounts) {
-    // Each account's credentials lookup is independent, but the list is at most a handful of rows
-    // (spec.md §18 — two workspaces sharing one Page is the rare case this exists for), so there
-    // is nothing here worth a `Promise.all` over a plain sequential loop.
-    // oxlint-disable-next-line no-await-in-loop
-    const credentials = await deps.accountCredentials.findBySocialAccountId(account.id);
-    if (!credentials.found) {
-      throw new Error(`webhook-worker: social account ${account.id} has no credentials row`);
-    }
-    contexts.push({
-      workspaceId: account.workspaceId,
-      socialAccountId: account.id,
-      platform: event.platform,
-      platformAccountId: event.platformAccountId,
-      credentials: credentials.value,
-    });
+): Promise<AccountContext> {
+  const credentials = await deps.accountCredentials.findBySocialAccountId(account.id);
+  if (!credentials.found) {
+    throw new Error(`webhook-worker: social account ${account.id} has no credentials row`);
   }
-  return contexts;
+  return {
+    workspaceId: account.workspaceId,
+    socialAccountId: account.id,
+    platform: event.platform,
+    platformAccountId: event.platformAccountId,
+    credentials: credentials.value,
+  };
+}
+
+/**
+ * D30: records an `AuthError` against `account.id` the same way `publish-comment.ts`'s
+ * `settleAuthFailed` and `sync-post.ts`'s `recordAuthFailure` already do — outbox first (inside
+ * its own transaction), then `account_health` (`AccountHealth.markAuthFailed` does not accept a
+ * transaction handle to join) — never a write to `social_accounts` (D8, D29, Principle II).
+ */
+async function recordAuthFailure(
+  deps: WebhookWorkerDeps,
+  accountHealth: AccountHealth,
+  account: Pick<SocialAccountRecord, 'id' | 'workspaceId'>,
+  reason: string,
+): Promise<void> {
+  await deps.database.transaction((tx) =>
+    appendToOutbox(tx, {
+      workspaceId: account.workspaceId,
+      type: 'account.auth_failed',
+      aggregateId: account.id,
+      data: { socialAccountId: account.id, reason },
+    }),
+  );
+  await accountHealth.markAuthFailed({
+    socialAccountId: account.id,
+    workspaceId: account.workspaceId,
+    reason,
+  });
 }
 
 /**
@@ -264,29 +307,53 @@ async function processDelete(
   });
 }
 
-/** Ingests one event for one resolved account — the fan-out target of {@link processEvent}. */
+/**
+ * Ingests one event for one matching account — the fan-out target of {@link processEvent}.
+ * Catches `AuthError` from *either* `buildAccountContext` (an undecryptable credential) or the
+ * upsert path (`adapter.fetchComment` on a 401/403) and handles it as this account's own terminal
+ * outcome (module docstring point 5): recorded, logged, never rethrown. Rethrowing would fail the
+ * whole job and, with it, every *other* account this same delivery also named — exactly the
+ * fan-out isolation this function exists to preserve.
+ */
 async function processEventForAccount(
   deps: WebhookWorkerDeps,
   adapters: MetaAdapterRegistry,
-  ctx: AccountContext,
+  accountHealth: AccountHealth,
+  account: SocialAccountRecord,
   event: WebhookIngestionEvent,
   jobLogger: Logger,
 ): Promise<void> {
-  if (event.type === 'delete') {
-    await processDelete(deps, ctx, event);
-    return;
+  try {
+    const ctx = await buildAccountContext(deps, account, event);
+    if (event.type === 'delete') {
+      await processDelete(deps, ctx, event);
+      return;
+    }
+    await processUpsert(deps, adapters, ctx, event, jobLogger);
+  } catch (error) {
+    if (!(error instanceof AuthError)) {
+      throw error;
+    }
+    await recordAuthFailure(deps, accountHealth, account, error.message);
+    jobLogger.warn(
+      { socialAccountId: account.id, workspaceId: account.workspaceId },
+      'webhook-worker: account auth failed, recorded and skipped',
+    );
   }
-  await processUpsert(deps, adapters, ctx, event, jobLogger);
 }
 
 async function processEvent(
   deps: WebhookWorkerDeps,
   adapters: MetaAdapterRegistry,
+  accountHealth: AccountHealth,
   event: WebhookIngestionEvent,
   jobLogger: Logger,
 ): Promise<void> {
-  const contexts = await resolveAccountContexts(deps, event);
-  if (contexts.length === 0) {
+  const accounts = await deps.accounts.listByPlatformAccount(
+    event.platform,
+    event.platformAccountId,
+  );
+  if (accounts.length === 0) {
     // §7.2 step 2: never retried — a delivery about an account no workspace connected cannot
     // succeed on a later attempt either.
     jobLogger.warn(
@@ -296,18 +363,20 @@ async function processEvent(
     return;
   }
 
-  for (const ctx of contexts) {
+  for (const account of accounts) {
     // One event, ingested once per matching account (module docstring point 1) — each account's
-    // own transaction is independent, and `UNIQUE (social_account_id, platform_comment_id)` keeps
-    // them apart, so sequential here only keeps one delivery's log order readable.
+    // own transaction, and its own `AuthError` handling, is independent, and
+    // `UNIQUE (social_account_id, platform_comment_id)` keeps the resulting rows apart, so
+    // sequential here only keeps one delivery's log order readable.
     // oxlint-disable-next-line no-await-in-loop
-    await processEventForAccount(deps, adapters, ctx, event, jobLogger);
+    await processEventForAccount(deps, adapters, accountHealth, account, event, jobLogger);
   }
 }
 
 async function processDelivery(
   deps: WebhookWorkerDeps,
   adapters: MetaAdapterRegistry,
+  accountHealth: AccountHealth,
   deliveryId: string,
   jobLogger: Logger,
 ): Promise<void> {
@@ -323,8 +392,10 @@ async function processDelivery(
     // processing simple to reason about and to log — deliveries are not high-volume enough for
     // this to matter (Meta redelivers over 36h, not per-second).
     // oxlint-disable-next-line no-await-in-loop
-    await processEvent(deps, adapters, event, jobLogger);
+    await processEvent(deps, adapters, accountHealth, event, jobLogger);
   }
+  // Reached even when one or more accounts hit `AuthError` above (module docstring point 5) —
+  // that outcome is recorded and terminal, not a reason to leave this delivery unprocessed.
   await markProcessed(deps.database, deliveryId);
 }
 
@@ -358,13 +429,16 @@ function deliveryIdFromJob(job: Job): string {
  */
 export function createWebhookWorker(deps: WebhookWorkerDeps): Worker {
   const adapters = buildMetaAdapterRegistry(deps.config);
+  // Only needs `deps.database` (module docstring point 5) — built here rather than added to
+  // `WebhookWorkerDeps`, since every other caller already owns exactly the handle this needs.
+  const accountHealth = createAccountHealth(deps.database);
 
   return new Worker(
     QUEUE_NAMES.webhookProcess,
     async (job: Job): Promise<void> => {
       const deliveryId = deliveryIdFromJob(job);
       const jobLogger = forJob(deps.logger, deliveryId);
-      await processDelivery(deps, adapters, deliveryId, jobLogger);
+      await processDelivery(deps, adapters, accountHealth, deliveryId, jobLogger);
     },
     { connection: deps.redis, concurrency: WORKER_CONCURRENCY },
   );

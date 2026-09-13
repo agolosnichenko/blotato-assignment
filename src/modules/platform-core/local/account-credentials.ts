@@ -9,6 +9,15 @@
  * that packs or unpacks it: `iv (12 bytes) || authTag (16 bytes) || ciphertext`. Anything that
  * writes `credentials_ciphertext` — today only `scripts/seed-account.ts` — must use
  * {@link packCredentials} so this reads back correctly.
+ *
+ * A ciphertext that will not decrypt (a botched key rotation, a corrupted row) is raised as an
+ * `AuthError` (spec.md §18 "An undecryptable credential is an `AuthError`"), not the bare
+ * `KeyVersionMismatchError` / GCM-tag `Error` `decrypt` itself throws. Nothing downstream typed
+ * either of those, so nothing handled them: before this, a worker hitting one retried forever
+ * (found by an integration test hanging its full timeout rather than failing). `AuthError` is the
+ * honest classification either way — the credential is unusable and only a reconnection fixes
+ * it — and it is what `publish-comment.ts`'s own `AuthError` branch and D30's `account_health`
+ * machinery already exist to receive.
  */
 
 import { eq } from 'drizzle-orm';
@@ -22,7 +31,7 @@ import {
   type AccountCredentialsRecord,
   type Found,
 } from '#src/modules/platform-core/ports.ts';
-import type { Platform } from '#src/platforms/types.ts';
+import { AuthError, type Platform } from '#src/platforms/types.ts';
 
 const IV_LENGTH_BYTES = 12;
 const AUTH_TAG_LENGTH_BYTES = 16;
@@ -76,6 +85,28 @@ export function encryptCredentials(plaintext: Buffer, keyMaterial: KeyMaterial):
   return packCredentials(encrypt(plaintext, keyMaterial));
 }
 
+/**
+ * Unpacks and decrypts one row's `credentials_ciphertext`, raising `AuthError` — never the bare
+ * `KeyVersionMismatchError` or GCM-tag `Error` `decrypt` itself throws — on any failure (module
+ * docstring). The message carries `socialAccountId` and the stored `credentialsKeyVersion` for
+ * diagnosis; never the ciphertext or any key material.
+ */
+function decryptOrAuthError(
+  row: { socialAccountId: string; credentialsCiphertext: Buffer; credentialsKeyVersion: number },
+  keyMaterial: KeyMaterial,
+): Buffer {
+  try {
+    const payload = unpackCredentials(row.credentialsCiphertext, row.credentialsKeyVersion);
+    return decrypt(payload, keyMaterial);
+  } catch (error) {
+    throw new AuthError(
+      `credentials for social account ${row.socialAccountId} (key_version ` +
+        `${row.credentialsKeyVersion}) could not be decrypted`,
+      { cause: error },
+    );
+  }
+}
+
 export function createLocalAccountCredentials(
   db: NodePgDatabase,
   keyMaterial: KeyMaterial,
@@ -97,8 +128,7 @@ export function createLocalAccountCredentials(
         return NOT_FOUND;
       }
 
-      const payload = unpackCredentials(row.credentialsCiphertext, row.credentialsKeyVersion);
-      const token = decrypt(payload, keyMaterial);
+      const token = decryptOrAuthError(row, keyMaterial);
 
       return found(toCredentialsRecord(row, token));
     },

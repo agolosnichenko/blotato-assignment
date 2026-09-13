@@ -107,7 +107,20 @@ interface SeededAccount {
   readonly platformAccountId: string;
 }
 
-async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccount> {
+interface SeedWorkspaceAndAccountOptions {
+  /**
+   * Mismatches the stored column against `testKeyMaterial()`'s real `keyVersion: 1` to force a
+   * deterministic `KeyVersionMismatchError` inside `decrypt` — real ciphertext, wrong declared
+   * version, no need to corrupt any bytes (mirrors `webhook-worker.integration.test.ts`'s own
+   * `seedWorkspaceAndAccount`, same reasoning).
+   */
+  readonly credentialsKeyVersion?: number;
+}
+
+async function seedWorkspaceAndAccount(
+  db: NodePgDatabase,
+  options: SeedWorkspaceAndAccountOptions = {},
+): Promise<SeededAccount> {
   const workspaceId = generateId();
   const socialAccountId = generateId();
   const platformAccountId = 'bsky-demo-account';
@@ -128,7 +141,7 @@ async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccoun
     platformAccountId,
     username: 'demo',
     credentialsCiphertext,
-    credentialsKeyVersion: 1,
+    credentialsKeyVersion: options.credentialsKeyVersion ?? 1,
     status: 'active',
     createdAt: new Date(),
   });
@@ -565,6 +578,33 @@ describe('AuthError: account_health, not social_accounts (D30, A19)', () => {
     // violation, and a narrower assertion would not notice it.
     const rawAccountAfter = await selectSocialAccountRow(db, account.socialAccountId);
     expect(rawAccountAfter).toEqual(rawAccountBefore);
+  });
+});
+
+describe('AuthError from loadAccountContext itself (D30, an undecryptable credential)', () => {
+  it('settles failed via settleAuthFailed, records account_health, never reaches the adapter', async () => {
+    const { db } = harness;
+    const account = await seedWorkspaceAndAccount(db, { credentialsKeyVersion: 999 });
+    const commentId = await seedComment(db, account);
+    // Never settled on ('success' is simplest) — the point of this case is that `attemptSend`'s
+    // first `catch`, around `loadAccountContext`, must settle this before the adapter is ever
+    // reached; `sendsReceived()` below is this test's proof that it really didn't.
+    const double = createAdapterDouble({ kind: 'success' });
+
+    await buildPublishComment(db, double.adapter).publish(commentId);
+
+    await expectFailedWithCode(db, commentId, 'PLATFORM_AUTH_FAILED');
+    expect(double.sendsReceived()).toBe(0);
+    expect(await outboxRowsFor(db, account.socialAccountId, 'account.auth_failed')).toHaveLength(1);
+
+    const [healthRow] = await db
+      .select()
+      .from(accountHealth)
+      .where(eq(accountHealth.socialAccountId, account.socialAccountId));
+    expect(healthRow).toMatchObject({
+      socialAccountId: account.socialAccountId,
+      state: 'auth_failed',
+    });
   });
 });
 

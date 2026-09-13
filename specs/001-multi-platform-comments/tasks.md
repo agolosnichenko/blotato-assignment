@@ -492,7 +492,7 @@ platform side and verify a complete refresh marks it deleted.
       parent is unknown is attached correctly after the ancestor walk; and an event arriving **without
       `text`** is completed through `fetchComment` instead of blanking the stored text (A18, T081)
       (FR-017, FR-022, SC-003)
-- [ ] T072 [P] [US3] Create `src/modules/comments/http/webhook.integration.test.ts` (V4): a valid
+- [X] T072 [P] [US3] Create `src/modules/comments/http/webhook.integration.test.ts` (V4): a valid
       signed delivery is stored and acknowledged in under a second; a tampered signature is rejected
       with nothing stored; an event for an unknown account is acknowledged and marked processed with
       a warning rather than retried; the `GET` handshake echoes `hub.challenge` only after

@@ -701,6 +701,16 @@ implementation.
 
 ### Recorded changes
 
+- **An undecryptable credential is an `AuthError` (extends D26/D30).** `AccountCredentials`
+  decrypts the stored token on every read, and a ciphertext that will not decrypt — a botched key
+  rotation, a corrupted row — raised a bare crypto error. Nothing typed it, so nothing handled it:
+  the webhook worker retried such a delivery under backoff **forever**, and the publish path had no
+  case for it either. Typed as `AuthError`, it flows into machinery that already exists: D30 records
+  `auth_failed` in this service's own `account_health`, emits `account.auth_failed`, and stops the
+  account's jobs. That is also the honest classification — the credential is unusable and only a
+  reconnection fixes it, which is exactly what `AuthError` means everywhere else. Found by an
+  integration test hanging for its full 60-second budget rather than failing; the hang, not the
+  failure, was the symptom worth chasing.
 - **`Accounts.listByPlatformAccount` (extends the `Accounts` port, §4.2/D8).** A webhook delivery
   identifies its account only by the platform's own id — a Page id or an IG user id — while every
   existing lookup is keyed by our internal `social_account_id`. The webhook worker therefore cannot

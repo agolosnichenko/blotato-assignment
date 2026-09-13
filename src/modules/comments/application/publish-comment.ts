@@ -489,7 +489,15 @@ function handlePublishError(
 /**
  * One publish attempt: loads the account context, calls the adapter exactly once, and settles
  * the outcome. Loading the context (account + credentials) can itself fail before the adapter is
- * ever reached — that is handled the same as `PermanentError`, since nothing was sent either way.
+ * ever reached. An `AuthError` there — `AccountCredentials.findBySocialAccountId` raises it when
+ * the stored token will not decrypt (account-credentials.ts, spec.md §18 "An undecryptable
+ * credential is an `AuthError`") — gets the same D30 treatment as an `AuthError` from the adapter
+ * call below: `settleAuthFailed`, never `settleFailed('PLATFORM_REJECTED', ...)`. Routing it to
+ * the latter would fail this one comment without ever recording `account_health`, leaving every
+ * subsequent comment for the same account to fail the same way, one at a time, forever, while an
+ * operator reading `account_health` sees a healthy account. Anything else loading the context can
+ * throw (account or credentials row missing) is still handled as `PermanentError` is — nothing
+ * was sent either way, and only `AuthError` carries D30's specific meaning.
  */
 async function attemptSend(
   deps: PublishCommentDeps,
@@ -503,6 +511,9 @@ async function attemptSend(
     ctx = await loadAccountContext(deps, target);
     adapter = deps.getAdapter(target.platform as Platform);
   } catch (error) {
+    if (error instanceof AuthError) {
+      return settleAuthFailed(deps, target, error.message);
+    }
     const message = error instanceof Error ? error.message : String(error);
     return settleFailed(deps, target, 'PLATFORM_REJECTED', message);
   }

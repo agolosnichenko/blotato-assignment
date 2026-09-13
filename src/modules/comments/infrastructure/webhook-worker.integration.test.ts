@@ -5,11 +5,15 @@
  * the real `page.feed` normalizer, and the real Facebook adapter with only its Graph API HTTP call
  * intercepted (msw) — never the worker's own internal functions, which are not exported.
  *
- * Four cases, one per module docstring point plus the ordinary path:
+ * One case per module docstring point, plus the ordinary path:
  *   - unknown account (§7.2 step 2): processed, no comment row, no adapter call.
  *   - a complete `page.feed` add: a comment row appears with the payload's own data.
  *   - a thin `page.feed` edit (A18): completed via `adapter.fetchComment` (msw), not stored empty.
  *   - a `page.feed` remove on an existing row: the shared delete branch runs (status `deleted`).
+ *   - two accounts sharing one `platformAccountId`, different workspaces: both get their own row.
+ *   - an undecryptable credential, and an adapter-rejected (401) credential (D30, point 5): both
+ *     record `account_health`/outbox `account.auth_failed`, mark the delivery processed, and do
+ *     not retry — plus one fan-out case proving a bad account does not abandon a good one.
  */
 
 // oxlint-disable max-dependencies, max-lines -- this test wires a full harness (Postgres, Redis,
@@ -29,7 +33,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { loadConfig } from '#src/app/config.ts';
 import { createIngestComments } from '#src/modules/comments/application/ingest-comments.ts';
 import { createWebhookWorker } from '#src/modules/comments/infrastructure/webhook-worker.ts';
-import { comments, webhookDeliveries } from '#src/modules/comments/infrastructure/schema.ts';
+import {
+  accountHealth,
+  comments,
+  outboxEvents,
+  webhookDeliveries,
+} from '#src/modules/comments/infrastructure/schema.ts';
 import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import {
   createLocalAccountCredentials,
@@ -115,6 +124,19 @@ interface SeededAccount {
   readonly platformAccountId: string;
 }
 
+interface SeedWorkspaceAndAccountOptions {
+  readonly platformAccountId?: string;
+  /**
+   * Mismatches the stored column against the worker's real key material (`keyVersion: 1` in
+   * `setupHarness`) to force a deterministic `KeyVersionMismatchError` inside `decrypt` — real
+   * ciphertext, wrong declared version, no need to corrupt any bytes. `unpackCredentials` builds
+   * its `EncryptedPayload.keyVersion` from this column, not from anything encoded in the blob
+   * itself (`account-credentials.ts`'s own docstring), so this alone is enough to make the stored
+   * credential undecryptable.
+   */
+  readonly credentialsKeyVersion?: number;
+}
+
 /**
  * A fresh `platformAccountId` per call by default — most tests want one account per delivery, not
  * the fan-out this port now explicitly allows (`listByPlatformAccount`, spec.md §18:
@@ -124,10 +146,11 @@ interface SeededAccount {
  */
 async function seedWorkspaceAndAccount(
   db: NodePgDatabase,
-  platformAccountId: string = `page-${generateId()}`,
+  options: SeedWorkspaceAndAccountOptions = {},
 ): Promise<SeededAccount> {
   const workspaceId = generateId();
   const socialAccountId = generateId();
+  const platformAccountId = options.platformAccountId ?? `page-${generateId()}`;
   const credentialsCiphertext = encryptCredentials(Buffer.from('page-token'), {
     key: Buffer.from(TEST_ENV.CREDENTIALS_ENCRYPTION_KEY, 'base64'),
     keyVersion: 1,
@@ -147,7 +170,7 @@ async function seedWorkspaceAndAccount(
     username: 'demo-page',
     authVariant: null,
     credentialsCiphertext,
-    credentialsKeyVersion: 1,
+    credentialsKeyVersion: options.credentialsKeyVersion ?? 1,
     status: 'active',
     createdAt: new Date(),
   });
@@ -371,17 +394,29 @@ describe('a page.feed remove on an existing row', () => {
   });
 });
 
+interface TwoAccountsOnOnePage {
+  readonly accountA: SeededAccount;
+  readonly accountB: SeededAccount;
+}
+
+/** Two accounts, different workspaces, sharing one `platformAccountId` — the case this port's
+ * `listByPlatformAccount` exists for (spec.md §18). */
+async function seedTwoAccountsSharingOnePage(db: NodePgDatabase): Promise<TwoAccountsOnOnePage> {
+  const platformAccountId = `page-${generateId()}`;
+  const accountA = await seedWorkspaceAndAccount(db, { platformAccountId });
+  const accountB = await seedWorkspaceAndAccount(db, { platformAccountId });
+  return { accountA, accountB };
+}
+
 describe('two workspaces sharing one platformAccountId (spec.md §18 fan-out)', () => {
   it('ingests once per account, each into its own workspace, neither reading the other', async () => {
     const { db, webhookQueue } = harness;
-    const sharedPlatformAccountId = `page-${generateId()}`;
-    const accountA = await seedWorkspaceAndAccount(db, sharedPlatformAccountId);
-    const accountB = await seedWorkspaceAndAccount(db, sharedPlatformAccountId);
+    const { accountA, accountB } = await seedTwoAccountsSharingOnePage(db);
     expect(accountA.workspaceId).not.toBe(accountB.workspaceId);
 
     const deliveryId = await seedDelivery(
       db,
-      pageFeedDelivery(sharedPlatformAccountId, {
+      pageFeedDelivery(accountA.platformAccountId, {
         item: 'comment',
         verb: 'add',
         comment_id: 'comment-shared-page',
@@ -416,5 +451,153 @@ describe('two workspaces sharing one platformAccountId (spec.md §18 fan-out)', 
     // shared between workspaces, and a workspace-scoped read (any `WHERE workspace_id = ...`
     // query in the codebase) would see only its own.
     expect(rowForA?.workspaceId).not.toBe(rowForB?.workspaceId);
+  });
+});
+
+/** Shared assertions for both `AuthError` cases below: `account_health` carries `auth_failed`,
+ * the `account.auth_failed` outbox row exists, and the job completed on its first attempt (D30,
+ * module docstring point 5 — the failure is recorded, not rethrown, so there is nothing to retry). */
+async function expectAuthFailureRecorded(
+  db: NodePgDatabase,
+  webhookQueue: Queue,
+  account: SeededAccount,
+  deliveryId: string,
+): Promise<void> {
+  const [health] = await db
+    .select()
+    .from(accountHealth)
+    .where(eq(accountHealth.socialAccountId, account.socialAccountId));
+  expect(health).toMatchObject({ workspaceId: account.workspaceId, state: 'auth_failed' });
+
+  const [outboxRow] = await db
+    .select()
+    .from(outboxEvents)
+    .where(eq(outboxEvents.aggregateId, account.socialAccountId));
+  expect(outboxRow).toMatchObject({
+    workspaceId: account.workspaceId,
+    type: 'account.auth_failed',
+  });
+
+  const job = await webhookQueue.getJob(deliveryId);
+  expect(job?.attemptsMade).toBe(1);
+}
+
+describe('an undecryptable credential (D30, spec.md §18 "An undecryptable credential is an AuthError")', () => {
+  it('records account_health + outbox, marks the delivery processed, does not retry, ingests nothing', async () => {
+    const { db, webhookQueue } = harness;
+    const account = await seedWorkspaceAndAccount(db, { credentialsKeyVersion: 999 });
+    const deliveryId = await seedDelivery(
+      db,
+      pageFeedDelivery(account.platformAccountId, {
+        item: 'comment',
+        verb: 'add',
+        comment_id: 'comment-undecryptable',
+        post_id: POST_ID,
+        message: 'never reaches ingestComments',
+        from: { id: 'author-undecryptable' },
+        created_time: 1_700_000_000,
+      }),
+    );
+
+    await webhookQueue.add(JOB_NAMES.processDelivery, { deliveryId }, { jobId: deliveryId });
+    await waitUntilProcessed(db, deliveryId);
+    await expectAuthFailureRecorded(db, webhookQueue, account, deliveryId);
+
+    const [row] = await db
+      .select()
+      .from(comments)
+      .where(eq(comments.platformCommentId, 'comment-undecryptable'));
+    expect(row).toBeUndefined();
+  });
+});
+
+describe('the adapter rejecting the credential while completing a thin payload (401)', () => {
+  it('records account_health + outbox, marks the delivery processed, does not retry, ingests nothing', async () => {
+    server.use(
+      http.get(`https://graph.facebook.com/${GRAPH_VERSION}/comment-unauthorized`, () =>
+        HttpResponse.json({ error: { message: 'Invalid OAuth access token' } }, { status: 401 }),
+      ),
+    );
+
+    const { db, webhookQueue } = harness;
+    const account = await seedWorkspaceAndAccount(db);
+    const payload = pageFeedDelivery(account.platformAccountId, {
+      item: 'comment',
+      verb: 'edited',
+      comment_id: 'comment-unauthorized',
+      post_id: POST_ID,
+      from: { id: 'author-unauthorized' },
+      created_time: 1_700_000_000,
+    });
+    const entry = payload['entry'] as [{ changes: [{ value: Record<string, unknown> }] }];
+    delete entry[0].changes[0].value['message'];
+    const deliveryId = await seedDelivery(db, payload);
+
+    await webhookQueue.add(JOB_NAMES.processDelivery, { deliveryId }, { jobId: deliveryId });
+    await waitUntilProcessed(db, deliveryId);
+    await expectAuthFailureRecorded(db, webhookQueue, account, deliveryId);
+
+    const [row] = await db
+      .select()
+      .from(comments)
+      .where(eq(comments.platformCommentId, 'comment-unauthorized'));
+    expect(row).toBeUndefined();
+  });
+});
+
+interface MixedAccounts {
+  readonly goodAccount: SeededAccount;
+  readonly badAccount: SeededAccount;
+}
+
+/** One good account and one whose credential will not decrypt, sharing a `platformAccountId`. */
+async function seedMixedAccounts(db: NodePgDatabase): Promise<MixedAccounts> {
+  const sharedPlatformAccountId = `page-${generateId()}`;
+  const goodAccount = await seedWorkspaceAndAccount(db, {
+    platformAccountId: sharedPlatformAccountId,
+  });
+  const badAccount = await seedWorkspaceAndAccount(db, {
+    platformAccountId: sharedPlatformAccountId,
+    credentialsKeyVersion: 999,
+  });
+  return { goodAccount, badAccount };
+}
+
+describe('fan-out: one account’s AuthError does not abandon another account in the same delivery', () => {
+  it('the good account still gets its comment row; the bad one is recorded and skipped', async () => {
+    const { db, webhookQueue } = harness;
+    const { goodAccount, badAccount } = await seedMixedAccounts(db);
+
+    const deliveryId = await seedDelivery(
+      db,
+      pageFeedDelivery(goodAccount.platformAccountId, {
+        item: 'comment',
+        verb: 'add',
+        comment_id: 'comment-one-bad-one-good',
+        post_id: POST_ID,
+        message: 'one workspace gets this, the other gets a recorded failure',
+        from: { id: 'author-mixed' },
+        created_time: 1_700_000_000,
+      }),
+    );
+
+    await webhookQueue.add(JOB_NAMES.processDelivery, { deliveryId }, { jobId: deliveryId });
+    await waitUntilProcessed(db, deliveryId);
+
+    const rows = await db
+      .select()
+      .from(comments)
+      .where(eq(comments.platformCommentId, 'comment-one-bad-one-good'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ workspaceId: goodAccount.workspaceId });
+
+    const [health] = await db
+      .select()
+      .from(accountHealth)
+      .where(eq(accountHealth.socialAccountId, badAccount.socialAccountId));
+    expect(health).toMatchObject({ state: 'auth_failed' });
+
+    const job = await webhookQueue.getJob(deliveryId);
+    expect(job?.attemptsMade).toBe(1);
   });
 });
