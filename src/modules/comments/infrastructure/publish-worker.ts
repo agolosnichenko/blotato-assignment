@@ -269,9 +269,10 @@ export function createPublishWorker(deps: PublishWorkerDeps): Worker {
 
       const socialAccountId = await loadSocialAccountId(deps.database, commentId);
       if (socialAccountId === null) {
-        // Nothing to publish and nothing to retry — comments are never hard-deleted (FR-030
-        // nulls fields on delete, it does not remove the row), so a missing row here means a
-        // stale or malformed jobId, not a race worth reconciling.
+        // Nothing to publish and nothing to retry. A soft-deleted comment (FR-030 nulls fields,
+        // it does not remove the row — `purge-retention.ts` is the only hard delete, and only
+        // after the retention window, long after any pending publish job) still has a row here,
+        // so a missing row means a stale or malformed jobId, not a race worth reconciling.
         jobLogger.warn('publish-worker: comment not found, skipping');
         return;
       }

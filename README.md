@@ -147,14 +147,13 @@ was never registered as a refresh target (via the `PostPublished` port, or by se
 
 ### `$POST_ID`, `$IG_REPLY_ID`, `$JOB_ID` — where they come from
 
-`pnpm seed:account` is the intended one-command path (a demo workspace, connected Instagram /
-Facebook / Bluesky accounts, and published posts registered as refresh targets) but **has not
-landed yet** (task T039) — say so rather than pretend otherwise. Until it does, seed equivalent rows
-by hand against the local database described below: a row in `workspaces`, one in `social_accounts`
-per platform you want to exercise, one in `posts`, and — to exercise step 6 above without running a
-worker against real Instagram credentials — two rows directly in `comments` (`depth: 0` and
-`depth: 1`, `status: 'posted'`, `source: 'sync'`) to represent an already-ingested thread. This is
-exactly how the walkthrough above was produced.
+`pnpm seed:account` (task T039) is the one-command path for the workspace, an API key, one
+connected account per comment-capable platform (Instagram, Facebook, Bluesky), and one published
+post per account registered as a refresh target. It prints the `$POST_ID`s and the minted
+`$API_KEY`. It does not insert any comments, though — to get a `$IG_REPLY_ID` to reply to without
+running a worker against real Instagram credentials, seed two rows directly in `comments`
+(`depth: 0` and `depth: 1`, `status: 'posted'`, `source: 'sync'`) against one of the seeded posts,
+to represent an already-ingested thread. This is exactly how the walkthrough above was produced.
 
 ## Run it locally
 
@@ -170,9 +169,9 @@ pnpm dev:worker                    # in a second terminal — publishing, sync, 
 
 `.env.example` documents every variable; the ones with no safe default (`CREDENTIALS_ENCRYPTION_KEY`
 — 32 bytes base64, `openssl rand -base64 32`; `META_APP_SECRET`, `META_APP_SECRET_INSTAGRAM`,
-`META_WEBHOOK_VERIFY_TOKEN`) need a value before the process starts config validation fails fast and
-names exactly which one. For a local run that never talks to a real Meta App, any non-empty string
-for the Meta secrets is enough — they're only exercised by the (not yet implemented, see DESIGN.md)
+`META_WEBHOOK_VERIFY_TOKEN`) need a value before the process starts — config validation fails fast
+and names exactly which one is missing. For a local run that never talks to a real Meta App, any
+non-empty string for the Meta secrets is enough — they're only exercised by the (not yet implemented, see DESIGN.md)
 webhook path and by the Meta adapter's own HMAC helper.
 
 Gates before any commit (also what CI runs):
@@ -213,7 +212,9 @@ src/
     types.ts        CommentPlatformAdapter port, normalized types, the four typed adapter errors
     meta/           Graph API client (host/token by auth_variant), Instagram + Facebook adapters
     bluesky/        AT Protocol adapter
-scripts/          create-api-key, seed-account, generate-openapi, smoke, and the Meta spikes
+scripts/          create-api-key, seed-account, generate-openapi, and the Meta spikes. `smoke`
+                  (T108, a deployed-walkthrough check) is declared in package.json but its script
+                  does not exist yet — it waits on a deployment URL (see §9, "Not deployed")
 drizzle/          SQL migrations (generated, committed, reviewed)
 specs/            the spec-kit artifacts this was planned from (plan, data model, contracts, tasks)
 ```

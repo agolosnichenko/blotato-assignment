@@ -409,8 +409,11 @@ them; only host and token selection differ, and that selection lives entirely in
 
 **Bluesky specifics.** `platform_post_id`/`platform_comment_id` are AT URIs; `cid` lives in
 `platform_meta` because replying needs both. Deletion has two signals instead of one: a
-`notFoundPost` tombstone in a returned thread is explicit and can mark that comment deleted on its
-own; absence still needs a complete walk, same as Meta.
+`notFoundPost` tombstone in a returned thread is explicit, and `CommentPage` carries the platform
+comment ids a page reports this way in a field separate from `comments` (`deletedPlatformCommentIds`)
+— so the refresh walk can route them straight through the same delete branch a webhook delete uses,
+without ever upserting them as a live comment or adding them to the walk's seen set (spec.md §18).
+Absence still needs a complete walk, same as Meta.
 
 ## 7. Key decisions, trade-offs, and what was rejected
 
@@ -529,16 +532,25 @@ limiting; OpenAPI generation with a CI drift check.
   §17, ingestion for Instagram and Facebook runs through sync only. The `webhook_deliveries` table,
   the `WebhookNormalizer` type, and the shared upsert path it would call all exist and are exercised
   by sync today — what's missing is the HTTP front door and the normalizer itself.
-- **The transactional outbox relay** isn't wired into the `scheduler` queue's job dispatch yet.
-  Events are written correctly, in the same transaction as the state change they describe (D9); the
-  repeatable job that would select unpublished rows and publish them to BullMQ is a separate,
-  tracked task. Nothing downstream consumes `domain-events` in this deliverable anyway (§14, out of
-  scope), so this has no visible effect on any endpoint — but it means events are not yet actually
-  leaving Postgres.
-
 **Not deployed.** The Railway configuration (D24 — `api` and `worker` from one Dockerfile, managed
 Postgres and Redis, migrations as a pre-deploy step) is written but has not been applied. The README
 has a placeholder for the deployment URL and a verified local walkthrough in its place.
+
+**Two honest gaps in what's running today, not design decisions:**
+
+- **The transactional outbox relay is wired but has nowhere to put its output.** It runs every 10s
+  on the `scheduler` queue (`src/app/worker.ts`'s `OUTBOX_RELAY_JOB`) and publishes unrelayed
+  `outbox_events` rows to the `domain-events` BullMQ queue, correctly draining Postgres (D9). But
+  nothing downstream consumes that queue in this deliverable (§14, out of scope), and the queue
+  declares no consumer and no `removeOnComplete`. On a `noeviction` Redis — chosen deliberately in
+  §9.2 so a full Redis fails loudly instead of silently dropping queue data — jobs on
+  `domain-events` simply accumulate without bound. Fine for a demo run, not for anything left
+  running unattended.
+- **A seeded Instagram refresh target fails on every scheduler tick.** Instagram comment *reads*
+  throw rather than return data (S2 ungated, see above), and `pnpm seed:account` registers an
+  Instagram account as a sync target. Running the demo therefore produces a steady stream of
+  `failed` rows in `comment_sync_jobs` for that target — expected, given the gate above, but a
+  reader watching the worker logs deserves to know why before assuming something is broken.
 
 ## 10. Differences from Blotato's current `/v2/comments` (D3)
 

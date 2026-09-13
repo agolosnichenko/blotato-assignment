@@ -17,6 +17,13 @@
  * `comment-publish` is enqueued strictly after commit, keyed on `jobId = comment.id` (§7.1 step 4,
  * A15). A failed enqueue is logged and swallowed — the row is already durable, and the stuck-work
  * sweeper re-enqueues any `queued` comment older than a minute with no active job.
+ *
+ * Two simultaneous requests carrying the same `Idempotency-Key` both pass `resolveIdempotency`
+ * before either has committed (there is nothing to find yet), so both reach the insert, and
+ * `comments_workspace_idempotency_key_key` lets exactly one of them through — the other fails the
+ * transaction with a unique violation rather than returning the inserted row. `createReply` catches
+ * that violation (`isUniqueViolation`, reused from `publish-comment.ts`) and re-reads the winner by
+ * idempotency key, so both callers get `202` with the same comment instead of one getting `500`.
  */
 
 // oxlint-disable max-dependencies -- this use case wires every port its pre-flight and its
@@ -32,6 +39,7 @@
 import { createHash } from 'node:crypto';
 import type { Queue } from 'bullmq';
 import type { Logger } from 'pino';
+import { isUniqueViolation } from '#src/modules/comments/application/publish-comment.ts';
 import { checkReplyDepth, checkTextLength } from '#src/modules/comments/domain/limits.ts';
 import type {
   CommentRecord,
@@ -191,6 +199,31 @@ async function resolveIdempotency(
   return existing;
 }
 
+/**
+ * Recovers from a concurrent insert under the same idempotency key: the conflicting request
+ * committed first, so its row is read back and returned in place of retrying the insert — re-runs
+ * the same mismatch check `resolveIdempotency` would have made had it arrived a moment later.
+ */
+async function resolveIdempotencyConflict(
+  repository: CommentRepository,
+  input: CreateReplyInput,
+): Promise<CommentRecord | null> {
+  if (input.idempotencyKey === null) {
+    return null;
+  }
+  const winner = await repository.findByIdempotencyKey(input.workspaceId, input.idempotencyKey);
+  if (winner === null) {
+    return null;
+  }
+  if (hashRequestText(winner.text ?? '') !== hashRequestText(input.text)) {
+    throw new ApiError(
+      'IDEMPOTENCY_KEY_REUSED',
+      `idempotency key ${input.idempotencyKey} was already used with a different request body`,
+    );
+  }
+  return winner;
+}
+
 /** Reserves the monthly contact allowance, skipping it when the parent's author is the account itself. */
 async function reserveQuotaIfNeeded(
   tx: OutboxTransaction,
@@ -300,7 +333,19 @@ export async function createReply(
     return existing;
   }
 
-  const comment = await insertReplyTransactionally(deps, input, parent, account);
+  let comment: CommentRecord;
+  try {
+    comment = await insertReplyTransactionally(deps, input, parent, account);
+  } catch (error) {
+    if (!isUniqueViolation(error)) {
+      throw error;
+    }
+    const winner = await resolveIdempotencyConflict(deps.repository, input);
+    if (winner === null) {
+      throw error;
+    }
+    return winner;
+  }
   await enqueuePublish(deps, comment);
   return comment;
 }

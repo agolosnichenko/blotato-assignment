@@ -5,34 +5,32 @@
  * walk `app.bsky.feed.getPostThread`.
  *
  * **Paging a tree, not a list.** `getPostThread` returns a whole subtree up to `depth` levels
- * (`Config.BLUESKY_THREAD_DEPTH`, spec §8.3 — deployment-tunable since read cost scales with it,
- * and S4 is the spike that will say what that cost can afford) in one call, not a flat page.
- * `listComments`'s cursor is therefore a JSON-encoded queue of AT URIs still to expand, not a
- * platform cursor: the initial call anchors on the post, and any reply node whose `replies` field
- * came back empty *because the depth budget ran out* (`post.replyCount > 0` with no `replies`
- * array — a real leaf has `replyCount: 0`) is queued for a later call to re-anchor on and keep
- * descending ("loading truncated branches"). `nextCursor` is `null` only once that queue is empty,
- * so a walk interrupted by a thrown error never looks complete.
+ * (`Config.BLUESKY_THREAD_DEPTH`, spec §8.3) in one call, not a flat page. `listComments`'s
+ * cursor is therefore a JSON-encoded queue of AT URIs still to expand, not a platform cursor: the
+ * initial call anchors on the post, and any reply node whose `replies` field came back empty
+ * *because the depth budget ran out* (`post.replyCount > 0` with no `replies` array — a real leaf
+ * has `replyCount: 0`) is queued for a later call to re-anchor on and keep descending ("loading
+ * truncated branches"). `nextCursor` is `null` only once that queue is empty, so a walk
+ * interrupted by a thrown error never looks complete.
  *
  * **Two deletion signals, kept apart.** A `notFoundPost` in the thread is the AT Protocol's
- * explicit tombstone: the record existed and is now gone, independent of whether this walk ever
- * finishes. It is surfaced as a `NormalizedComment` with `platformMeta.tombstone: true` and every
- * other field an explicit placeholder — `platformMeta` is the port's documented adapter-specific
- * extension point (`types.ts`). `fetchComment` folds the same signal into the plain `null` the
- * port already defines for "nothing here" — one comment in play, no list to keep complete. A
- * `blockedPost` is not a tombstone (unreadable ≠ deleted) and is skipped; ordinary absence from a
- * *complete* walk is what any other removal falls back to, a decision for the sync walk (T086).
+ * explicit tombstone, independent of whether this walk ever finishes. Its id goes on
+ * `CommentPage.deletedPlatformCommentIds`, never inside `comments` (spec.md §18, extends §8.3) —
+ * folding it into an ordinary `NormalizedComment` would both upsert a phantom `posted` row and,
+ * by marking it *seen*, suppress the absence-based fallback it was meant to pre-empt.
+ * `fetchComment` folds the same signal into the plain `null` the port already defines for
+ * "nothing here". A `blockedPost` is not a tombstone (unreadable ≠ deleted) and is skipped.
  */
+
+// oxlint-disable max-lines -- one adapter implementing all four `CommentPlatformAdapter` methods
+// plus the two deletion-signal read paths documented above (`listComments`/`fetchComment`, T083);
+// splitting read from write would separate pieces that must agree on the same session and error
+// classification (`classifyBlueskyFailure`), not reduce what the adapter actually does.
 
 import { AppBskyFeedDefs, AppBskyFeedPost, AtpAgent } from '@atproto/api';
 import { classifyBlueskyFailure } from '#src/platforms/bluesky/errors.ts';
 import { detectFacets } from '#src/platforms/bluesky/facets.ts';
-import {
-  normalizePost,
-  parseFrontier,
-  tombstoneFor,
-  walkThread,
-} from '#src/platforms/bluesky/thread.ts';
+import { normalizePost, parseFrontier, walkThread } from '#src/platforms/bluesky/thread.ts';
 import {
   AuthError,
   PermanentError,
@@ -217,6 +215,29 @@ async function findPublishedComment(
   return null;
 }
 
+/**
+ * A node `getPostThread` answered with something other than a thread: the anchor post itself
+ * gone/blocked (throws; `sync-post.ts` deactivates on the `PermanentError` rather than inferring
+ * deletions), or a queued branch that vanished since — only `notFoundPost` is the explicit
+ * tombstone (§8.3); a `blockedPost` is skipped, not reported deleted.
+ */
+function missingNodePage(
+  uri: string,
+  target: PostTarget,
+  rest: string[],
+  thread: unknown,
+): CommentPage {
+  if (uri === target.platformPostId) {
+    throw new PermanentError(`bluesky post ${uri} is unavailable (not found or blocked)`);
+  }
+  const deletedPlatformCommentIds = AppBskyFeedDefs.isNotFoundPost(thread) ? [uri] : [];
+  return {
+    comments: [],
+    deletedPlatformCommentIds,
+    nextCursor: rest.length > 0 ? JSON.stringify(rest) : null,
+  };
+}
+
 async function listComments(
   threadDepth: number,
   ctx: AccountContext,
@@ -228,7 +249,7 @@ async function listComments(
   if (uri === undefined) {
     // An empty queue would mean this call should never have happened — the previous page's
     // `nextCursor` was already `null` — but returning an empty, complete page is still correct.
-    return { comments: [], nextCursor: null };
+    return { comments: [], deletedPlatformCommentIds: [], nextCursor: null };
   }
 
   let response: Awaited<ReturnType<typeof agent.getPostThread>>;
@@ -242,24 +263,20 @@ async function listComments(
   const { thread } = response.data;
 
   if (!AppBskyFeedDefs.isThreadViewPost(thread)) {
-    if (uri === target.platformPostId) {
-      // The anchor post itself is gone or blocked: there is nothing to list and no walk to
-      // complete. `sync-post.ts` (T087) deactivates the target on a `PermanentError` instead of
-      // inferring deletions from what would otherwise look like an empty page.
-      throw new PermanentError(`bluesky post ${uri} is unavailable (not found or blocked)`);
-    }
-    // A branch queued from an earlier page vanished before this one ran. Only `notFoundPost` is
-    // the explicit tombstone (spec §8.3) — a `blockedPost` here is skipped, not reported deleted.
-    const comments = AppBskyFeedDefs.isNotFoundPost(thread) ? [tombstoneFor(uri, null)] : [];
-    return { comments, nextCursor: rest.length > 0 ? JSON.stringify(rest) : null };
+    return missingNodePage(uri, target, rest, thread);
   }
 
   const comments: NormalizedComment[] = [];
+  const deletedPlatformCommentIds: string[] = [];
   const pendingFrontier: string[] = [];
-  walkThread(thread, comments, pendingFrontier, false);
+  walkThread(thread, comments, deletedPlatformCommentIds, pendingFrontier, false);
 
   const remaining = [...rest, ...pendingFrontier];
-  return { comments, nextCursor: remaining.length > 0 ? JSON.stringify(remaining) : null };
+  return {
+    comments,
+    deletedPlatformCommentIds,
+    nextCursor: remaining.length > 0 ? JSON.stringify(remaining) : null,
+  };
 }
 
 async function fetchComment(

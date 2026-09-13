@@ -695,3 +695,32 @@ implementation.
   external post it is a lower bound and not a publication time, and a name that implied otherwise
   would invite a reader to treat it as one. This adds a column; it revises no decision, so no
   D-number changes.
+- **The stuck-work sweeper also recovers `processing` (extends §7.1 step 4).** Step 4 describes the
+  sweeper as re-enqueueing `queued` comments older than a minute with no active job, which leaves one
+  state with no way out: a worker that dies between the conditional `queued → processing` transition
+  and settling the outcome leaves the row in `processing` forever. BullMQ's stalled-job retry does not
+  recover it, because the retry's own `markProcessing` finds the row no longer `queued`, affects no row
+  and correctly stops. Nothing double-publishes — the conditional updates still hold — but the comment
+  never reaches a terminal state and the customer's reply is neither posted nor failed.
+  The sweeper therefore also selects `status = 'processing'` rows whose `last_attempt_started_at` is
+  older than a threshold comfortably beyond the longest plausible platform call, and returns them to
+  `queued` for another attempt. That attempt is safe for the same reason a retry after an unknown
+  outcome is safe: `attempt_count` has already been incremented, and reconciliation through
+  `findPublishedComment` still gates any second send. The threshold is deliberately generous, because
+  returning a row that is genuinely still being published costs a reconciliation read, while leaving it
+  stuck costs the reply. The index `(status, last_attempt_started_at) WHERE status IN ('queued',
+  'processing')` already covers this selector — it was specified for both states from the start, which
+  is itself evidence the omission was in the prose rather than the design. This extends a step; it
+  revises no decision, so no D-number changes.
+- **`CommentPage` carries deleted ids separately from comments (extends §8.3 and the adapter
+  contract).** §8.3 says a Bluesky `notFoundPost` marker is an explicit tombstone that may mark that
+  comment deleted on its own. Returning it inside `CommentPage.comments` as an ordinary
+  `NormalizedComment` made that unachievable in practice: a consumer iterating the page upserts it as
+  `posted`, and — worse — recording it as *seen* suppresses the absence-based deletion the complete
+  walk would otherwise have detected, so the tombstone actively prevents the fallback it was meant to
+  pre-empt. `CommentPage` therefore gains a separate field for the platform comment ids a page reports
+  as deleted; adapters put tombstones only there, and the refresh walk routes them through the same
+  delete branch a webhook delete uses, without adding them to the seen set. The signal has to live
+  outside `NormalizedComment` because otherwise every future consumer of `listComments` must remember
+  it exists — which is exactly the mistake that occurred. This changes a contract shape; it revises no
+  decision, so no D-number changes.

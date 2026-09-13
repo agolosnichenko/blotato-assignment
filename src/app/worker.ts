@@ -1,8 +1,10 @@
 // oxlint-disable max-dependencies -- this is the worker role's composition point for every
-// `scheduler`-queue job (the two sweepers, the sync scheduler, the retention purge) plus the
-// `comment-publish`/`comment-sync` workers; each job's own constructor is a separate import by
-// design (§4.2), so the count rises whenever a job is added here rather than indicating the file
-// itself has grown unfocused.
+// `scheduler`-queue job (the stuck-work sweeper, the sync scheduler, the retention purge, the
+// outbox relay) plus the `comment-publish`/`comment-sync` workers; each job's own constructor is a
+// separate import by design (§4.2), so the count rises whenever a job is added here rather than
+// indicating the file itself has grown unfocused. There is only one sweeper today — the
+// webhook-delivery sweeper of §7.2 step 5 is unbuilt behind the Meta spike gate (§ Meta
+// constraints) and has no entry here.
 
 import { pathToFileURL } from 'node:url';
 import { Queue, Worker } from 'bullmq';
@@ -38,9 +40,9 @@ const OUTBOX_RELAY_JOB = 'relay-outbox';
 const OUTBOX_RELAY_INTERVAL_MS = 10_000;
 
 /**
- * Dispatches one `scheduler` queue job by name. Every job this queue carries (the two sweepers,
- * the sync scheduler tick, the retention purge, the outbox relay) is added here rather than as a
- * separate `Worker`, because **`scheduler` runs at concurrency 1** — a second `Worker` instance on
+ * Dispatches one `scheduler` queue job by name. Every job this queue carries (the stuck-work
+ * sweeper, the sync scheduler tick, the retention purge, the outbox relay) is added here rather
+ * than as a separate `Worker`, because **`scheduler` runs at concurrency 1** — a second `Worker` instance on
  * the same queue would defeat that regardless of its own concurrency setting. `FOR UPDATE SKIP
  * LOCKED` (the outbox relay, the sync scheduler tick) and `jobId = comment.id` (the stuck-work
  * sweeper) stop a second runner from corrupting data, but not from doubling work a first runner

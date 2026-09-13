@@ -11,5 +11,5 @@
     "no-console": "error",
     "typescript/consistent-type-imports": "error"
   },
-  "ignorePatterns": ["dist", "node_modules"]
+  "ignorePatterns": ["dist", "node_modules", ".railway"]
 }

@@ -23,6 +23,12 @@ interface CommentPlatformAdapter {
 - `NormalizedComment`: `platformCommentId`, `platformParentId | null`, `authorPlatformId`,
   `authorUsername`, `authorDisplayName`, `text`, `platformCreatedAt`, `platformMeta` (jsonb — e.g.
   the Bluesky `cid`).
+- `CommentPage`: `comments` (the page's `NormalizedComment`s), `deletedPlatformCommentIds` (platform
+  comment ids an explicit signal — e.g. Bluesky's `notFoundPost` — reports deleted), `nextCursor`.
+  A tombstone's id belongs on `deletedPlatformCommentIds` alone, never inside `comments`: a
+  consumer iterating `comments` upserts every entry as `posted`, and marking a tombstone's id
+  *seen* would suppress the absence-based deletion a complete walk is meant to fall back to (§18,
+  extends §8.3). A platform with no such signal (Facebook, Instagram) always returns this empty.
 - `fetchComment` is what lets ingestion walk up an unknown ancestry rather than store an orphan
   (FR-022).
 - `findPublishedComment` is the exactly-once guarantee in method form: given an author, a text and a
@@ -85,7 +91,9 @@ and throttle that account's jobs. A comment is "own" when `from.id` matches the 
 Link and mention facets are detected automatically. A comment is "own" when the author DID matches.
 Deletion has two signals, not one: a `notFoundPost` marker in the returned thread is an explicit
 tombstone and may mark that comment deleted on its own, while absence still requires a complete walk
-(FR-019). The explicit marker is the faster of the two and must not be discarded as noise.
+(FR-019). The explicit marker is the faster of the two and must not be discarded as noise — it is
+surfaced on `CommentPage.deletedPlatformCommentIds`, never as a `NormalizedComment` inside
+`comments` (§18).
 
 **Unverified behaviour** — S1 (Facebook Page feed events under Standard Access), S2 (Instagram
 comment reads per login variant) and S5 (which secret signs Instagram Login events) must be run

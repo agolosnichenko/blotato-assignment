@@ -451,6 +451,51 @@ async function assertExternalPostCreatesTarget(harness: Harness): Promise<void> 
   expect(row?.postId).toBeNull();
 }
 
+/**
+ * FR-030, §18: Meta redelivers a webhook for up to 36h, and a sync walk can still read a
+ * comment's old content from the platform inside that same window — either way, an upsert that
+ * lands on an already-`deleted` row must not restore what the delete nulled.
+ */
+async function assertDeletedRowSurvivesReingest(harness: Harness): Promise<void> {
+  const { db } = harness;
+  const account = seedAccount();
+  const t = target(account, `at://post-${generateId()}`);
+  const adapter = fetchCommentDouble({});
+  const ctx = accountContext(account);
+  const ingest = buildIngestComments(db);
+  const platformCommentId = `at://comment-${generateId()}`;
+
+  await ingest.upsert({
+    target: t,
+    comment: ingestedComment({ platformCommentId, text: 'before deletion' }),
+    ingestionSource: 'webhook',
+    ctx,
+    adapter,
+  });
+  await ingest.delete({
+    workspaceId: account.workspaceId,
+    socialAccountId: account.socialAccountId,
+    platform: PLATFORM,
+    platformCommentId,
+  });
+
+  // The platform still reports the comment's old content — the redelivery window, or a sync
+  // walk racing the platform's own removal.
+  await ingest.upsert({
+    target: t,
+    comment: ingestedComment({ platformCommentId, text: 'before deletion' }),
+    ingestionSource: 'webhook',
+    ctx,
+    adapter,
+  });
+
+  const row = await rowByPlatformCommentId(db, platformCommentId);
+  expect(row?.status).toBe('deleted');
+  expect(row?.text).toBeNull();
+  expect(row?.authorUsername).toBeNull();
+  expect(row?.authorDisplayName).toBeNull();
+}
+
 let harness: Harness;
 
 beforeAll(async () => {
@@ -488,4 +533,9 @@ describe('a thin payload is completed, never blanked (A18, T081)', () => {
 describe('external posts become tracked through ingestion (FR-018)', () => {
   it('creates a sync target of its own for a comment on a post never published through the platform', () =>
     assertExternalPostCreatesTarget(harness));
+});
+
+describe('a deleted row survives re-ingestion (FR-030, §18)', () => {
+  it('a redelivered or re-synced comment does not restore text or author fields after deletion', () =>
+    assertDeletedRowSurvivesReingest(harness));
 });

@@ -17,7 +17,9 @@
  *   3. Completes a thin payload's `text` via `adapter.fetchComment` (A18) before the `INSERT ...
  *      ON CONFLICT DO UPDATE` ever runs, and the `DO UPDATE SET text = coalesce(...)` clause
  *      keeps that promise even if completion itself comes up empty — an absent field is never
- *      written over stored text.
+ *      written over stored text. That same `DO UPDATE` never restores `text`/author fields on a
+ *      row already `deleted` (FR-030, §18) — a redelivery or a sync walk racing a platform-side
+ *      removal must leave a privacy deletion's nulling permanent, not partially undo it.
  *
  * `is_own` (T095, FR-023, A2) is set from author identity, not from how a row entered the
  * system: `upsert` compares `authorPlatformId` against the connected account's own platform id
@@ -349,6 +351,12 @@ async function insertOrUpdateRow(
   input: RowInput,
 ): Promise<{ id: string; wasNew: boolean }> {
   const insertedText = input.resolvedText ?? null;
+  // FR-030: a `deleted` row's text and author fields were nulled for privacy, and that nulling
+  // must be permanent. Meta redelivers a webhook for up to 36h, and a sync walk can still read a
+  // comment's old content from the platform inside that same window (the delete event and the
+  // platform's own removal do not land atomically) — either path re-running this upsert on an
+  // already-`deleted` row must leave it exactly as the delete left it, not restore what it erased.
+  const liveRow = sql`${comments.status} != 'deleted'`;
 
   const [row] = await tx
     .insert(comments)
@@ -357,9 +365,9 @@ async function insertOrUpdateRow(
       target: [comments.socialAccountId, comments.platformCommentId],
       targetWhere: sql`${comments.platformCommentId} is not null`,
       set: {
-        text: sql`coalesce(${insertedText}, ${comments.text})`,
-        authorUsername: input.authorUsername,
-        authorDisplayName: input.authorDisplayName,
+        text: sql`CASE WHEN ${liveRow} THEN coalesce(${insertedText}, ${comments.text}) ELSE ${comments.text} END`,
+        authorUsername: sql`CASE WHEN ${liveRow} THEN ${input.authorUsername} ELSE ${comments.authorUsername} END`,
+        authorDisplayName: sql`CASE WHEN ${liveRow} THEN ${input.authorDisplayName} ELSE ${comments.authorDisplayName} END`,
         platformMeta: input.platformMeta,
         updatedAt: new Date(),
       },

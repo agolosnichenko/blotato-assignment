@@ -37,34 +37,15 @@ export function normalizePost(post: AppBskyFeedDefs.PostView): NormalizedComment
 }
 
 /**
- * Builds the placeholder comment for a `notFoundPost` tombstone.
+ * Walks one already-fetched thread node's replies, collecting normalized comments, the platform
+ * comment ids an explicit `notFoundPost` tombstone reports deleted, and queuing any branch
+ * `getPostThread` truncated for a later page.
  *
- * A tombstone carries only the dead record's own URI — no author, text or timestamp survives
- * deletion — so every other field is an explicit, documented placeholder rather than a guess.
- * `platformParentId` is only known when the tombstone was found as a direct reply during this
- * same walk (the common case, from `walkThread`); when a URI that was queued from an earlier
- * page turns out to have vanished by the time it is re-fetched, its parent is not available here
- * and is recorded as `null` — the delete branch of `ingest-comments.ts` (T076) keys off
- * `platformCommentId` alone and does not need it.
- */
-export function tombstoneFor(uri: string, parentUri: string | null): NormalizedComment {
-  return {
-    platformCommentId: uri,
-    platformParentId: parentUri,
-    authorPlatformId: '',
-    authorUsername: null,
-    authorDisplayName: null,
-    text: '',
-    // Not a real creation time — deletion scrubs it. Records when this walk observed the
-    // tombstone, which is the only true fact this adapter has left about it.
-    platformCreatedAt: new Date(),
-    platformMeta: { tombstone: true },
-  };
-}
-
-/**
- * Walks one already-fetched thread node's replies, collecting normalized comments and queuing
- * any branch `getPostThread` truncated for a later page.
+ * A tombstone's id goes to `deletedPlatformCommentIds` alone, never into `comments` — a consumer
+ * must route it through the same delete branch a webhook delete uses, not upsert it as an
+ * ordinary `posted` row (spec.md §18, extends §8.3 and the adapter contract). `CommentPage` is
+ * this walk's caller's boundary for that same reason: the signal cannot survive as a marked
+ * `NormalizedComment` without every future consumer of `listComments` having to remember it.
  *
  * `pushSelf` is false only for the very top of a `getPostThread` response: that node is either
  * the anchor post itself (not a comment) or a branch root already emitted on the page that
@@ -73,6 +54,7 @@ export function tombstoneFor(uri: string, parentUri: string | null): NormalizedC
 export function walkThread(
   node: AppBskyFeedDefs.ThreadViewPost,
   comments: NormalizedComment[],
+  deletedPlatformCommentIds: string[],
   pendingFrontier: string[],
   pushSelf: boolean,
 ): void {
@@ -92,9 +74,9 @@ export function walkThread(
 
   for (const child of replies) {
     if (AppBskyFeedDefs.isThreadViewPost(child)) {
-      walkThread(child, comments, pendingFrontier, true);
+      walkThread(child, comments, deletedPlatformCommentIds, pendingFrontier, true);
     } else if (AppBskyFeedDefs.isNotFoundPost(child)) {
-      comments.push(tombstoneFor(child.uri, node.post.uri));
+      deletedPlatformCommentIds.push(child.uri);
     }
     // `blockedPost` and any other typed variant: unreadable, but not an explicit deletion
     // signal (spec §8.3 names only `notFoundPost`) — skipped rather than reported either way.

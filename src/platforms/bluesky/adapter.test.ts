@@ -128,7 +128,7 @@ const BRANCH_URI = 'at://did:plc:owner/app.bsky.feed.post/branch';
 const BRANCH_OPTIONS = { authorDid: 'did:plc:bob', handle: 'bob.test', text: 'branch' };
 
 describe('blueskyAdapter.listComments — normalization', () => {
-  it('normalizes a direct reply and surfaces a notFoundPost sibling as a tombstone', async () => {
+  it('normalizes a direct reply and reports a notFoundPost sibling as a deleted id, not a comment', async () => {
     const replyUri = 'at://did:plc:owner/app.bsky.feed.post/a';
     const goneUri = 'at://did:plc:owner/app.bsky.feed.post/gone';
     mockThread(
@@ -149,15 +149,17 @@ describe('blueskyAdapter.listComments — normalization', () => {
     const page = await adapter.listComments(accountContext(), { platformPostId: ROOT_URI });
 
     expect(page.nextCursor).toBeNull();
-    const [normal, tombstone] = page.comments;
-    expect(normal).toMatchObject({
-      platformCommentId: replyUri,
-      platformParentId: ROOT_URI,
-      text: 'hello',
-    });
-    expect(normal?.platformMeta).toEqual({ cid: FAKE_CID });
-    expect(tombstone).toMatchObject({ platformCommentId: goneUri, authorPlatformId: '', text: '' });
-    expect(tombstone?.platformMeta).toEqual({ tombstone: true });
+    // The tombstone's id is never in `comments` — a consumer iterating it would otherwise upsert
+    // the tombstone as an ordinary `posted` row (spec.md §18, extends §8.3).
+    expect(page.comments).toEqual([
+      expect.objectContaining({
+        platformCommentId: replyUri,
+        platformParentId: ROOT_URI,
+        text: 'hello',
+        platformMeta: { cid: FAKE_CID },
+      }),
+    ]);
+    expect(page.deletedPlatformCommentIds).toEqual([goneUri]);
   });
 });
 
@@ -174,9 +176,26 @@ describe('blueskyAdapter.listComments — pagination across truncated branches',
     const page = await adapter.listComments(accountContext(), { platformPostId: ROOT_URI });
 
     expect(page.comments.map((c) => c.platformCommentId)).toEqual([BRANCH_URI]);
+    expect(page.deletedPlatformCommentIds).toEqual([]);
     expect(page.nextCursor).toBe(JSON.stringify([BRANCH_URI]));
   });
 
+  it('reports a branch that vanished before its queued page ran as a deleted id, not a comment', async () => {
+    mockThread(BRANCH_URI, notFoundPost(BRANCH_URI));
+
+    const page = await adapter.listComments(
+      accountContext(),
+      { platformPostId: ROOT_URI },
+      JSON.stringify([BRANCH_URI]),
+    );
+
+    expect(page.comments).toEqual([]);
+    expect(page.deletedPlatformCommentIds).toEqual([BRANCH_URI]);
+    expect(page.nextCursor).toBeNull();
+  });
+});
+
+describe('blueskyAdapter.listComments — resuming a queued branch', () => {
   it('resumes a queued branch from its cursor without re-emitting the branch root', async () => {
     const leafUri = 'at://did:plc:owner/app.bsky.feed.post/leaf';
     mockThread(
@@ -201,6 +220,7 @@ describe('blueskyAdapter.listComments — pagination across truncated branches',
 
     // The branch root (`BRANCH_URI`) is not repeated — only its new child is.
     expect(page.comments.map((c) => c.platformCommentId)).toEqual([leafUri]);
+    expect(page.deletedPlatformCommentIds).toEqual([]);
     expect(page.nextCursor).toBeNull();
   });
 });

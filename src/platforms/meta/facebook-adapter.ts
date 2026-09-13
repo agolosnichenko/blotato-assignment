@@ -5,7 +5,9 @@
  * `fetchComment` (T084) are the read path: `GET /{post-id}/comments?filter=stream`, paging on the
  * Graph API's own `paging.cursors.after` until `paging.next` stops appearing — a page that throws
  * is never read as an empty-but-complete one, since that would let a sync walk conclude the post
- * has no more comments and mark the rest `deleted`.
+ * has no more comments and mark the rest `deleted`. `paging.next` present with `paging.cursors.
+ * after` absent is the same hazard by another route (§18): `nextCursorFor` throws there too,
+ * rather than reading "cannot continue" as "finished".
  *
  * The Instagram login-variant distinction (D28) does not apply to Facebook accounts at all —
  * `ctx.credentials` is still passed through to `graph-client.ts` opaquely, the same as the
@@ -178,9 +180,28 @@ async function listComments(
   }
 
   const comments = response.data.data.map(normalizeFbComment);
-  const nextCursor =
-    response.data.paging?.next === undefined ? null : (response.data.paging.cursors?.after ?? null);
-  return { comments, nextCursor };
+  const nextCursor = nextCursorFor(response.data.paging, target);
+  return { comments, deletedPlatformCommentIds: [], nextCursor };
+}
+
+/**
+ * `paging.next`'s presence, not its content, means "there is another page" (Graph API
+ * convention) — but the cursor to fetch it with is `paging.cursors.after`, a separate field.
+ * `next` present with `cursors.after` absent is not "no more pages": it is this adapter being
+ * unable to continue the walk, and conflating the two would let a sync walk read an interrupted
+ * page as a complete one and infer deletions for every page it never fetched (§7.3, SC-008).
+ */
+function nextCursorFor(paging: FbPaging | undefined, target: PostTarget): string | null {
+  if (paging?.next === undefined) {
+    return null;
+  }
+  if (paging.cursors?.after !== undefined) {
+    return paging.cursors.after;
+  }
+  throw new Error(
+    `facebook listComments: paging.next present but paging.cursors.after missing for post ` +
+      `${target.platformPostId}`,
+  );
 }
 
 async function fetchComment(

@@ -45,9 +45,21 @@ export interface PostTarget {
   readonly platformPostId: string;
 }
 
-/** One page of a comment listing walk; a `null` cursor means the walk is complete. */
+/**
+ * One page of a comment listing walk; a `null` cursor means the walk is complete.
+ *
+ * `deletedPlatformCommentIds` carries platform comment ids an adapter can tell are deleted by an
+ * explicit signal (e.g. Bluesky's `notFoundPost` tombstone, §8.3) — kept apart from `comments`
+ * rather than folded into it as a marked `NormalizedComment`. A consumer iterating `comments`
+ * would otherwise upsert a tombstone as an ordinary `posted` row, and recording it as *seen* would
+ * suppress the absence-based deletion a complete walk is meant to fall back to — the exact defect
+ * this shape exists to make unreachable (spec.md §18, extends §8.3 and this contract). A platform
+ * with no such signal (Facebook, Instagram) always returns this empty and relies solely on the
+ * absence fallback.
+ */
 export interface CommentPage {
   readonly comments: readonly NormalizedComment[];
+  readonly deletedPlatformCommentIds: readonly string[];
   readonly nextCursor: string | null;
 }
 

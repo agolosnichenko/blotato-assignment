@@ -16,6 +16,13 @@
  * The enqueue of `comment-publish` happens strictly after the transaction commits, keyed on
  * `jobId = comment.id` (§7.1 step 4, A15); a failed enqueue is logged and swallowed, exactly as in
  * `create-reply.ts` — the stuck-work sweeper covers it.
+ *
+ * Two simultaneous requests carrying the same `Idempotency-Key` both pass `resolveIdempotency`
+ * before either has committed, reach the insert together, and `comments_workspace_idempotency_
+ * key_key` lets exactly one through — the loser's transaction fails with a unique violation rather
+ * than returning the inserted row. This mirrors `create-reply.ts`: catch that violation
+ * (`isUniqueViolation`, reused from `publish-comment.ts`) and re-read the winner by idempotency
+ * key, so both callers get `202` with the same comment instead of one getting `500`.
  */
 
 // oxlint-disable max-dependencies -- this use case wires every port its pre-flight and its
@@ -26,6 +33,7 @@
 import { createHash } from 'node:crypto';
 import type { Queue } from 'bullmq';
 import type { Logger } from 'pino';
+import { isUniqueViolation } from '#src/modules/comments/application/publish-comment.ts';
 import { checkTextLength } from '#src/modules/comments/domain/limits.ts';
 import type {
   CommentRecord,
@@ -177,6 +185,33 @@ function insertTopLevelTransactionally(
   });
 }
 
+/**
+ * Recovers from a concurrent insert under the same idempotency key: the conflicting request
+ * committed first, so its row is read back and returned in place of retrying the insert — re-runs
+ * the same mismatch check `resolveIdempotency` would have made had it arrived a moment later.
+ */
+async function resolveIdempotencyConflict(
+  repository: CommentRepository,
+  workspaceId: string,
+  idempotencyKey: string | null,
+  text: string,
+): Promise<CommentRecord | null> {
+  if (idempotencyKey === null) {
+    return null;
+  }
+  const winner = await repository.findByIdempotencyKey(workspaceId, idempotencyKey);
+  if (winner === null) {
+    return null;
+  }
+  if (hashRequestText(winner.text ?? '') !== hashRequestText(text)) {
+    throw new ApiError(
+      'IDEMPOTENCY_KEY_REUSED',
+      `idempotency key ${idempotencyKey} was already used with a different request body`,
+    );
+  }
+  return winner;
+}
+
 /** Enqueues `comment-publish`; a failure is logged, not thrown — see the module docstring. */
 async function enqueuePublish(
   deps: CreateTopLevelCommentDeps,
@@ -225,7 +260,24 @@ export async function createTopLevelComment(
     return existing;
   }
 
-  const comment = await insertTopLevelTransactionally(deps, input, post, account);
+  let comment: CommentRecord;
+  try {
+    comment = await insertTopLevelTransactionally(deps, input, post, account);
+  } catch (error) {
+    if (!isUniqueViolation(error)) {
+      throw error;
+    }
+    const winner = await resolveIdempotencyConflict(
+      deps.repository,
+      input.workspaceId,
+      input.idempotencyKey,
+      input.text,
+    );
+    if (winner === null) {
+      throw error;
+    }
+    return winner;
+  }
   await enqueuePublish(deps, comment);
   return comment;
 }

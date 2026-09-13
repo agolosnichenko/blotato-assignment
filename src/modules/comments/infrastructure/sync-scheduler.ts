@@ -42,6 +42,7 @@ import {
   type SyncPost,
   type SyncPostResult,
 } from '#src/modules/comments/application/sync-post.ts';
+import { createAccountHealth } from '#src/modules/comments/infrastructure/account-health.ts';
 import type { OutboxTransaction } from '#src/modules/comments/infrastructure/outbox.ts';
 import {
   commentSyncJobs,
@@ -349,6 +350,7 @@ export function createSyncWorker(deps: SyncWorkerDeps): Worker {
     syncTargetRepository: deps.syncTargetRepository,
     accounts: deps.accounts,
     accountCredentials: deps.accountCredentials,
+    accountHealth: createAccountHealth(deps.database),
     getAdapter: buildAdapterRegistry(deps.config),
   });
 

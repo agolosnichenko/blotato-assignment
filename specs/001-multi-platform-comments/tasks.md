@@ -742,7 +742,7 @@ reason the registry gives.
       alternatives; assumptions; the Meta Standard Access limitation (D23); differences from the
       current `/v2/comments` (D3); and the evolution path — Jetstream (D17), partitioning (D15), the
       remaining platforms, private replies
-- [ ] T111 Configure the Railway deployment (D24): `api` and `worker` services from the one
+- [X] T111 Configure the Railway deployment (D24): `api` and `worker` services from the one
       multi-stage `node:22-slim` image running as a **non-root** user, managed Postgres 18 and Redis
       8, migrations as a pre-deploy command, and deployment from `main` in `.github/workflows/`
 - [ ] T112 Run the full gate — `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test:unit`,

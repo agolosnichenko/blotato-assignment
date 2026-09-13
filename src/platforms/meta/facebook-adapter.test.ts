@@ -123,6 +123,25 @@ describe('createFacebookAdapter().listComments', () => {
   });
 });
 
+describe('createFacebookAdapter().listComments — malformed paging', () => {
+  it('throws, rather than reading the walk as complete, when paging.next is present but paging.cursors.after is missing', async () => {
+    server.use(
+      http.get(`${GRAPH}/${POST_ID}/comments`, () =>
+        HttpResponse.json({
+          data: [commentNode({ id: 'c1', message: 'top', fromId: 'user-1' })],
+          // `next` present means "there is another page", but no `cursors.after` to fetch it
+          // with — "cannot continue" must not be read as "finished" (§18).
+          paging: { next: `${GRAPH}/${POST_ID}/comments?after=mystery` },
+        }),
+      ),
+    );
+
+    await expect(adapter.listComments(ctx, { platformPostId: POST_ID })).rejects.toThrow(
+      /paging\.cursors\.after missing/u,
+    );
+  });
+});
+
 describe('createFacebookAdapter().fetchComment', () => {
   it('normalizes a found comment', async () => {
     server.use(

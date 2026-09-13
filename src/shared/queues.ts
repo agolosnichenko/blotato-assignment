@@ -8,7 +8,7 @@
  *
  * `scheduler` runs at concurrency 1 (see `outbox-relay.ts`): `FOR UPDATE SKIP LOCKED` stops a second
  * runner from corrupting data, but not from double-publishing rows the first has selected and not yet
- * stamped, nor from double-running the purge and the sweepers.
+ * stamped, nor from double-running the purge and the stuck-work sweeper.
  */
 export const QUEUE_NAMES = {
   /** Publishing one comment to its platform (§7.1). Per-account token bucket. */
@@ -17,7 +17,11 @@ export const QUEUE_NAMES = {
   webhookProcess: 'webhook-process',
   /** Refreshing one sync target (§7.3). Per-account token bucket. */
   commentSync: 'comment-sync',
-  /** Repeatable jobs: the sync scheduler, both sweepers, the outbox relay, the retention purge. */
+  /**
+   * Repeatable jobs: the sync scheduler, the stuck-work sweeper, the outbox relay, the retention
+   * purge. The webhook-delivery sweeper of §7.2 step 5 would join this queue too, but it is
+   * unbuilt behind the Meta spike gate (§ Meta constraints) and has no job registered here yet.
+   */
   scheduler: 'scheduler',
   /** Domain events for external consumers; not consumed inside this service (D9). */
   domainEvents: 'domain-events',

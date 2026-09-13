@@ -19,6 +19,14 @@
  *     infers nothing: the walk that hit it did not complete either, so the first invariant already
  *     covers it. A `RetryableError`, and any other unexpected exception, leaves the schedule
  *     untouched — the scheduler's own `next_sync_at <= now()` selection picks the target up again.
+ *     An `AuthError` is recorded in `account_health` plus outbox `account.auth_failed` (D30, §18)
+ *     — the same place the publish path records it — and otherwise leaves the schedule untouched
+ *     too, since the account's broken credential is not evidence the post itself is gone.
+ *
+ * An explicit tombstone (`CommentPage.deletedPlatformCommentIds`, §18, extends §8.3) is routed
+ * through the same delete branch a webhook delete uses and is never added to `seen` — marking it
+ * seen would suppress the absence-based fallback above for every comment this page did not also
+ * happen to report back (see `ingestPageTombstones`).
  *
  * Tagging (A10, FR-020): whether this is the target's first walk is read from
  * `SyncTargetRecord.lastSyncedAt === null` *before* the walk runs, and passed straight through as
@@ -39,6 +47,8 @@ import type {
   IngestTarget,
   IngestionSource,
 } from '#src/modules/comments/application/ingest-comments.ts';
+import type { AccountHealth } from '#src/modules/comments/infrastructure/account-health.ts';
+import { appendToOutbox } from '#src/modules/comments/infrastructure/outbox.ts';
 import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import type {
   SyncTargetRecord,
@@ -46,6 +56,7 @@ import type {
 } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import type { AccountCredentials, Accounts } from '#src/modules/platform-core/ports.ts';
 import {
+  AuthError,
   PermanentError,
   type AccountContext,
   type CommentPage,
@@ -79,6 +90,7 @@ export interface SyncPostDeps {
   readonly syncTargetRepository: SyncTargetRepository;
   readonly accounts: Accounts;
   readonly accountCredentials: AccountCredentials;
+  readonly accountHealth: AccountHealth;
   readonly getAdapter: (platform: Platform) => CommentPlatformAdapter;
 }
 
@@ -130,7 +142,7 @@ function toIngestedComment(comment: NormalizedComment, ctx: AccountContext): Ing
 }
 
 /** Ingests one page's comments through the shared upsert path, updating `seen`/`stats` in place. */
-async function ingestPage(
+async function ingestPageComments(
   deps: SyncPostDeps,
   ingestTarget: IngestTarget,
   ctx: AccountContext,
@@ -159,6 +171,49 @@ async function ingestPage(
       stats.updated += 1;
     }
   }
+}
+
+/**
+ * Routes a page's explicit tombstones (`CommentPage.deletedPlatformCommentIds`, spec.md §18,
+ * extends §8.3) through the same delete branch a webhook delete uses — never the upsert path —
+ * and deliberately does not add them to `seen`: a tombstone is not evidence a comment was
+ * observed `posted`, so letting it into `seen` would suppress the absence-based fallback this
+ * same walk still owes every other comment it never reports back.
+ */
+async function ingestPageTombstones(
+  deps: SyncPostDeps,
+  ingestTarget: IngestTarget,
+  page: CommentPage,
+  stats: MutableSyncStats,
+): Promise<void> {
+  for (const platformCommentId of page.deletedPlatformCommentIds) {
+    // Each tombstone's delete is independent of the others; sequential only to keep
+    // `stats.deleted` a plain running count instead of a Promise.all reduction.
+    // oxlint-disable-next-line no-await-in-loop
+    const result = await deps.ingestComments.delete({
+      workspaceId: ingestTarget.workspaceId,
+      socialAccountId: ingestTarget.socialAccountId,
+      platform: ingestTarget.platform,
+      platformCommentId,
+    });
+    if (result.wasDeleted) {
+      stats.deleted += 1;
+    }
+  }
+}
+
+async function ingestPage(
+  deps: SyncPostDeps,
+  ingestTarget: IngestTarget,
+  ctx: AccountContext,
+  adapter: CommentPlatformAdapter,
+  ingestionSource: IngestionSource,
+  page: CommentPage,
+  seen: Set<string>,
+  stats: MutableSyncStats,
+): Promise<void> {
+  await ingestPageComments(deps, ingestTarget, ctx, adapter, ingestionSource, page, seen, stats);
+  await ingestPageTombstones(deps, ingestTarget, page, stats);
 }
 
 /**
@@ -260,14 +315,56 @@ async function markSucceeded(
 }
 
 /**
- * §7.3, T087: a `PermanentError` deactivates the target; a `RetryableError` — and anything else
- * the walk raised, typed or not — leaves the schedule exactly as it was.
+ * D30, §18: an `AuthError` observed mid-walk is the same fact the publish path already records
+ * through `account_health` — the credential is invalid — and must land the same way: this
+ * service's own `account_health` table plus outbox `account.auth_failed`, never a write to the
+ * `social_accounts` projection (D8, D29, Principle II). Without this, the effective account
+ * status a refresh-only failure leaves behind stays `active` while the publish path's equivalent
+ * failure would have disconnected it.
+ *
+ * `platform` is `undefined` only if the credential was unreadable before {@link loadAccountContext}
+ * could resolve it — that function never itself throws `AuthError`, so this guard is defensive
+ * against a future adapter change rather than a path reachable today.
+ */
+async function recordAuthFailure(
+  deps: SyncPostDeps,
+  target: SyncTargetRecord,
+  platform: Platform,
+  reason: string,
+): Promise<void> {
+  await deps.database.transaction((tx) =>
+    appendToOutbox(tx, {
+      workspaceId: target.workspaceId,
+      type: 'account.auth_failed',
+      aggregateId: target.socialAccountId,
+      data: { socialAccountId: target.socialAccountId, platform, reason },
+    }),
+  );
+  await deps.accountHealth.markAuthFailed({
+    socialAccountId: target.socialAccountId,
+    workspaceId: target.workspaceId,
+    reason,
+  });
+}
+
+/**
+ * §7.3, T087: an `AuthError` is recorded in `account_health` (above); a `PermanentError`
+ * deactivates the target; a `RetryableError` — and anything else the walk raised, typed or not —
+ * leaves the schedule exactly as it was.
  */
 async function handleWalkFailure(
   deps: SyncPostDeps,
   targetId: string,
+  target: SyncTargetRecord,
+  platform: Platform | undefined,
   error: unknown,
 ): Promise<void> {
+  if (error instanceof AuthError) {
+    if (platform !== undefined) {
+      await recordAuthFailure(deps, target, platform, error.message);
+    }
+    return;
+  }
   if (error instanceof PermanentError) {
     await deps.syncTargetRepository.deactivate(targetId, error.message);
   }
@@ -298,8 +395,12 @@ async function run(deps: SyncPostDeps, targetId: string): Promise<SyncPostResult
   }
 
   const stats: MutableSyncStats = { fetched: 0, inserted: 0, updated: 0, deleted: 0 };
+  // Read by the `catch` below if an `AuthError` lands after the account context resolved but
+  // before the walk finishes — `handleWalkFailure` needs the platform to record it correctly.
+  let resolvedPlatform: Platform | undefined;
   try {
     const ctx = await loadAccountContext(deps, target);
+    resolvedPlatform = ctx.platform;
     const adapter = deps.getAdapter(ctx.platform);
     const ingestionSource: IngestionSource = target.lastSyncedAt === null ? 'backfill' : 'sync';
 
@@ -309,7 +410,7 @@ async function run(deps: SyncPostDeps, targetId: string): Promise<SyncPostResult
 
     return { status: 'succeeded', stats: { ...stats } };
   } catch (error) {
-    await handleWalkFailure(deps, targetId, error);
+    await handleWalkFailure(deps, targetId, target, resolvedPlatform, error);
     return { status: 'failed', stats: { ...stats }, error: errorMessage(error) };
   }
 }

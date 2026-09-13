@@ -57,7 +57,7 @@ msw; PostgreSQL and Redis are real (testcontainers).
 
 ### V1 — Reading a conversation (US1)
 
-`pnpm test:integration -- -t 'post comments'`
+`pnpm test:integration -t 'post comments'`
 
 Seed 30 top-level comments, page with `limit=20` in both `order` directions, follow the cursor, then
 insert 5 more comments between the two page requests and follow it again. **Expect** every
@@ -70,7 +70,7 @@ one comment by id.
 
 ### V2 — Publishing exactly once (US2)
 
-`pnpm test:integration -- -t 'publish'`
+`pnpm test:integration -t 'publish'`
 
 Run the full failure matrix against the adapter double: success; timeout after send; connection drop
 after send; 429 with `Retry-After`; permanent rejection; and the platform echoing our own reply back
@@ -86,7 +86,7 @@ path (D30); and a parent deleted after the child was queued settles the child `f
 
 ### V3 — Write validation and idempotency (US2)
 
-`pnpm test:integration -- -t 'create reply'`
+`pnpm test:integration -t 'create reply'`
 
 Reply to a reply on Instagram → `422 REPLY_DEPTH_EXCEEDED` naming the top-level comment; the same
 depth on Bluesky → `202`. Over-length text → `422 TEXT_TOO_LONG` with nothing sent. Same
@@ -100,7 +100,7 @@ counted this period → `202`. A write against a platform the registry marks uns
 
 ### V4 — Ingestion is idempotent (US3)
 
-`pnpm test:integration -- -t 'webhook'` and `-t 'sync'`
+`pnpm test:integration -t 'webhook'` and `-t 'sync'`
 
 Deliver a signed event, then redeliver it; run a refresh over the same post; tamper with the
 signature. **Expect** one comment and one `comment.received` event regardless of redelivery; a
@@ -124,7 +124,7 @@ SC-008, A18.
 
 ### V5 — Tenancy (all stories)
 
-`pnpm test:integration -- -t 'tenancy'`
+`pnpm test:integration -t 'tenancy'`
 
 Every endpoint, called with a second workspace's key against the first workspace's resource.
 **Expect** `404` everywhere — never `403`, never a leak of existence. Then the credential itself: a
@@ -136,7 +136,7 @@ at its own value, one above it is still cut off at the deployment's.
 
 ### V6 — Durability without Redis (US2, US3)
 
-`pnpm test:integration -- -t 'outbox'` and `-t 'sweeper'`
+`pnpm test:integration -t 'outbox'` and `-t 'sweeper'`
 
 An event appears only after the transaction commits and is published once. Then drop the queue
 between acceptance and processing: the sweeper re-enqueues comments left `queued` with no active job,
@@ -145,7 +145,7 @@ and unprocessed webhook deliveries older than five minutes.
 
 ### V7 — Retention (US1)
 
-`pnpm test:integration -- -t 'retention'`
+`pnpm test:integration -t 'retention'`
 
 A thread whose last activity is 46 days old is removed whole; a thread with a comment on day 44 is
 untouched, including its older comments.
@@ -154,7 +154,7 @@ retention removes whole threads rather than redacting individual comments.)
 
 ### V8 — The account inbox (US4)
 
-`pnpm test:integration -- -t 'inbox'`
+`pnpm test:integration -t 'inbox'`
 
 Ingest comments for one account across two posts, one of them never published through the platform.
 **Expect** both in the inbox newest first, the external one with `postId: null`; `since` / `until`
@@ -167,7 +167,7 @@ post-scoped list answers `404` while the same comments stay in the inbox.
 
 ### V9 — The capability registry and the Instagram login variants (US5)
 
-`pnpm test:integration -- -t 'platforms'` and `pnpm test:unit -- -t 'registry'`
+`pnpm test:integration -t 'platforms'` and `pnpm test:unit -t 'registry'`
 
 `GET /v1/platforms` lists all nine publishing platforms — three supporting comments, six carrying an
 `unsupportedReason` — and the depth, text limit and unit it reports for a platform are the same
@@ -180,7 +180,7 @@ for both hosts.
 
 ### V10 — Performance budgets (SC-005, SC-006)
 
-`pnpm test:integration -- -t 'benchmark'`
+`pnpm test:integration -t 'benchmark'`
 
 Seed a workspace with 100,000 comments across many posts, then measure the post-comments read and an
 accepted write. **Expect** both at p95 under 300 ms, the write independent of how long the adapter

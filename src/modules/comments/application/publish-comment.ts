@@ -121,8 +121,12 @@ function hasPgCode(error: unknown, code: string): boolean {
  * `pg` reports a unique-index violation as `code: '23505'` on the error it throws, but
  * drizzle-orm wraps that in its own `DrizzleQueryError` and moves the original onto `.cause`
  * (`node_modules/drizzle-orm/errors.js`) — so both the error and its cause must be checked.
+ *
+ * Exported so `create-reply.ts` and `create-top-level-comment.ts` can reuse it to recover from a
+ * concurrent `comments_workspace_idempotency_key_key` violation, rather than duplicating the
+ * `DrizzleQueryError` unwrapping a second time.
  */
-function isUniqueViolation(error: unknown): boolean {
+export function isUniqueViolation(error: unknown): boolean {
   if (hasPgCode(error, UNIQUE_VIOLATION)) {
     return true;
   }

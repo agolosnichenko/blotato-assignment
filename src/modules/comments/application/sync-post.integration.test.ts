@@ -59,23 +59,30 @@ import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIngestComments } from '#src/modules/comments/application/ingest-comments.ts';
 import { createSyncPost } from '#src/modules/comments/application/sync-post.ts';
+import { createAccountHealth } from '#src/modules/comments/infrastructure/account-health.ts';
 import {
   computeNextSyncAt,
   createSyncTargetRepository,
 } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
-import { comments, commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
+import {
+  accountHealth,
+  comments,
+  commentSyncTargets,
+  outboxEvents,
+} from '#src/modules/comments/infrastructure/schema.ts';
 import {
   createLocalAccountCredentials,
   encryptCredentials,
 } from '#src/modules/platform-core/local/account-credentials.ts';
 import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.ts';
 import { socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
-import type {
-  AccountContext,
-  CommentPlatformAdapter,
-  CommentPage,
-  NormalizedComment,
-  Platform,
+import {
+  AuthError,
+  type AccountContext,
+  type CommentPlatformAdapter,
+  type CommentPage,
+  type NormalizedComment,
+  type Platform,
 } from '#src/platforms/types.ts';
 import type { KeyMaterial } from '#src/shared/crypto.ts';
 import { generateId } from '#src/shared/ids.ts';
@@ -267,6 +274,7 @@ function buildSyncPost(db: NodePgDatabase, adapter: CommentPlatformAdapter) {
     syncTargetRepository,
     accounts: createLocalAccounts(db),
     accountCredentials: createLocalAccountCredentials(db, testKeyMaterial()),
+    accountHealth: createAccountHealth(db),
     getAdapter: (platform: Platform) => {
       if (platform !== adapter.platform) {
         throw new Error(`no adapter double registered for platform ${platform}`);
@@ -306,7 +314,11 @@ describe('complete-walk deletion (FR-019, FR-030, T086) — identical to a webho
     const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
     // Only the parent is still on the platform; the child is gone.
     const adapter = listCommentsDouble([
-      { comments: [normalized('at://comment-parent')], nextCursor: null },
+      {
+        comments: [normalized('at://comment-parent')],
+        deletedPlatformCommentIds: [],
+        nextCursor: null,
+      },
     ]);
 
     const result = await buildSyncPost(db, adapter).run(targetId);
@@ -342,7 +354,11 @@ describe('interrupted walk infers zero deletions (FR-019, SC-008)', () => {
     const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
     // Page 1 confirms comment-a is still there; page 2 never arrives.
     const adapter = listCommentsDouble([
-      { comments: [normalized('at://comment-a')], nextCursor: 'page-2' },
+      {
+        comments: [normalized('at://comment-a')],
+        deletedPlatformCommentIds: [],
+        nextCursor: 'page-2',
+      },
       new Error('connection dropped mid-walk'),
     ]);
 
@@ -355,6 +371,142 @@ describe('interrupted walk infers zero deletions (FR-019, SC-008)', () => {
     expect(first?.status).not.toBe('deleted');
     expect(second?.status).not.toBe('deleted');
   });
+});
+
+/**
+ * The tombstoned id is reported only via `deletedPlatformCommentIds`, never in `comments` — this
+ * is what proves it is routed through the shared delete branch rather than upserted as `posted`.
+ * `comment-absent` is reported nowhere at all, so it must still fall to the absence-based
+ * fallback a complete walk runs — proving the tombstone's exclusion from `seen` does not starve
+ * that fallback of anything it still owes another comment.
+ */
+interface TombstoneSeedRows {
+  readonly tombstonedId: string;
+  readonly absentId: string;
+  readonly stillThereId: string;
+}
+
+async function seedTombstoneScenario(
+  db: NodePgDatabase,
+  account: SeededAccount,
+  platformPostId: string,
+): Promise<TombstoneSeedRows> {
+  const tombstonedId = await seedPostedComment(db, {
+    account,
+    platformPostId,
+    platformCommentId: 'at://comment-tombstoned',
+  });
+  const absentId = await seedPostedComment(db, {
+    account,
+    platformPostId,
+    platformCommentId: 'at://comment-absent',
+  });
+  const stillThereId = await seedPostedComment(db, {
+    account,
+    platformPostId,
+    platformCommentId: 'at://comment-still-there',
+  });
+  return { tombstonedId, absentId, stillThereId };
+}
+
+async function assertTombstoneScenarioRows(
+  db: NodePgDatabase,
+  rows: TombstoneSeedRows,
+): Promise<void> {
+  const tombstoned = await loadComment(db, rows.tombstonedId);
+  expect(tombstoned?.status).toBe('deleted');
+  expect(tombstoned?.text).toBeNull();
+  expect(tombstoned?.authorPlatformId).toBeNull();
+  expect(tombstoned?.authorUsername).toBeNull();
+  expect(tombstoned?.authorDisplayName).toBeNull();
+
+  const absent = await loadComment(db, rows.absentId);
+  expect(absent?.status).toBe('deleted');
+
+  const stillThere = await loadComment(db, rows.stillThereId);
+  expect(stillThere?.status).toBe('posted');
+
+  const deletedEvents = await db
+    .select()
+    .from(outboxEvents)
+    .where(
+      and(
+        eq(outboxEvents.aggregateId, rows.tombstonedId),
+        eq(outboxEvents.type, 'comment.deleted'),
+      ),
+    );
+  expect(deletedEvents).toHaveLength(1);
+}
+
+async function assertTombstoneDeletesThroughSharedBranch(testHarness: Harness): Promise<void> {
+  const { db } = testHarness;
+  const account = await seedWorkspaceAndAccount(db);
+  const platformPostId = `at://post-${generateId()}`;
+  const rows = await seedTombstoneScenario(db, account, platformPostId);
+  const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
+  const adapter = listCommentsDouble([
+    {
+      comments: [normalized('at://comment-still-there')],
+      deletedPlatformCommentIds: ['at://comment-tombstoned'],
+      nextCursor: null,
+    },
+  ]);
+
+  const result = await buildSyncPost(db, adapter).run(targetId);
+
+  expect(result.status).toBe('succeeded');
+  // Both the explicit tombstone and the plain-absence comment are deleted.
+  expect(result.stats.deleted).toBe(2);
+  await assertTombstoneScenarioRows(db, rows);
+}
+
+describe('explicit tombstones are deleted through the shared branch (§18, extends §8.3)', () => {
+  it('a deletedPlatformCommentIds entry nulls the row and emits comment.deleted, never upserted as posted', () =>
+    assertTombstoneDeletesThroughSharedBranch(harness));
+});
+
+/** D30, §18: the same observation the publish path already records through `account_health` —
+ * the credential is invalid — must land the same way when a sync walk hits it, never as a write
+ * to the `social_accounts` projection this service does not own (D8, D29, Principle II). */
+async function assertAuthErrorRecordedInAccountHealth(testHarness: Harness): Promise<void> {
+  const { db } = testHarness;
+  const account = await seedWorkspaceAndAccount(db);
+  const platformPostId = `at://post-${generateId()}`;
+  const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
+  const adapter = listCommentsDouble([new AuthError('bluesky session expired')]);
+
+  const result = await buildSyncPost(db, adapter).run(targetId);
+
+  expect(result.status).toBe('failed');
+
+  const [health] = await db
+    .select()
+    .from(accountHealth)
+    .where(eq(accountHealth.socialAccountId, account.socialAccountId));
+  expect(health?.state).toBe('auth_failed');
+  expect(health?.reason).toBe('bluesky session expired');
+
+  const events = await db
+    .select()
+    .from(outboxEvents)
+    .where(
+      and(
+        eq(outboxEvents.aggregateId, account.socialAccountId),
+        eq(outboxEvents.type, 'account.auth_failed'),
+      ),
+    );
+  expect(events).toHaveLength(1);
+
+  const [socialAccountRow] = await db
+    .select()
+    .from(socialAccounts)
+    .where(eq(socialAccounts.id, account.socialAccountId));
+  expect(socialAccountRow?.status).toBe('active');
+}
+
+describe('an AuthError mid-walk is recorded in account_health, not social_accounts (D30, §18)', () => {
+  it('records auth_failed and announces account.auth_failed', () =>
+    assertAuthErrorRecordedInAccountHealth(harness));
 });
 
 async function findByPlatformCommentId(db: NodePgDatabase, platformCommentId: string) {
@@ -379,8 +531,16 @@ async function assertBackfillThenSyncTagging(testHarness: Harness): Promise<void
   const platformPostId = `at://post-${generateId()}`;
   const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: null });
   const adapter = listCommentsDouble([
-    { comments: [normalized('at://comment-first-walk')], nextCursor: null },
-    { comments: [normalized('at://comment-second-walk')], nextCursor: null },
+    {
+      comments: [normalized('at://comment-first-walk')],
+      deletedPlatformCommentIds: [],
+      nextCursor: null,
+    },
+    {
+      comments: [normalized('at://comment-second-walk')],
+      deletedPlatformCommentIds: [],
+      nextCursor: null,
+    },
   ]);
   const syncPost = buildSyncPost(db, adapter);
 

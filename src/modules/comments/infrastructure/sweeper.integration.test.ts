@@ -47,6 +47,7 @@
 // asserts against, and the schema/config/id helpers needed to seed a realistic stuck comment) plus
 // the module under test; none of that can be dropped without weakening what the test proves.
 
+import { eq } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { Queue } from 'bullmq';
@@ -65,6 +66,9 @@ import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
 const ONE_MINUTE_MS = 60_000;
 const TWO_MINUTES_AGO = new Date(Date.now() - 2 * ONE_MINUTE_MS);
+// Comfortably past the sweeper's 5-minute `processing` threshold (spec.md §18, "The stuck-work
+// sweeper also recovers `processing`") — a worker that died mid-publish leaves exactly this trace.
+const TEN_MINUTES_AGO = new Date(Date.now() - 10 * ONE_MINUTE_MS);
 
 interface Harness {
   containers: TestContainers;
@@ -230,7 +234,7 @@ describe("leaves comments alone that are not the sweeper's job", () => {
     expect(job).toBeUndefined();
   });
 
-  it('a stale `processing` comment — a worker may still hold it (D14, no concurrent publish)', async () => {
+  it('a 2-minute-old `processing` comment — under the 5-minute threshold, a worker may still hold it', async () => {
     const { db, publishQueue } = harness;
     const account = await seedWorkspaceAndAccount(db);
     const commentId = await seedComment(db, {
@@ -244,6 +248,28 @@ describe("leaves comments alone that are not the sweeper's job", () => {
 
     const job = await publishQueue.getJob(commentId);
     expect(job).toBeUndefined();
+  });
+});
+
+describe('recovers a processing row a dead worker abandoned (spec.md §18)', () => {
+  it('a 10-minute-stale `processing` row is returned to `queued` and re-enqueued', async () => {
+    const { db, publishQueue } = harness;
+    const account = await seedWorkspaceAndAccount(db);
+    const commentId = await seedComment(db, {
+      ...account,
+      status: 'processing',
+      lastAttemptStartedAt: TEN_MINUTES_AGO,
+      attemptCount: 1,
+    });
+
+    await createStuckWorkSweeper({ database: db, publishQueue }).sweep();
+
+    const job = await publishQueue.getJob(commentId);
+    expect(job).toBeDefined();
+    expect(job?.id).toBe(commentId);
+
+    const [row] = await db.select().from(comments).where(eq(comments.id, commentId));
+    expect(row?.status).toBe('queued');
   });
 });
 
