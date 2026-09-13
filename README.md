@@ -255,8 +255,8 @@ from "doesn't exist"):
 
 ```bash
 curl -s -w '\n%{http_code}\n' -H "blotato-api-key: $API_KEY" \
-  "$BASE/v1/posts/00000000-0000-0000-0000-000000000000/comments"
-# {"...","code":"NOT_FOUND",...}
+  "$BASE/v1/comments?postId=00000000-0000-0000-0000-000000000000"
+# {"...","detail":"no post 00000000-0000-0000-0000-000000000000 in this workspace","code":"NOT_FOUND",...}
 # 404
 ```
 
