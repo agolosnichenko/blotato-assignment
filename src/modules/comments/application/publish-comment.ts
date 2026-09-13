@@ -57,6 +57,7 @@ import {
   type PublishInput,
   type ReconcileProbe,
 } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 /** §7.1 step 6: back to `queued` a bounded number of times before giving up for good. */
 const MAX_PUBLISH_ATTEMPTS = 6;
@@ -98,7 +99,7 @@ export interface PublishComment {
 /** The row fields one publish attempt needs — a local addition, not part of `CommentRepository`. */
 interface TargetRow {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: string;
   readonly postId: string | null;
@@ -106,6 +107,14 @@ interface TargetRow {
   readonly parentCommentId: string | null;
   readonly text: string | null;
   readonly attemptCount: number;
+  /** A previous attempt may have reached the platform — reconcile before sending again (D14). */
+  readonly needsReconcile: boolean;
+  /**
+   * When the *previous* attempt started; read before `markProcessing` overwrites it, so it anchors
+   * the reconciliation window back to the send that may have gone out.
+   */
+  readonly lastAttemptStartedAt: Date | null;
+  readonly createdAt: Date;
 }
 
 interface ParentSnapshot {
@@ -164,6 +173,9 @@ async function findTargetRow(db: NodePgDatabase, commentId: string): Promise<Tar
       parentCommentId: comments.parentCommentId,
       text: comments.text,
       attemptCount: comments.attemptCount,
+      needsReconcile: comments.needsReconcile,
+      lastAttemptStartedAt: comments.lastAttemptStartedAt,
+      createdAt: comments.createdAt,
     })
     .from(comments)
     .where(eq(comments.id, commentId))
@@ -301,8 +313,13 @@ async function settleRetryOrExhausted(
   if (attemptOrdinal >= MAX_PUBLISH_ATTEMPTS) {
     return settleFailed(deps, target, exhaustedCode, `gave up after ${attemptOrdinal} attempts`);
   }
+  // An unresolved `OutcomeUnknownError` must survive into the next attempt; a rate-limit rejection
+  // proves nothing was sent, so it releases the guard instead of leaving a pointless search behind.
+  const needsReconcile = exhaustedCode === 'OUTCOME_UNKNOWN';
   const requeued = await deps.database.transaction((tx) =>
-    deps.commentRepository.markQueuedForRetry(tx, target.workspaceId, target.id),
+    deps.commentRepository.markQueuedForRetry(tx, target.workspaceId, target.id, {
+      needsReconcile,
+    }),
   );
   if (!requeued) {
     return { kind: 'skipped' };
@@ -433,22 +450,35 @@ function postedEvent(target: TargetRow, published: PublishedComment): OutboxEven
  * later attempt to reconcile again, since neither a send nor a blind retry is safe without an
  * answer.
  */
+/** What one attempt resolved before reaching the adapter, threaded through the settle paths. */
+interface Attempt {
+  readonly ctx: AccountContext;
+  readonly adapter: CommentPlatformAdapter;
+  readonly parentPlatformCommentId: string | null;
+  readonly startedAt: Date;
+}
+
+function reconcileProbeFor(
+  target: TargetRow,
+  attempt: Attempt,
+  windowAnchor: Date,
+): ReconcileProbe {
+  return {
+    platformPostId: target.platformPostId,
+    platformParentId: attempt.parentPlatformCommentId,
+    authorPlatformId: attempt.ctx.platformAccountId,
+    text: target.text ?? '',
+    windowStartsAt: new Date(windowAnchor.getTime() - RECONCILE_WINDOW_MS),
+  };
+}
+
 async function handleOutcomeUnknown(
   deps: PublishCommentDeps,
   target: TargetRow,
-  ctx: AccountContext,
-  adapter: CommentPlatformAdapter,
-  parentPlatformCommentId: string | null,
-  attemptStartedAt: Date,
+  attempt: Attempt,
 ): Promise<PublishOutcome> {
-  const probe: ReconcileProbe = {
-    platformPostId: target.platformPostId,
-    platformParentId: parentPlatformCommentId,
-    authorPlatformId: ctx.platformAccountId,
-    text: target.text ?? '',
-    windowStartsAt: new Date(attemptStartedAt.getTime() - RECONCILE_WINDOW_MS),
-  };
-  const result = await reconcileComment(adapter, ctx, probe);
+  const probe = reconcileProbeFor(target, attempt, attempt.startedAt);
+  const result = await reconcileComment(attempt.adapter, attempt.ctx, probe);
   if (result.found) {
     return settlePosted(deps, target, result.published);
   }
@@ -458,24 +488,14 @@ async function handleOutcomeUnknown(
 function handlePublishError(
   deps: PublishCommentDeps,
   target: TargetRow,
-  ctx: AccountContext,
-  adapter: CommentPlatformAdapter,
-  parentPlatformCommentId: string | null,
-  attemptStartedAt: Date,
+  attempt: Attempt,
   error: unknown,
 ): Promise<PublishOutcome> {
   if (error instanceof RetryableError) {
     return settleRetryOrExhausted(deps, target, 'PLATFORM_RATE_LIMITED', error.retryAfter);
   }
   if (error instanceof OutcomeUnknownError) {
-    return handleOutcomeUnknown(
-      deps,
-      target,
-      ctx,
-      adapter,
-      parentPlatformCommentId,
-      attemptStartedAt,
-    );
+    return handleOutcomeUnknown(deps, target, attempt);
   }
   if (error instanceof PermanentError) {
     return settleFailed(deps, target, 'PLATFORM_REJECTED', error.message);
@@ -484,6 +504,54 @@ function handlePublishError(
     return settleAuthFailed(deps, target, error.message);
   }
   throw error;
+}
+
+/**
+ * Resolves a guard left armed by an earlier attempt, before this one is allowed to send (D14).
+ *
+ * The guard says a previous attempt may have reached the platform: either it ended in an
+ * unresolved `OutcomeUnknownError`, or the worker died between the send and the row being
+ * settled — the case no in-memory state can survive, and the one the stuck-work sweeper would
+ * otherwise hand straight back to a blind republish.
+ *
+ * `lastAttemptStartedAt` anchors the search window rather than this attempt's clock: the send in
+ * question belongs to the earlier attempt, and measuring from now would open the window after the
+ * comment it is looking for was created.
+ *
+ * Returns:
+ *   The outcome when this attempt is already settled — the comment was found on the platform, or
+ *   the search itself could not be completed. `null` when reconciliation proved nothing is there
+ *   and the guard has been cleared, leaving the caller free to send.
+ */
+async function reconcileBeforeSending(
+  deps: PublishCommentDeps,
+  target: TargetRow,
+  attempt: Attempt,
+): Promise<PublishOutcome | null> {
+  const windowAnchor = target.lastAttemptStartedAt ?? target.createdAt;
+  const probe = reconcileProbeFor(target, attempt, windowAnchor);
+
+  let result;
+  try {
+    result = await reconcileComment(attempt.adapter, attempt.ctx, probe);
+  } catch (error) {
+    // The search failed, so the outcome is still unknown and the guard must stay armed — which
+    // `settleRetryOrExhausted('OUTCOME_UNKNOWN')` does. Letting this propagate would leave the row
+    // `processing` for the sweeper, which is the path that lost the guard in the first place.
+    if (error instanceof OutcomeUnknownError || error instanceof RetryableError) {
+      return settleRetryOrExhausted(deps, target, 'OUTCOME_UNKNOWN');
+    }
+    throw error;
+  }
+
+  if (result.found) {
+    return settlePosted(deps, target, result.published);
+  }
+
+  const cleared = await deps.database.transaction((tx) =>
+    deps.commentRepository.clearReconcileGuard(tx, target.workspaceId, target.id),
+  );
+  return cleared ? null : { kind: 'skipped' };
 }
 
 /**
@@ -499,17 +567,48 @@ function handlePublishError(
  * throw (account or credentials row missing) is still handled as `PermanentError` is — nothing
  * was sent either way, and only `AuthError` carries D30's specific meaning.
  */
+async function sendAndSettle(
+  deps: PublishCommentDeps,
+  target: TargetRow,
+  attempt: Attempt,
+): Promise<PublishOutcome> {
+  // Committed before the send, so that losing the process mid-flight leaves evidence that a send
+  // may have happened. A `false` means another worker settled the row first: stop, do not send.
+  const armed = await deps.database.transaction((tx) =>
+    deps.commentRepository.markSendAttempted(tx, target.workspaceId, target.id),
+  );
+  if (!armed) {
+    return { kind: 'skipped' };
+  }
+
+  const input: PublishInput = {
+    platformPostId: target.platformPostId,
+    platformParentId: attempt.parentPlatformCommentId,
+    text: target.text ?? '',
+  };
+
+  try {
+    const published = await attempt.adapter.publishComment(attempt.ctx, input);
+    return await settlePosted(deps, target, published);
+  } catch (error) {
+    return handlePublishError(deps, target, attempt, error);
+  }
+}
+
 async function attemptSend(
   deps: PublishCommentDeps,
   target: TargetRow,
   parentPlatformCommentId: string | null,
   attemptStartedAt: Date,
 ): Promise<PublishOutcome> {
-  let ctx: AccountContext;
-  let adapter: CommentPlatformAdapter;
+  let attempt: Attempt;
   try {
-    ctx = await loadAccountContext(deps, target);
-    adapter = deps.getAdapter(target.platform as Platform);
+    attempt = {
+      ctx: await loadAccountContext(deps, target),
+      adapter: deps.getAdapter(target.platform as Platform),
+      parentPlatformCommentId,
+      startedAt: attemptStartedAt,
+    };
   } catch (error) {
     if (error instanceof AuthError) {
       return settleAuthFailed(deps, target, error.message);
@@ -518,26 +617,14 @@ async function attemptSend(
     return settleFailed(deps, target, 'PLATFORM_REJECTED', message);
   }
 
-  const input: PublishInput = {
-    platformPostId: target.platformPostId,
-    platformParentId: parentPlatformCommentId,
-    text: target.text ?? '',
-  };
-
-  try {
-    const published = await adapter.publishComment(ctx, input);
-    return await settlePosted(deps, target, published);
-  } catch (error) {
-    return handlePublishError(
-      deps,
-      target,
-      ctx,
-      adapter,
-      parentPlatformCommentId,
-      attemptStartedAt,
-      error,
-    );
+  if (target.needsReconcile) {
+    const settled = await reconcileBeforeSending(deps, target, attempt);
+    if (settled !== null) {
+      return settled;
+    }
   }
+
+  return sendAndSettle(deps, target, attempt);
 }
 
 /**

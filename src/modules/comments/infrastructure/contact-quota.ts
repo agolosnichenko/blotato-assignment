@@ -26,9 +26,10 @@
  * the lock now lives for the *caller's* transaction, it stays held until the whole reply — not
  * just the reservation — commits or rolls back.
  *
- * `release`, unlike `reserve`, opens its own transaction: it runs on a comment's final failure,
- * long after the accepting transaction (and `reserve` inside it) already committed, from the
- * publish worker rather than the accept path. There is no caller transaction left to join. It
+ * `release`, unlike `reserve`, takes no transaction: it runs on a comment's final failure, long
+ * after the accepting transaction (and `reserve` inside it) already committed, from the publish
+ * worker rather than the accept path, so there is no caller transaction left to join. It needs
+ * none of its own either — it is a single `DELETE`, atomic on its own. It
  * frees a reply that never reached the platform from having permanently spent a contact's
  * allowance, scoped to `(workspace_id, comment_id)` rather than `(workspace_id,
  * contact_platform_id)`: the usage row for a contact is owned by whichever comment first reserved
@@ -44,9 +45,10 @@ import type { OutboxTransaction } from '#src/modules/comments/infrastructure/out
 import { contactQuotaUsage } from '#src/modules/comments/infrastructure/schema.ts';
 import type { Workspaces } from '#src/modules/platform-core/ports.ts';
 import type { Platform } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export interface ReserveInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly platform: Platform;
   /** The platform's identifier for the person being contacted — not our own comment author id. */
   readonly contactPlatformId: string;
@@ -63,7 +65,7 @@ export type ReserveResult =
   | { readonly ok: false; readonly reason: 'QUOTA_EXCEEDED' };
 
 export interface ReleaseInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly commentId: string;
 }
 
@@ -82,7 +84,7 @@ function currentPeriod(): string {
 
 async function countReservedThisPeriod(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   period: string,
 ): Promise<number> {
   const rows = await tx

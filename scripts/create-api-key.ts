@@ -29,13 +29,15 @@ import { Pool } from 'pg';
 import { apiKeys, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import { generateId } from '#src/shared/ids.ts';
+import { closeQuietly, reportFatal } from './script-failure.ts';
+import { asWorkspaceId, type WorkspaceId } from '#src/shared/ids.ts';
 
 const SECRET_ENTROPY_BYTES = 32;
 const PREFIX_BYTES = 6;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 interface CliArgs {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly name: string;
   readonly rateLimitPerMin: number | null;
 }
@@ -72,7 +74,8 @@ function parseCliArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { workspaceId, name: values.name, rateLimitPerMin };
+  // The one place a workspace id enters this script: validated as a UUID just above.
+  return { workspaceId: asWorkspaceId(workspaceId), name: values.name, rateLimitPerMin };
 }
 
 function loadDatabaseUrl(): string {
@@ -133,13 +136,12 @@ async function main(): Promise<void> {
     console.log('');
     console.log(fullKey);
   } finally {
-    await pool.end();
+    await closeQuietly('the database pool', () => pool.end());
   }
 }
 
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  reportFatal(error);
 }

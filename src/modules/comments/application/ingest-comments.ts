@@ -56,6 +56,7 @@ import type {
   NormalizedComment,
   Platform,
 } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 /**
  * Bounds the ancestor walk (T077) against a cycle or a pathologically deep thread — neither the
@@ -69,7 +70,8 @@ const MAX_ANCESTOR_WALK = 50;
 export interface IngestedComment {
   readonly platformCommentId: string;
   readonly platformParentId: string | null;
-  readonly authorPlatformId: string;
+  /** `null` when the platform withheld the author — see `NormalizedComment.authorPlatformId`. */
+  readonly authorPlatformId: string | null;
   readonly authorUsername: string | null;
   readonly authorDisplayName: string | null;
   /** Absent, not `null`, on a thin webhook payload (A18) — `upsert` completes it via `fetchComment`. */
@@ -87,7 +89,7 @@ export interface IngestedComment {
 
 /** The post a comment hangs off, as known to this service. */
 export interface IngestTarget {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: Platform;
   /** `null` for a post never published through this service (FR-018). */
@@ -111,7 +113,7 @@ export interface UpsertResult {
 }
 
 export interface DeleteInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: Platform;
   readonly platformCommentId: string;
@@ -158,7 +160,8 @@ interface RowInput {
   readonly isOwn: boolean;
 }
 
-function isOwnFor(ctx: AccountContext, authorPlatformId: string): boolean {
+/** A comment whose author the platform withheld is never ours: we always know our own id. */
+function isOwnFor(ctx: AccountContext, authorPlatformId: string | null): boolean {
   return authorPlatformId === ctx.platformAccountId;
 }
 
@@ -337,7 +340,7 @@ function insertValuesFor(target: IngestTarget, ingestionSource: IngestionSource,
     authorUsername: input.authorUsername,
     authorDisplayName: input.authorDisplayName,
     text: input.resolvedText ?? null,
-    status: 'posted',
+    status: 'posted' as const,
     replyCount: 0,
     lastActivityAt: input.platformCreatedAt,
     occurredAt: input.platformCreatedAt,
@@ -522,7 +525,7 @@ async function upsert(deps: IngestCommentsDeps, input: UpsertInput): Promise<Ups
 
 interface DeleteTargetRow {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly parentCommentId: string | null;
 }
 

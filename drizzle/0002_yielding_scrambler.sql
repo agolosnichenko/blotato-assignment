@@ -1,0 +1,1 @@
+ALTER TABLE "comments" ADD COLUMN "needs_reconcile" boolean DEFAULT false NOT NULL;

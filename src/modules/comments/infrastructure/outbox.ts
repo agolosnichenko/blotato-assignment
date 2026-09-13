@@ -10,7 +10,7 @@
 
 import type { ExtractTablesWithRelations } from 'drizzle-orm';
 import type { NodePgTransaction } from 'drizzle-orm/node-postgres';
-import { generateId } from '#src/shared/ids.ts';
+import { generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { outboxEvents } from '#src/modules/comments/infrastructure/schema.ts';
 
 /**
@@ -27,7 +27,7 @@ export type OutboxTransaction = NodePgTransaction<
 >;
 
 export interface OutboxEventInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   /** One of the event types in contracts/domain-events.md, e.g. `comment.received`. */
   readonly type: string;
   /** The entity this event is about — a comment or another aggregate this module owns. */

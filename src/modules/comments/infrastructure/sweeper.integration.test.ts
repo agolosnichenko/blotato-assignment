@@ -58,7 +58,7 @@ import type { CommentStatus } from '#src/modules/comments/domain/status.ts';
 import { createStuckWorkSweeper } from '#src/modules/comments/infrastructure/sweepers.ts';
 import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import { socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { createRedis } from '#src/shared/queue.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
@@ -101,12 +101,12 @@ async function teardownHarness(harness: Harness): Promise<void> {
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
 }
 
 async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccount> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
 
   await db.insert(workspaces).values({
@@ -131,7 +131,7 @@ async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccoun
 }
 
 interface SeedStuckCommentOptions {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly status?: CommentStatus;
   readonly createdAt?: Date;

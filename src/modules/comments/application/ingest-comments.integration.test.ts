@@ -63,7 +63,7 @@ import type {
   CommentPlatformAdapter,
   NormalizedComment,
 } from '#src/platforms/types.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 
 const PLATFORM = 'bluesky';
@@ -104,12 +104,12 @@ function buildIngestComments(db: NodePgDatabase) {
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
 }
 
 function seedAccount(): SeededAccount {
-  return { workspaceId: generateId(), socialAccountId: generateId() };
+  return { workspaceId: asWorkspaceId(generateId()), socialAccountId: generateId() };
 }
 
 function accountContext(account: SeededAccount): AccountContext {

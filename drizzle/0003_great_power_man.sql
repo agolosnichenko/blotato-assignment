@@ -1,0 +1,1 @@
+ALTER TABLE "comments" ADD CONSTRAINT "comments_status_valid" CHECK ("comments"."status" in ('queued', 'processing', 'posted', 'failed', 'deleted'));

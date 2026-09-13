@@ -30,7 +30,11 @@
  * See scripts/spikes/README.md for what each variable is and what to paste back.
  */
 
+import { reportFatal } from '../script-failure.ts';
+
 const DEFAULT_API_VERSION = 'v21.0';
+/** Node's `fetch` has no default socket timeout; without this a hung host stalls the spike. */
+const REQUEST_TIMEOUT_MS = 10_000;
 const REQUIRED_SCOPES = ['pages_manage_metadata', 'pages_show_list'];
 
 interface DebugTokenData {
@@ -82,7 +86,7 @@ function fingerprint(secret: string): string {
  *     a setup problem, not a spike result, so it is not folded into the return value.
  */
 async function callGraph(url: URL): Promise<{ status: number; body: unknown }> {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   const body: unknown = await response.json().catch(() => null);
   return { status: response.status, body };
 }
@@ -178,11 +182,19 @@ async function main(): Promise<void> {
       : `token_valid=${String(tokenOk)} feed_subscribed=${String(feedSubscribed)} ` +
         `missing_scopes=${missingScopes.join(',') || '(none)'}`;
   console.log(`SPIKE S1 VERDICT: ${verdict}`);
+
+  if (tokenOk !== true || feedSubscribed !== true) {
+    // These two are setup preconditions, not findings: an invalid token or an unsubscribed Page
+    // means the spike could not ask its question at all. Exiting zero made that indistinguishable
+    // from a successful run for anything reading the exit code. What the spike genuinely cannot
+    // establish — delivery from a real user — stays in the verdict line above and does not fail
+    // the run.
+    process.exitCode = 1;
+  }
 }
 
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  reportFatal(error);
 }

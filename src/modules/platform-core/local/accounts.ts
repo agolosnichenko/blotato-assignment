@@ -21,6 +21,7 @@ import {
   type SocialAccountRecord,
 } from '#src/modules/platform-core/ports.ts';
 import type { Platform } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 const ACCOUNT_COLUMNS = {
   id: socialAccounts.id,
@@ -38,7 +39,7 @@ async function toEffectiveRecord(
   db: NodePgDatabase,
   row: {
     id: string;
-    workspaceId: string;
+    workspaceId: WorkspaceId;
     platform: string;
     platformAccountId: string;
     username: string;

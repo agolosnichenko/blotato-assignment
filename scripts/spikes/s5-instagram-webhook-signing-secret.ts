@@ -32,6 +32,7 @@ import { createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { secureCompare } from '#src/shared/crypto.ts';
+import { reportFatal } from '../script-failure.ts';
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -137,6 +138,5 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  reportFatal(error);
 }

@@ -7,7 +7,13 @@
  * (Principle III) — the affected-row count tells the caller whether it won the race.
  */
 
-export type CommentStatus = 'queued' | 'processing' | 'posted' | 'failed' | 'deleted';
+/**
+ * The statuses, as a value — so the drizzle column, the Zod response schema and this type are all
+ * derived from one list rather than three hand-kept copies of it.
+ */
+export const COMMENT_STATUSES = ['queued', 'processing', 'posted', 'failed', 'deleted'] as const;
+
+export type CommentStatus = (typeof COMMENT_STATUSES)[number];
 
 /**
  * `from -> to` pairs the repository may apply with a conditional `UPDATE`.

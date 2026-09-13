@@ -7,7 +7,7 @@
  * loses no data (FR-033, SC-011) — a row that fails to publish simply stays unpublished
  * and is retried on the next pass.
  *
- * I5 (final-review.md): each row publishes and stamps inside its *own* transaction, not one
+ * spec.md §18: each row publishes and stamps inside its *own* transaction, not one
  * shared transaction for the whole batch. A row BullMQ can never accept — a payload it rejects,
  * a shape Redis refuses as part of a key — used to sit forever at the front of the oldest-100
  * selection and abort every pass behind it, since one `Promise.all` rejection rolled back the
@@ -22,6 +22,20 @@ import type { Database } from '#src/shared/db.ts';
 import { outboxEvents } from '#src/modules/comments/infrastructure/schema.ts';
 
 const BATCH_SIZE = 100;
+
+/** Attempts after which a row stops being an ordinary retry and starts being an incident. */
+const POISON_ATTEMPTS = 10;
+
+/** The slice of pino this module needs; keeps the relay callable from tests without a logger. */
+export interface RelayLogger {
+  warn(details: Record<string, unknown>, message: string): void;
+  error(details: Record<string, unknown>, message: string): void;
+}
+
+const SILENT_RELAY_LOGGER: RelayLogger = {
+  warn: () => {},
+  error: () => {},
+};
 
 export interface OutboxRelayResult {
   readonly relayed: number;
@@ -71,11 +85,35 @@ function publishRow(db: Database, domainEventsQueue: Queue, rowId: string): Prom
 
 /** Bumps `attempts` for a row whose publish just failed — its own tiny statement, since the
  * failed `publishRow` transaction already rolled back and cannot carry this write itself. */
-async function recordFailure(db: Database, rowId: string): Promise<void> {
-  await db.drizzle
+async function recordFailure(db: Database, rowId: string): Promise<number> {
+  const [row] = await db.drizzle
     .update(outboxEvents)
     .set({ attempts: sql`${outboxEvents.attempts} + 1` })
-    .where(eq(outboxEvents.id, rowId));
+    .where(eq(outboxEvents.id, rowId))
+    .returning({ attempts: outboxEvents.attempts });
+  return row?.attempts ?? 0;
+}
+
+/**
+ * Reports one row's failure, loudly enough that a stuck event is noticed.
+ *
+ * `attempts` was already being incremented before this, but nothing read it and nothing logged —
+ * so a row BullMQ would never accept was retried every 10 seconds, forever, while the relay pass
+ * that carried it reported success. Past {@link POISON_ATTEMPTS} the level rises to `error`: the
+ * row is still kept and still retried (D9 — the outbox is the only record of the event, and
+ * dropping it would lose the event for good), but it stops being invisible.
+ */
+function reportFailure(logger: RelayLogger, rowId: string, attempts: number, error: unknown): void {
+  const details = { outboxEventId: rowId, attempts, err: error };
+  if (attempts >= POISON_ATTEMPTS) {
+    logger.error(
+      details,
+      'outbox relay: event still unpublished after repeated attempts; it is being retried every ' +
+        'pass and needs an operator',
+    );
+    return;
+  }
+  logger.warn(details, 'outbox relay: event failed to publish, will retry on the next pass');
 }
 
 /**
@@ -109,6 +147,7 @@ async function recordFailure(db: Database, rowId: string): Promise<void> {
 export async function relayOutboxBatch(
   db: Database,
   domainEventsQueue: Queue,
+  logger: RelayLogger = SILENT_RELAY_LOGGER,
 ): Promise<OutboxRelayResult> {
   const rows = await db.drizzle
     .select({ id: outboxEvents.id })
@@ -132,7 +171,8 @@ export async function relayOutboxBatch(
     } catch (error) {
       failures.push(error);
       // oxlint-disable-next-line no-await-in-loop
-      await recordFailure(db, row.id);
+      const attempts = await recordFailure(db, row.id);
+      reportFailure(logger, row.id, attempts, error);
     }
   }
 

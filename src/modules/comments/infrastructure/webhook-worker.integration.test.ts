@@ -48,7 +48,7 @@ import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.t
 import { socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { createMetaWebhookNormalizer } from '#src/platforms/meta/webhook-normalizer.ts';
 import { createLogger } from '#src/shared/logger.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { createRedis } from '#src/shared/queue.ts';
 import { JOB_NAMES, QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
@@ -119,7 +119,7 @@ async function teardownHarness(harness: Harness): Promise<void> {
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platformAccountId: string;
 }
@@ -148,7 +148,7 @@ async function seedWorkspaceAndAccount(
   db: NodePgDatabase,
   options: SeedWorkspaceAndAccountOptions = {},
 ): Promise<SeededAccount> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
   const platformAccountId = options.platformAccountId ?? `page-${generateId()}`;
   const credentialsCiphertext = encryptCredentials(Buffer.from('page-token'), {

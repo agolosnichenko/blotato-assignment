@@ -12,13 +12,14 @@ import type {
   CommentRepository,
 } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { ApiError } from '#src/shared/errors.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export interface GetCommentDeps {
   readonly repository: CommentRepository;
 }
 
 export interface GetCommentInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly commentId: string;
 }
 

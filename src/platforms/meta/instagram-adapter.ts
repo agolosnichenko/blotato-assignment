@@ -17,10 +17,12 @@
  */
 
 import { classifyGraphFailure } from '#src/platforms/meta/errors.ts';
+import { findCommentOnEdge } from '#src/platforms/meta/reconcile.ts';
 import {
   createGraphClient,
   GraphHttpError,
   type GraphClient,
+  type GraphUsage,
 } from '#src/platforms/meta/graph-client.ts';
 import type { AccountCredentialsRecord } from '#src/modules/platform-core/ports.ts';
 import {
@@ -101,7 +103,7 @@ function normalizeIgComment(
   return {
     platformCommentId: node.id,
     platformParentId,
-    authorPlatformId: node.from?.id ?? '',
+    authorPlatformId: node.from?.id ?? null,
     authorUsername: node.from?.username ?? null,
     authorDisplayName: null,
     text: node.text,
@@ -176,7 +178,7 @@ async function publishComment(
     // The Graph API does not echo a created-time on write, so the call's own clock stands in.
     return { platformCommentId: response.data.id, platformCreatedAt: new Date() };
   } catch (error) {
-    throw classifyGraphFailure(error);
+    throw classifyGraphFailure(error, 'write');
   }
 }
 
@@ -187,35 +189,27 @@ function matchesProbe(comment: IgCommentNode, ownId: string, probe: ReconcilePro
   return new Date(comment.timestamp) >= probe.windowStartsAt;
 }
 
-async function findPublishedComment(
+/**
+ * Searches the anchor's comment (or reply) edge for our own comment (FR-011, D14).
+ *
+ * The walk itself — and why an unfinished one must raise rather than answer "not found" — lives in
+ * `reconcile.ts`; this only describes Instagram's edge and what counts as a match on it.
+ */
+function findPublishedComment(
   graphClient: GraphClient,
   ctx: AccountContext,
   probe: ReconcileProbe,
 ): Promise<PublishedComment | null> {
-  const credentials = credentialsFrom(ctx);
   const anchorId = probe.platformParentId ?? probe.platformPostId;
-  const edge = probe.platformParentId === null ? 'comments' : 'replies';
-
-  let response;
-  try {
-    response = await graphClient.request<IgCommentListResponse>(
-      credentials,
-      'GET',
-      `/${anchorId}/${edge}`,
-      { fields: 'id,text,timestamp,from' },
-    );
-  } catch (error) {
-    // A search that fails must never be read as "not found" — that would let the caller retry a
-    // publish that may already have succeeded.
-    throw classifyGraphFailure(error);
-  }
-
-  const match = response.data.data.find((comment) =>
-    matchesProbe(comment, ctx.platformAccountId, probe),
-  );
-  return match === undefined
-    ? null
-    : { platformCommentId: match.id, platformCreatedAt: new Date(match.timestamp) };
+  return findCommentOnEdge(graphClient, credentialsFrom(ctx), {
+    platform: 'instagram',
+    path: `/${anchorId}/${probe.platformParentId === null ? 'comments' : 'replies'}`,
+    fields: 'id,text,timestamp,from',
+    match: (node: IgCommentNode) =>
+      matchesProbe(node, ctx.platformAccountId, probe)
+        ? { platformCommentId: node.id, platformCreatedAt: new Date(node.timestamp) }
+        : null,
+  });
 }
 
 async function listComments(
@@ -239,7 +233,7 @@ async function listComments(
   } catch (error) {
     // A page that fails must never be read as an empty-but-complete one — that would let a sync
     // walk conclude the post has no more comments and mark the rest deleted.
-    throw classifyGraphFailure(error);
+    throw classifyGraphFailure(error, 'read');
   }
 
   const comments = flattenIgComments(response.data.data);
@@ -270,7 +264,7 @@ async function fetchComment(
       // means, not a failure `ingest-comments.ts` (T077) should be blocked by.
       return null;
     }
-    throw classifyGraphFailure(error);
+    throw classifyGraphFailure(error, 'read');
   }
   return normalizeIgComment(response.data, response.data.parent_id ?? null);
 }
@@ -285,6 +279,8 @@ async function fetchComment(
 export function createInstagramAdapter(options: {
   readonly apiVersion: string;
   readonly fetchImpl?: typeof fetch;
+  /** Forwarded to the Graph client; see `GraphClientOptions.onUsage` (spec.md §8.2). */
+  readonly onUsage?: (socialAccountId: string, usage: GraphUsage) => void;
 }): CommentPlatformAdapter {
   const graphClient = createGraphClient(options);
 

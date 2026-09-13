@@ -60,9 +60,18 @@ import {
   resolveAccountValues,
   type DemoAccount,
 } from './seed-account-checks.ts';
-import { seedAccount, seedApiKey, seedPost, seedWorkspace } from './seed-account-writes.ts';
+import {
+  checkAccountForConflicts,
+  seedAccount,
+  seedApiKey,
+  seedPost,
+  seedWorkspace,
+  type Db,
+} from './seed-account-writes.ts';
+import { asWorkspaceId } from '#src/shared/ids.ts';
+import { closeQuietly, reportFatal } from './script-failure.ts';
 
-const DEMO_WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
+const DEMO_WORKSPACE_ID = asWorkspaceId('11111111-1111-4111-8111-111111111111');
 
 // Two Meta auth variants (D28) are seeded deliberately, not just one: `instagram_login` and
 // `facebook_login` exercise the two different `AccountCredentials`/Graph-client code paths the
@@ -138,53 +147,104 @@ function resolvedFor(
   return values;
 }
 
+/**
+ * Awaits every task and, if any rejected, throws one error carrying all their messages.
+ *
+ * `Promise.all` surfaces the first rejection and attaches-and-discards the rest — silently, with
+ * no unhandled-rejection warning — so an operator fixing conflicts one run at a time never sees
+ * how many there are.
+ */
+async function assertAllSettled(tasks: readonly Promise<unknown>[]): Promise<void> {
+  const results = await Promise.allSettled(tasks);
+  const failures = results.filter((result) => result.status === 'rejected');
+  if (failures.length === 0) {
+    return;
+  }
+  const messages = failures.map((failure) => {
+    const reason: unknown = failure.reason;
+    return reason instanceof Error ? reason.message : String(reason);
+  });
+  throw new Error(messages.join('\n\n'));
+}
+
+/** The closing summary: which values came from the environment and which are placeholders. */
+function reportSources(
+  resolved: ReadonlyMap<string, ReturnType<typeof resolveAccountValues>>,
+): void {
+  console.log('');
+  console.log('Credential and id sources for this run:');
+  for (const account of DEMO_ACCOUNTS) {
+    console.log(formatAccountStatus(account.platform, resolvedFor(resolved, account)));
+  }
+
+  console.log('');
+  console.log(`Demo workspace ready: ${DEMO_WORKSPACE_ID}`);
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const keyMaterial = {
     key: Buffer.from(config.CREDENTIALS_ENCRYPTION_KEY, 'base64'),
     keyVersion: config.CREDENTIALS_KEY_VERSION,
   };
+  // Resolved before the pool exists: `resolveAllAccounts` throws by design on an unrecognised
+  // `SEED_*_AUTH_VARIANT`, and doing it after would leak a pool that the `finally` below never
+  // reaches. (It happens to exit today only because `pg.Pool` connects lazily.)
+  const resolved = resolveAllAccounts();
   const pool = new Pool({ connectionString: config.DATABASE_URL });
   const db = drizzle(pool);
-  const resolved = resolveAllAccounts();
 
   try {
-    await seedWorkspace(db, DEMO_WORKSPACE_ID);
-
-    // Each account writes a different row by id, so running them concurrently is safe (and
-    // satisfies the project's no-await-in-loop lint, which is otherwise just noise here).
-    await Promise.all(
-      DEMO_ACCOUNTS.map((account) =>
-        seedAccount(db, DEMO_WORKSPACE_ID, account, resolvedFor(resolved, account), keyMaterial),
-      ),
-    );
-
-    await seedApiKey(db, DEMO_WORKSPACE_ID);
-
-    const syncTargetRepository = createSyncTargetRepository(db, config);
-    const postPublished = createLocalPostPublished(db, syncTargetRepository);
-    await Promise.all(
-      DEMO_ACCOUNTS.map((account) =>
-        seedPost(db, DEMO_WORKSPACE_ID, postPublished, account, resolvedFor(resolved, account)),
-      ),
-    );
-
-    console.log('');
-    console.log('Credential and id sources for this run:');
-    for (const account of DEMO_ACCOUNTS) {
-      console.log(formatAccountStatus(account.platform, resolvedFor(resolved, account)));
-    }
-
-    console.log('');
-    console.log(`Demo workspace ready: ${DEMO_WORKSPACE_ID}`);
+    await seedEverything(db, config, resolved, keyMaterial);
+    reportSources(resolved);
   } finally {
-    await pool.end();
+    await closeQuietly('the database pool', () => pool.end());
   }
+}
+
+/**
+ * The write sequence, with every conflict check completed first.
+ *
+ * Checks and writes used to interleave, so a conflict on the second account left the first
+ * account's row already committed — "the seed failed" and "the database is unchanged" stopped
+ * being the same statement. {@link assertAllSettled} also reports *all* the conflicts rather than
+ * the first, which matters when the operator is deciding whether to wipe the demo workspace.
+ */
+async function seedEverything(
+  db: Db,
+  config: ReturnType<typeof loadConfig>,
+  resolved: ReadonlyMap<string, ReturnType<typeof resolveAccountValues>>,
+  keyMaterial: { key: Buffer; keyVersion: number },
+): Promise<void> {
+  await assertAllSettled(
+    DEMO_ACCOUNTS.map((account) =>
+      checkAccountForConflicts(db, account, resolvedFor(resolved, account), keyMaterial),
+    ),
+  );
+
+  await seedWorkspace(db, DEMO_WORKSPACE_ID);
+
+  // Each account writes a different row by id, so running them concurrently is safe (and
+  // satisfies the project's no-await-in-loop lint, which is otherwise just noise here).
+  await assertAllSettled(
+    DEMO_ACCOUNTS.map((account) =>
+      seedAccount(db, DEMO_WORKSPACE_ID, account, resolvedFor(resolved, account), keyMaterial),
+    ),
+  );
+
+  await seedApiKey(db, DEMO_WORKSPACE_ID);
+
+  const syncTargetRepository = createSyncTargetRepository(db, config);
+  const postPublished = createLocalPostPublished(db, syncTargetRepository);
+  await assertAllSettled(
+    DEMO_ACCOUNTS.map((account) =>
+      seedPost(db, DEMO_WORKSPACE_ID, postPublished, account, resolvedFor(resolved, account)),
+    ),
+  );
 }
 
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  reportFatal(error);
 }

@@ -67,13 +67,43 @@ const CLAIMS: readonly StatusClaim[] = [
   },
 ];
 
+function isNotFound(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'ENOENT';
+}
+
+/**
+ * Whether the file that would falsify a claim exists.
+ *
+ * Only `ENOENT` counts as "not yet". Swallowing every error instead made this gate fail *open* in
+ * exactly the situation it exists for: a typo in `falsifiedBy`, a renamed file or an `EACCES`
+ * read as "still unimplemented" drops the claim from `live`, the scan then finds nothing, and the
+ * check prints "no stale statements" and exits zero — over precisely the outdated text it was
+ * written to catch. A gate that cannot fail is worse than no gate, because it is trusted.
+ */
 async function exists(relativePath: string): Promise<boolean> {
+  const absolute = path.join(ROOT, relativePath);
   try {
-    await access(path.join(ROOT, relativePath));
+    await access(absolute);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (!isNotFound(error)) {
+      throw error;
+    }
   }
+
+  // A missing file is only meaningful if its directory is real; otherwise `falsifiedBy` is a typo
+  // or points into a directory that has moved, and this claim would silently never be checked.
+  const parent = path.dirname(absolute);
+  try {
+    await access(parent);
+  } catch (error) {
+    throw new Error(
+      `check-status-claims: falsifiedBy "${relativePath}" names a directory that does not exist ` +
+        `(${path.relative(ROOT, parent)}) — fix the path rather than leaving the claim unchecked`,
+      { cause: error },
+    );
+  }
+  return false;
 }
 
 interface Violation {

@@ -24,7 +24,8 @@ import {
   uuid,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
-import { generateId } from '#src/shared/ids.ts';
+import { COMMENT_STATUSES } from '#src/modules/comments/domain/status.ts';
+import { generateId, type WorkspaceId } from '#src/shared/ids.ts';
 
 // ---------------------------------------------------------------------------------------------
 // comments — the central entity (data-model.md §2)
@@ -37,7 +38,7 @@ export const comments = pgTable(
 
     // External references — no FK (D8, D29). Denormalized so every query is scoped in one
     // predicate (D20).
-    workspaceId: uuid('workspace_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
     socialAccountId: uuid('social_account_id').notNull(),
     postId: uuid('post_id'),
 
@@ -61,11 +62,22 @@ export const comments = pgTable(
     authorDisplayName: text('author_display_name'),
     text: text('text'),
 
-    status: text('status').notNull(),
+    status: text('status', { enum: COMMENT_STATUSES }).notNull(),
     errorCode: text('error_code'),
     errorMessage: text('error_message'),
     attemptCount: integer('attempt_count').notNull().default(0),
     lastAttemptStartedAt: timestamp('last_attempt_started_at', { withTimezone: true }),
+    /**
+     * Set before a send goes out and cleared only once the attempt settles: while it is true this
+     * row may already exist on the platform, so the next attempt must reconcile before sending
+     * again (D14).
+     *
+     * It lives in the row rather than in the worker's memory because the hazard it guards is the
+     * worker *dying* — between the platform accepting the write and this service committing
+     * `posted`, nothing in Redis or in a stack frame survives, and the sweeper would otherwise
+     * requeue the row for a blind second send.
+     */
+    needsReconcile: boolean('needs_reconcile').notNull().default(false),
     idempotencyKey: text('idempotency_key'),
 
     replyCount: integer('reply_count').notNull().default(0),
@@ -90,6 +102,13 @@ export const comments = pgTable(
     check(
       'comments_posted_has_platform_comment_id',
       sql`${table.status} <> 'posted' or ${table.platformCommentId} is not null`,
+    ),
+    // The state machine, enforced by the database too. `text('status', { enum })` only types the
+    // column for drizzle's own callers; anything else writing this table — a migration, a fixture,
+    // a psql session — could otherwise store a status no branch in `domain/status.ts` handles.
+    check(
+      'comments_status_valid',
+      sql`${table.status} in ('queued', 'processing', 'posted', 'failed', 'deleted')`,
     ),
     // Depth and parenthood cannot disagree.
     check(
@@ -129,7 +148,7 @@ export const commentSyncTargets = pgTable(
     id: uuid('id').primaryKey().$defaultFn(generateId),
 
     // External references — no FK (D8, D29).
-    workspaceId: uuid('workspace_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
     socialAccountId: uuid('social_account_id').notNull(),
     postId: uuid('post_id'),
 
@@ -167,7 +186,7 @@ export const commentSyncJobs = pgTable(
     id: uuid('id').primaryKey().$defaultFn(generateId),
 
     // External reference — no FK (D8, D29).
-    workspaceId: uuid('workspace_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
 
     targetId: uuid('target_id')
       .notNull()
@@ -238,7 +257,7 @@ export const contactQuotaUsage = pgTable(
   'contact_quota_usage',
   {
     // External reference — no FK (D8, D29).
-    workspaceId: uuid('workspace_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
     // `YYYY-MM`.
     period: text('period').notNull(),
     platform: text('platform').notNull(),
@@ -264,8 +283,9 @@ export const contactQuotaUsage = pgTable(
 // ---------------------------------------------------------------------------------------------
 
 export const accountHealth = pgTable('account_health', {
-  // External reference — no FK (D8, D29). One row per failing account; removed when the
-  // accounts service reconnects it.
+  // External reference — no FK (D8, D29). One row per failing account; removed when a successful
+  // platform call proves the credential works again (spec.md §18's clarification of D30 — this
+  // service cannot see a reconnect in `social_accounts`, which it never writes).
   socialAccountId: uuid('social_account_id').primaryKey(),
   workspaceId: uuid('workspace_id').notNull(),
 

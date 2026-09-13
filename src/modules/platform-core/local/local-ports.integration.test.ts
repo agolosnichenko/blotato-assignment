@@ -21,7 +21,7 @@ import type { Logger } from 'drizzle-orm/logger';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { accountHealth } from '#src/modules/comments/infrastructure/schema.ts';
 import { createLocalAccounts } from '#src/modules/platform-core/local/accounts.ts';
@@ -58,8 +58,8 @@ async function teardownHarness(harness: Harness): Promise<void> {
 async function seedSocialAccount(
   db: NodePgDatabase,
   overrides: Partial<typeof socialAccounts.$inferInsert> = {},
-): Promise<{ workspaceId: string; socialAccountId: string }> {
-  const workspaceId = generateId();
+): Promise<{ workspaceId: WorkspaceId; socialAccountId: string }> {
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
 
   await db.insert(workspaces).values({

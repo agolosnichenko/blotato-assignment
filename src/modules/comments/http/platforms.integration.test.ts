@@ -36,7 +36,7 @@ import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -58,12 +58,12 @@ interface Harness {
   database: Database;
   publishQueue: Queue;
   app: Api;
-  workspaceId: string;
+  workspaceId: WorkspaceId;
   apiKey: string;
 }
 
 /** Same minting pattern as post-comments.integration.test.ts's `mintApiKey`. */
-async function mintApiKey(database: Database, workspaceId: string): Promise<string> {
+async function mintApiKey(database: Database, workspaceId: WorkspaceId): Promise<string> {
   const prefix = randomBytes(6).toString('hex');
   const secret = randomBytes(32).toString('base64url');
   await database.drizzle.insert(apiKeys).values({
@@ -96,7 +96,7 @@ async function startHarness(): Promise<Harness> {
 
   // GET /v1/platforms is not workspace-scoped data, but auth.ts's PUBLIC_ROUTES is a fail-closed
   // allowlist that does not name it, so it still needs a valid key to pass the gate.
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   await database.drizzle.insert(workspaces).values({
     id: workspaceId,
     name: 'Test workspace',

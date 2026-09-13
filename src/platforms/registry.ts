@@ -91,3 +91,28 @@ export const platformRegistry: Readonly<Record<Platform, PlatformCapabilities>> 
     unsupportedReason: UNSUPPORTED_REASON,
   },
 };
+
+/**
+ * Narrows a platform string that came from outside this service.
+ *
+ * `social_accounts.platform` and `posts.platform` belong to other services (D8), so their values
+ * are whatever those services wrote — including a platform added there before this service's
+ * registry learned about it, which CLAUDE.md describes as the normal way the platform grows.
+ */
+export function isPlatform(value: string): value is Platform {
+  return Object.hasOwn(platformRegistry, value);
+}
+
+/**
+ * The capabilities registered for `platform`, or `undefined` if this service does not know it.
+ *
+ * Use this rather than indexing {@link platformRegistry} with a cast. `Record<Platform, ...>` is a
+ * mapped type over a closed union, so `noUncheckedIndexedAccess` does *not* add `| undefined` to
+ * its index signature — a `platform as Platform` cast therefore produces a value typed
+ * `PlatformCapabilities` that is actually `undefined` at runtime, and the next property read
+ * throws a `TypeError`. That surfaced to the client as `500 INTERNAL_ERROR` where the honest
+ * answer is `422 PLATFORM_NOT_SUPPORTED`.
+ */
+export function lookupCapabilities(platform: string): PlatformCapabilities | undefined {
+  return isPlatform(platform) ? platformRegistry[platform] : undefined;
+}

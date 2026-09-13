@@ -19,6 +19,7 @@ import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createInstagramAdapter } from '#src/platforms/meta/instagram-adapter.ts';
 import type { AccountContext, ReconcileProbe } from '#src/platforms/types.ts';
+import { asWorkspaceId } from '#src/shared/ids.ts';
 
 const API_VERSION = 'v21.0';
 const MEDIA_ID = 'media-1';
@@ -43,7 +44,7 @@ const VARIANTS: readonly Variant[] = [
 
 function contextFor(variant: Variant): AccountContext {
   return {
-    workspaceId: 'ws-1',
+    workspaceId: asWorkspaceId('ws-1'),
     socialAccountId: 'account-1',
     platform: 'instagram',
     platformAccountId: OWN_ID,

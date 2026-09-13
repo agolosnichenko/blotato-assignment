@@ -19,13 +19,20 @@
  * shortens retention must stop polling posts whose threads the purge has already removed, not keep
  * spending rate limit on them forever.
  *
- * `nextSyncAt: null` means the target is deactivated (§7.3: a `PermanentError` from the platform,
- * or a manual reactivation not yet run) — a state the target itself carries. A target whose
- * `ageAnchorAt` has aged past `RETENTION_DAYS` is simply not selected by `computeNextSyncAt` the
- * next time it would be scheduled; nothing here writes `null` into `next_sync_at` for that reason,
- * because retention-driven silence is a fact about the post's age, not a recorded target state —
- * unlike deactivation, it needs no `last_error` and is not something a manual sync should reverse
- * by "restoring" a value that was never set.
+ * `nextSyncAt: null` means "not scheduled", and two different facts produce it. One is
+ * deactivation (§7.3: a `PermanentError` from the platform), written by `deactivate` together with
+ * a `last_error`. The other is retention: `computeNextSyncAt` returns `null` once `ageAnchorAt` is
+ * past `RETENTION_DAYS`, and both `ensureTarget` and `markSyncSucceeded` store that result like
+ * any other, so a post that has aged out does end up with `next_sync_at = null` in the row.
+ *
+ * `last_error` is what tells the two apart: a deactivated target carries the platform's reason, a
+ * retired one carries none. That distinction matters to a manual refresh, which may reasonably
+ * revive the first and has nothing to revive in the second — the post's thread is past the
+ * retention window the purge has already acted on.
+ *
+ * `last_error` is also written on a *non*-terminal failure (`recordFailure`), where `next_sync_at`
+ * stays set — so the three states read as: scheduled with an error (failing, still retrying),
+ * unscheduled with an error (deactivated), unscheduled without one (aged out).
  */
 
 // oxlint-disable max-lines -- one repository implementing the age-band schedule (T085) plus the
@@ -38,6 +45,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
 import { platformRegistry } from '#src/platforms/registry.ts';
 import type { Platform } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 /** The configurable §7.3 interval table, read from `src/app/config.ts`. */
 export interface SyncIntervalsConfig {
@@ -60,7 +68,7 @@ export interface ComputeNextSyncAtInput {
 
 export interface SyncTargetRecord {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly postId: string | null;
   readonly platformPostId: string;
@@ -72,7 +80,7 @@ export interface SyncTargetRecord {
 }
 
 export interface EnsureTargetInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: Platform;
   /** `null` for a post never published through this service (an external post, FR-018). */
@@ -109,6 +117,17 @@ export interface SyncTargetRepository {
    * schedule, by computing a real `next_sync_at` again.
    */
   deactivate(targetId: string, reason: string): Promise<void>;
+  /**
+   * Records why the last walk failed without changing the schedule.
+   *
+   * For the failures that are *not* terminal — a `RetryableError`, or anything unexpected the walk
+   * raised — the target stays scheduled and gets picked up again. Writing nothing left those
+   * failures visible only in the `comment_sync_jobs` row, which is exactly the row that can go
+   * missing; a target failing on every tick then looked identical to one that had never run.
+   * `next_sync_at` is deliberately untouched: "why it failed" and "when to try again" are separate
+   * decisions on separate columns.
+   */
+  recordFailure(targetId: string, reason: string): Promise<void>;
   /** D19's 60-second manual cooldown: the instant a second manual request starts being rejected. */
   setManualCooldown(targetId: string, manualCooldownUntil: Date): Promise<void>;
   /**
@@ -143,7 +162,7 @@ const BANDS_BY_GROUP: Record<'meta' | 'bluesky', (config: SyncIntervalsConfig) =
 };
 
 /**
- * I3 (final-review.md): reads `platformRegistry` for *which* configured band a platform uses
+ * spec.md §18: reads `platformRegistry` for *which* configured band a platform uses
  * instead of branching on `platform` itself — the one capability decision that used to bypass the
  * registry (Principle IV). Adding comment support for a new platform is a `registry.ts` entry
  * naming an existing `syncIntervalGroup` (or a new config group, which is a `config.ts` change,
@@ -288,6 +307,14 @@ async function markSyncSucceeded(
     .where(eq(commentSyncTargets.id, targetId));
 }
 
+/** Writes `last_error` alone: the schedule is a separate decision (see the interface docstring). */
+async function recordFailure(db: NodePgDatabase, targetId: string, reason: string): Promise<void> {
+  await db
+    .update(commentSyncTargets)
+    .set({ lastError: reason })
+    .where(eq(commentSyncTargets.id, targetId));
+}
+
 /** §7.3: deactivates a target — `next_sync_at = null`, `reason` recorded — without touching `last_synced_at`. */
 async function deactivate(db: NodePgDatabase, targetId: string, reason: string): Promise<void> {
   await db
@@ -318,6 +345,7 @@ export function createSyncTargetRepository(
     findByPostId: (postId) => findByPostId(db, postId),
     markSyncSucceeded: (targetId, input) => markSyncSucceeded(db, targetId, input),
     deactivate: (targetId, reason) => deactivate(db, targetId, reason),
+    recordFailure: (targetId, reason) => recordFailure(db, targetId, reason),
     setManualCooldown: (targetId, manualCooldownUntil) =>
       setManualCooldown(db, targetId, manualCooldownUntil),
     computeNextSyncAtFor: (platform, ageAnchorAt, now) =>

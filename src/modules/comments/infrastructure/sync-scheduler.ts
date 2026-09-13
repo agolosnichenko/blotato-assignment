@@ -52,10 +52,17 @@ import type { SyncTargetRepository } from '#src/modules/comments/infrastructure/
 import { createBlueskyAdapter } from '#src/platforms/bluesky/adapter.ts';
 import { createFacebookAdapter } from '#src/platforms/meta/facebook-adapter.ts';
 import { createInstagramAdapter } from '#src/platforms/meta/instagram-adapter.ts';
+import type { GraphUsage } from '#src/platforms/meta/graph-client.ts';
+import {
+  readGraphUsage,
+  recordGraphUsage,
+  usageDelayMs,
+} from '#src/modules/comments/infrastructure/graph-usage.ts';
 import type { AccountCredentials, Accounts } from '#src/modules/platform-core/ports.ts';
 import type { CommentPlatformAdapter, Platform } from '#src/platforms/types.ts';
 import { forJob } from '#src/shared/logger.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 const SCHEDULE_BATCH_SIZE = 100;
 
@@ -74,7 +81,7 @@ export interface SyncScheduler {
 
 interface DueTarget {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
 }
 
 async function selectDueTargets(tx: OutboxTransaction): Promise<DueTarget[]> {
@@ -88,16 +95,21 @@ async function selectDueTargets(tx: OutboxTransaction): Promise<DueTarget[]> {
     .for('update', { skipLocked: true });
 }
 
+/** A job row that has been committed and still has to be handed to BullMQ. */
+interface PendingJob {
+  readonly jobId: string;
+  readonly targetId: string;
+}
+
 /**
- * Creates a `scheduled` job row for `target`, racing the partial unique index against a
- * concurrent manual request or a previous tick's still-active job. On a lost race, nothing is
- * enqueued — the existing job will run to completion and advance `next_sync_at` on its own.
+ * Inserts a `scheduled` job row for `target`, racing the partial unique index against a
+ * concurrent manual request or a previous tick's still-active job. On a lost race this returns
+ * `null` — the existing job will run to completion and advance `next_sync_at` on its own.
  */
-async function enqueueScheduledJob(
+async function insertScheduledJob(
   tx: OutboxTransaction,
-  syncQueue: Queue,
   target: DueTarget,
-): Promise<void> {
+): Promise<PendingJob | null> {
   const [inserted] = await tx
     .insert(commentSyncJobs)
     .values({
@@ -114,10 +126,7 @@ async function enqueueScheduledJob(
     })
     .returning({ id: commentSyncJobs.id });
 
-  if (inserted === undefined) {
-    return;
-  }
-  await syncQueue.add('sync', { targetId: target.id }, { jobId: inserted.id });
+  return inserted === undefined ? null : { jobId: inserted.id, targetId: target.id };
 }
 
 /**
@@ -126,20 +135,40 @@ async function enqueueScheduledJob(
  * `tick()` is the body of the repeatable `scheduler`-queue job `src/app/worker.ts` registers
  * (every minute, concurrency 1) — it selects every target whose `next_sync_at` is due and
  * enqueues one `comment-sync` job per target.
+ *
+ * The rows are committed *before* anything is handed to BullMQ, the same order
+ * `request-sync.ts` already uses. Adding inside the transaction let a worker (concurrency 10) pick
+ * the job up while the row was still uncommitted: `markJobRunning`'s `WHERE status = 'queued'`
+ * could not see it under READ COMMITTED, affected no row, and the job finished "successfully"
+ * while the row committed as `queued` forever — and the partial unique index then blocked that
+ * target from ever being scheduled again, silently.
+ *
+ * Committing first leaves a smaller window of its own — a crash between the commit and the `add`
+ * below — which is why `createStuckSyncJobSweeper` exists rather than this ordering alone being
+ * the fix.
  */
 export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
   return {
     async tick(): Promise<void> {
-      await deps.database.transaction(async (tx) => {
+      const pending = await deps.database.transaction(async (tx) => {
         const due = await selectDueTargets(tx);
+        const jobs: PendingJob[] = [];
         for (const target of due) {
-          // Each target's job insert is independent of the others; sequential only because it
-          // runs inside one transaction alongside the `FOR UPDATE SKIP LOCKED` select above — see
-          // the module docstring for why that lock must span the insert.
+          // Sequential because the inserts share one transaction with the `FOR UPDATE SKIP LOCKED`
+          // select above — see the module docstring for why that lock must span them.
           // oxlint-disable-next-line no-await-in-loop
-          await enqueueScheduledJob(tx, deps.syncQueue, target);
+          const job = await insertScheduledJob(tx, target);
+          if (job !== null) {
+            jobs.push(job);
+          }
         }
+        return jobs;
       });
+
+      for (const job of pending) {
+        // oxlint-disable-next-line no-await-in-loop -- BullMQ's `add` is one round trip per job
+        await deps.syncQueue.add('sync', { targetId: job.targetId }, { jobId: job.jobId });
+      }
     },
   };
 }
@@ -215,10 +244,13 @@ async function tryAcquireToken(redis: Redis, socialAccountId: string): Promise<T
 
 /** Builds the `platform -> adapter` lookup `SyncPost.getAdapter` needs — a `Record`, not a
  * `switch`, same as `publish-worker.ts`'s own registry (Principle IV). */
-function buildAdapterRegistry(config: Config): (platform: Platform) => CommentPlatformAdapter {
+function buildAdapterRegistry(
+  config: Config,
+  onUsage: (socialAccountId: string, usage: GraphUsage) => void,
+): (platform: Platform) => CommentPlatformAdapter {
   const adapters: Partial<Record<Platform, CommentPlatformAdapter>> = {
-    instagram: createInstagramAdapter({ apiVersion: config.META_GRAPH_API_VERSION }),
-    facebook: createFacebookAdapter({ apiVersion: config.META_GRAPH_API_VERSION }),
+    instagram: createInstagramAdapter({ apiVersion: config.META_GRAPH_API_VERSION, onUsage }),
+    facebook: createFacebookAdapter({ apiVersion: config.META_GRAPH_API_VERSION, onUsage }),
     bluesky: createBlueskyAdapter({ threadDepth: config.BLUESKY_THREAD_DEPTH }),
   };
 
@@ -308,6 +340,17 @@ async function processSyncJob(
     return;
   }
 
+  // Meta's own usage signal first (spec.md §8.2): a sync walk is the heaviest Graph consumer in
+  // the service, so an account already near its limit is exactly the one not to start a walk for.
+  const usageDelay = usageDelayMs(
+    await readGraphUsage(deps.redis, target.socialAccountId),
+    deps.config,
+  );
+  if (usageDelay > 0) {
+    jobLogger.debug({ socialAccountId: target.socialAccountId }, 'sync-scheduler: usage high');
+    await delaySyncJob(job, token, usageDelay, jobLogger);
+  }
+
   const bucket = await tryAcquireToken(deps.redis, target.socialAccountId);
   if (!bucket.allowed) {
     await delaySyncJob(job, token, bucket.retryAfterMs, jobLogger);
@@ -351,7 +394,9 @@ export function createSyncWorker(deps: SyncWorkerDeps): Worker {
     accounts: deps.accounts,
     accountCredentials: deps.accountCredentials,
     accountHealth: createAccountHealth(deps.database),
-    getAdapter: buildAdapterRegistry(deps.config),
+    getAdapter: buildAdapterRegistry(deps.config, (socialAccountId, usage) => {
+      void recordGraphUsage(deps.redis, socialAccountId, usage.highestPercent);
+    }),
   });
 
   return new Worker(

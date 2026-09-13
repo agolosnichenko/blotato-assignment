@@ -101,10 +101,14 @@ export function hashSecret(secret: string): string {
  *
  * Residual limitation: hashing `a` and `b` still takes time roughly
  * proportional to each input's length, before the constant-time compare runs.
- * That makes this function safe for comparing fixed-length digests (which is
- * how it's used at both call sites — `hashSecret` output and webhook HMAC
- * digests) but not a general substitute for constant-time behaviour over raw,
- * variable-length secrets, where the hashing step itself could leak length.
+ * Two of the three call sites are unaffected because both sides are already
+ * fixed-length digests — `auth.ts`'s `hashSecret` output and
+ * `webhook-routes.ts`'s HMAC hex. The third, the `hub.verify_token` check in
+ * `webhook-routes.ts`, compares a raw query-string value of the caller's own
+ * choosing, so the hashing step there leaks that value's length through timing.
+ * That is accepted rather than overlooked: the token guards only Meta's
+ * subscription handshake, an attacker supplies the length being measured in the
+ * first place, and knowing it reveals nothing about the configured token.
  */
 export function secureCompare(a: Buffer | string, b: Buffer | string): boolean {
   const digestA = createHash('sha256').update(a).digest();

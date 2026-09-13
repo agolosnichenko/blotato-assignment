@@ -46,10 +46,10 @@ import type {
   PostRecord,
   SocialAccountRecord,
 } from '#src/modules/platform-core/ports.ts';
-import { platformRegistry, type PlatformCapabilities } from '#src/platforms/registry.ts';
-import type { Platform } from '#src/platforms/types.ts';
+import { lookupCapabilities, type PlatformCapabilities } from '#src/platforms/registry.ts';
 import type { Database } from '#src/shared/db.ts';
 import { ApiError } from '#src/shared/errors.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 type SupportedPlatformCapabilities = Extract<
   PlatformCapabilities,
@@ -66,7 +66,7 @@ export interface CreateTopLevelCommentDeps {
 }
 
 export interface CreateTopLevelCommentInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly postId: string;
   readonly text: string;
   readonly idempotencyKey: string | null;
@@ -88,8 +88,11 @@ async function loadPost(
 }
 
 function assertSupportsComments(platform: string): SupportedPlatformCapabilities {
-  const capabilities = platformRegistry[platform as Platform];
-  if (!capabilities.supportsComments) {
+  // A platform this service has no entry for is the same answer as one whose entry says "no":
+  // the caller cannot comment on it. Indexing the registry with a cast instead produced
+  // `undefined` and a `TypeError`, i.e. a 500 where 422 is the truthful status.
+  const capabilities = lookupCapabilities(platform);
+  if (capabilities === undefined || !capabilities.supportsComments) {
     throw new ApiError('PLATFORM_NOT_SUPPORTED', `${platform} does not support comments`);
   }
   return capabilities;
@@ -107,7 +110,7 @@ function assertTextAllowed(capabilities: SupportedPlatformCapabilities, text: st
 
 async function assertAccountActive(
   accounts: Accounts,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   socialAccountId: string,
 ): Promise<SocialAccountRecord> {
   const account = await accounts.findById(socialAccountId);
@@ -123,7 +126,7 @@ async function assertAccountActive(
 /** Same idempotency resolution as `create-reply.ts`: match → return existing, mismatch → `409` (A12). */
 async function resolveIdempotency(
   repository: CommentRepository,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   idempotencyKey: string | null,
   text: string,
 ): Promise<CommentRecord | null> {
@@ -192,7 +195,7 @@ function insertTopLevelTransactionally(
  */
 async function resolveIdempotencyConflict(
   repository: CommentRepository,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   idempotencyKey: string | null,
   text: string,
 ): Promise<CommentRecord | null> {

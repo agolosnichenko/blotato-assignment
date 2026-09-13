@@ -7,15 +7,18 @@
  * `PostPublished` is the one inbound port — the seam through which a published post, an event that
  * originates in the publishing service, reaches this service (§7.3).
  *
- * Every outbound port returns {@link Found} rather than throwing on a missing row: the local
- * projection can go stale (an account renamed or deleted upstream before the mirror catches up),
- * and that is an expected outcome every caller must handle, not an exceptional one. `Found<T>` is
- * the one "unknown entity" representation used across all six ports — chosen over plain `T | null`
+ * Every outbound port that looks a single row up returns {@link Found} rather than throwing on a
+ * missing row: the local projection can go stale (an account renamed or deleted upstream before the
+ * mirror catches up), and that is an expected outcome every caller must handle, not an exceptional
+ * one. `Found<T>` is the one "unknown entity" representation used across every such lookup —
+ * `Accounts.listByPlatformAccount` returns a list (an empty one is its own answer) and
+ * `PostPublished.notify` returns nothing, so neither needs it — chosen over plain `T | null`
  * because "no such row" and "the row exists but this field is null" must stay distinguishable, and
  * a stale projection makes that distinction real rather than theoretical.
  */
 
 import type { Platform } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 /** The result of looking up an entity that may not exist in the local projection. */
 export type Found<T> = { readonly found: true; readonly value: T } | { readonly found: false };
@@ -33,12 +36,12 @@ export interface WorkspaceRecord {
 }
 
 export interface Workspaces {
-  findById(workspaceId: string): Promise<Found<WorkspaceRecord>>;
+  findById(workspaceId: WorkspaceId): Promise<Found<WorkspaceRecord>>;
 }
 
 export interface ApiKeyRecord {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly keyHash: string;
   readonly rateLimitPerMin: number | null;
   readonly revokedAt: Date | null;
@@ -59,7 +62,7 @@ export type SocialAccountStatus = 'active' | 'disconnected';
  */
 export interface SocialAccountRecord {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly platform: string;
   readonly platformAccountId: string;
   readonly username: string;
@@ -88,7 +91,7 @@ export interface Accounts {
 
 export interface PostRecord {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: string;
   readonly platformPostId: string;
@@ -141,7 +144,7 @@ export interface AccountCredentials {
 /** The publish event this service reacts to — see {@link PostPublished}. */
 export interface PublishedPostInput {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: string;
   readonly platformPostId: string;

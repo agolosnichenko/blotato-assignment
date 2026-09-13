@@ -13,9 +13,11 @@
  * `queued`, affects no row, and correctly stops. So a `processing` row whose
  * `last_attempt_started_at` is older than a threshold *comfortably* beyond the longest plausible
  * platform call is returned to `queued` for another attempt: `attempt_count` has already been
- * incremented, and reconciliation through `findPublishedComment` still gates any second send, so
- * this is exactly as safe as a retry after an unknown outcome. The threshold is deliberately
- * generous — sweeping a row that is genuinely still publishing costs one reconciliation read, while
+ * incremented, and the row is requeued with its reconciliation guard armed, so the next attempt
+ * calls `findPublishedComment` before it sends (`recoverStuckProcessingRow`). That gate is what
+ * makes this exactly as safe as a retry after an unknown outcome — without it the sweeper would be
+ * handing a possibly-already-published comment to a blind send. The threshold is deliberately
+ * generous: sweeping a row that is genuinely still publishing costs one reconciliation read, while
  * leaving a row stuck costs the reply.
  *
  * Re-enqueueing is safe to run twice, and even safe against a job that is not actually stuck:
@@ -60,6 +62,7 @@ import {
 } from '#src/modules/comments/infrastructure/reenqueue.ts';
 import { comments, webhookDeliveries } from '#src/modules/comments/infrastructure/schema.ts';
 import { JOB_NAMES } from '#src/shared/queues.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 const STUCK_QUEUED_AFTER_MS = 60_000;
 /** Generous on purpose (see module docstring) — minutes, not the seconds a platform call takes. */
@@ -107,7 +110,7 @@ async function findStuckCommentIds(db: NodePgDatabase, cutoff: Date): Promise<st
 
 interface StuckProcessingRow {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
 }
 
 function findStuckProcessingRows(db: NodePgDatabase, cutoff: Date): Promise<StuckProcessingRow[]> {
@@ -123,6 +126,11 @@ function findStuckProcessingRows(db: NodePgDatabase, cutoff: Date): Promise<Stuc
  * `CommentRepository.markQueuedForRetry` — the same conditional `processing -> queued` transition
  * a `RetryableError` drives — rather than a second update path for the same state change.
  *
+ * `needsReconcile: true` unconditionally. This row is stuck precisely because the worker holding
+ * it disappeared, so whether its send ever reached the platform is unknowable from here — exactly
+ * the state the guard exists for. Requeueing without it is what let a killed worker's comment be
+ * published a second time.
+ *
  * Returns the row's id when the transition applied, or `null` when it lost the race (the worker
  * that was actually holding it settled the outcome first) — in which case there is nothing left to
  * enqueue.
@@ -133,7 +141,7 @@ async function recoverStuckProcessingRow(
   row: StuckProcessingRow,
 ): Promise<string | null> {
   const recovered = await db.transaction((tx) =>
-    commentRepository.markQueuedForRetry(tx, row.workspaceId, row.id),
+    commentRepository.markQueuedForRetry(tx, row.workspaceId, row.id, { needsReconcile: true }),
   );
   return recovered ? row.id : null;
 }
@@ -151,7 +159,10 @@ export function createStuckWorkSweeper(deps: StuckWorkSweeperDeps): StuckWorkSwe
       const stuckQueuedIds = await findStuckCommentIds(deps.database, queuedCutoff);
       const stuckProcessingRows = await findStuckProcessingRows(deps.database, processingCutoff);
       const commentRepository = createCommentRepository(deps.database);
-      const recoveredIds = await Promise.all(
+      // `allSettled`, not `all`: these recoveries are independent, and one failing row must not
+      // cancel the rest — a sweeper that gives up on the first error leaves the others stuck until
+      // the next tick, every tick, for as long as the bad row keeps failing.
+      const recovered = await Promise.allSettled(
         stuckProcessingRows.map((row) =>
           recoverStuckProcessingRow(deps.database, commentRepository, row),
         ),
@@ -159,11 +170,13 @@ export function createStuckWorkSweeper(deps: StuckWorkSweeperDeps): StuckWorkSwe
 
       const commentIds = [
         ...stuckQueuedIds,
-        ...recoveredIds.filter((id): id is string => id !== null),
+        ...recovered
+          .map((result) => (result.status === 'fulfilled' ? result.value : null))
+          .filter((id): id is string => id !== null),
       ];
 
       const logger = deps.logger ?? SILENT_LOGGER;
-      await Promise.all(
+      await Promise.allSettled(
         commentIds.map((commentId) =>
           reenqueueStuckJob(deps.publishQueue, 'publish', { commentId }, commentId, logger),
         ),
@@ -216,7 +229,7 @@ export function createWebhookDeliverySweeper(
       const deliveryIds = await findUnprocessedDeliveryIds(deps.database, cutoff);
       const logger = deps.logger ?? SILENT_LOGGER;
 
-      await Promise.all(
+      await Promise.allSettled(
         deliveryIds.map((deliveryId) =>
           reenqueueStuckJob(
             deps.webhookQueue,

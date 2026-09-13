@@ -16,6 +16,7 @@ import type {
 import type { Posts } from '#src/modules/platform-core/ports.ts';
 import { ApiError } from '#src/shared/errors.ts';
 import type { KeysetCursor, SortOrder } from '#src/shared/pagination.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export interface ListPostCommentsDeps {
   readonly repository: CommentRepository;
@@ -23,7 +24,7 @@ export interface ListPostCommentsDeps {
 }
 
 export interface ListPostCommentsInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly postId: string;
   readonly limit: number;
   readonly cursor: KeysetCursor | null;

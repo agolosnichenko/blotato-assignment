@@ -72,7 +72,7 @@ import {
   type PublishedComment,
   type PublishInput,
 } from '#src/platforms/types.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import type { KeyMaterial } from '#src/shared/crypto.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_CREDENTIALS_ENCRYPTION_KEY } from '#src/shared/testing/test-env.ts';
@@ -102,7 +102,7 @@ async function teardownHarness(harness: Harness): Promise<void> {
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platformAccountId: string;
 }
@@ -121,7 +121,7 @@ async function seedWorkspaceAndAccount(
   db: NodePgDatabase,
   options: SeedWorkspaceAndAccountOptions = {},
 ): Promise<SeededAccount> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
   const platformAccountId = 'bsky-demo-account';
 
@@ -150,7 +150,7 @@ async function seedWorkspaceAndAccount(
 }
 
 interface SeedCommentOptions {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly status?: CommentStatus;
   readonly parentCommentId?: string | null;
@@ -197,7 +197,7 @@ async function seedComment(db: NodePgDatabase, opts: SeedCommentOptions): Promis
 
 async function insertQuotaReservation(
   db: NodePgDatabase,
-  input: { workspaceId: string; commentId: string; contactPlatformId: string },
+  input: { workspaceId: WorkspaceId; commentId: string; contactPlatformId: string },
 ): Promise<void> {
   await db.insert(contactQuotaUsage).values({
     workspaceId: input.workspaceId,

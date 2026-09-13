@@ -35,7 +35,7 @@ import {
 import { contactQuotaUsage } from '#src/modules/comments/infrastructure/schema.ts';
 import { createLocalWorkspaces } from '#src/modules/platform-core/local/workspaces.ts';
 import { workspaces } from '#src/modules/platform-core/schema.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 
 interface Harness {
@@ -58,8 +58,11 @@ async function teardownHarness(harness: Harness): Promise<void> {
   await harness.containers.stop();
 }
 
-async function seedWorkspace(db: NodePgDatabase, contactLimitMonthly: number): Promise<string> {
-  const workspaceId = generateId();
+async function seedWorkspace(
+  db: NodePgDatabase,
+  contactLimitMonthly: number,
+): Promise<WorkspaceId> {
+  const workspaceId = asWorkspaceId(generateId());
   await db.insert(workspaces).values({
     id: workspaceId,
     name: 'Test workspace',
@@ -70,7 +73,7 @@ async function seedWorkspace(db: NodePgDatabase, contactLimitMonthly: number): P
 }
 
 /** Rows this period for `workspaceId` — the count that matters is "people contacted", not messages. */
-async function countUsageRows(db: NodePgDatabase, workspaceId: string): Promise<number> {
+async function countUsageRows(db: NodePgDatabase, workspaceId: WorkspaceId): Promise<number> {
   const rows = await db
     .select({ contactPlatformId: contactQuotaUsage.contactPlatformId })
     .from(contactQuotaUsage)

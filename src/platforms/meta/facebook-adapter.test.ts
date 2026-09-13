@@ -9,6 +9,7 @@ import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createFacebookAdapter } from '#src/platforms/meta/facebook-adapter.ts';
 import { RetryableError, type AccountContext } from '#src/platforms/types.ts';
+import { asWorkspaceId } from '#src/shared/ids.ts';
 
 const API_VERSION = 'v21.0';
 const GRAPH = `https://graph.facebook.com/${API_VERSION}`;
@@ -21,7 +22,7 @@ const OWN_ID = 'page-1';
 let adapter: ReturnType<typeof createFacebookAdapter>;
 
 const ctx: AccountContext = {
-  workspaceId: 'ws-1',
+  workspaceId: asWorkspaceId('ws-1'),
   socialAccountId: 'account-1',
   platform: 'facebook',
   platformAccountId: OWN_ID,

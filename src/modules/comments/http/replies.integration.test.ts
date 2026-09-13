@@ -29,7 +29,7 @@ import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -39,13 +39,13 @@ interface Harness {
   redis: Redis;
   publishQueue: Queue;
   app: Api;
-  workspaceId: string;
+  workspaceId: WorkspaceId;
   socialAccountId: string;
   postId: string;
   apiKey: string;
 }
 
-async function mintApiKey(database: Database, workspaceId: string): Promise<string> {
+async function mintApiKey(database: Database, workspaceId: WorkspaceId): Promise<string> {
   const prefix = randomBytes(6).toString('hex');
   const secret = randomBytes(32).toString('base64url');
   await database.drizzle.insert(apiKeys).values({
@@ -62,7 +62,7 @@ async function mintApiKey(database: Database, workspaceId: string): Promise<stri
 }
 
 interface SeededWorkspace {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly postId: string;
   readonly apiKey: string;
@@ -70,7 +70,7 @@ interface SeededWorkspace {
 
 /** A fresh workspace, social account and published post, plus a minted API key for it. */
 async function seedWorkspaceAndPost(database: Database): Promise<SeededWorkspace> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   await database.drizzle.insert(workspaces).values({
     id: workspaceId,
     name: 'Test workspace',

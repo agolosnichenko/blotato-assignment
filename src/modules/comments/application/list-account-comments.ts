@@ -18,6 +18,7 @@ import type {
 import type { Accounts } from '#src/modules/platform-core/ports.ts';
 import { ApiError } from '#src/shared/errors.ts';
 import type { KeysetCursor, SortOrder } from '#src/shared/pagination.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export interface ListAccountCommentsDeps {
   readonly repository: CommentRepository;
@@ -25,7 +26,7 @@ export interface ListAccountCommentsDeps {
 }
 
 export interface ListAccountCommentsInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly accountId: string;
   readonly limit: number;
   readonly cursor: KeysetCursor | null;

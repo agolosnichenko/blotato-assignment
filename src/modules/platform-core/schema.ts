@@ -14,6 +14,7 @@
  */
 
 import { customType, integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 /**
  * `bytea` — drizzle-orm 0.45.2's `pg-core` has no built-in bytea column, so it is declared as a
@@ -26,7 +27,7 @@ const bytea = customType<{ data: Buffer }>({
 });
 
 export const workspaces = pgTable('workspaces', {
-  id: uuid('id').primaryKey(),
+  id: uuid('id').primaryKey().$type<WorkspaceId>(),
   name: text('name').notNull(),
   contactLimitMonthly: integer('contact_limit_monthly').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
@@ -34,7 +35,7 @@ export const workspaces = pgTable('workspaces', {
 
 export const apiKeys = pgTable('api_keys', {
   id: uuid('id').primaryKey(),
-  workspaceId: uuid('workspace_id').notNull(),
+  workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
   prefix: text('prefix').notNull().unique(),
   keyHash: text('key_hash').notNull(),
   name: text('name').notNull(),
@@ -55,7 +56,7 @@ export const apiKeys = pgTable('api_keys', {
  */
 export const socialAccounts = pgTable('social_accounts', {
   id: uuid('id').primaryKey(),
-  workspaceId: uuid('workspace_id').notNull(),
+  workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
   platform: text('platform').notNull(),
   platformAccountId: text('platform_account_id').notNull(),
   username: text('username').notNull(),
@@ -68,7 +69,7 @@ export const socialAccounts = pgTable('social_accounts', {
 
 export const posts = pgTable('posts', {
   id: uuid('id').primaryKey(),
-  workspaceId: uuid('workspace_id').notNull(),
+  workspaceId: uuid('workspace_id').notNull().$type<WorkspaceId>(),
   socialAccountId: uuid('social_account_id').notNull(),
   platform: text('platform').notNull(),
   platformPostId: text('platform_post_id').notNull(),

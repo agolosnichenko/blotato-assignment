@@ -25,9 +25,25 @@ import type { QueueName } from '#src/shared/queues.ts';
  * recently-finished job in the BullMQ dashboard or via `getJob`), a day for failed ones (room to
  * notice and investigate before the evidence is gone).
  */
+/**
+ * How many times BullMQ retries a job whose processor threw.
+ *
+ * This is *not* the publish path's retry ladder: that one is the use case's own (§7.1 step 6), and
+ * it reaches BullMQ through `moveToDelayed` + `DelayedError`, which deliberately leaves
+ * `attemptsMade` untouched (`publish-worker.ts`). What this covers is the other kind of failure —
+ * the processor itself throwing, on a dropped database connection or a transient Redis error.
+ * BullMQ's own default is a single attempt, so before this every such throw was terminal, and
+ * `webhook-worker.ts`'s "BullMQ retries the job under its own backoff" described a retry that did
+ * not exist. The sweepers remain the backstop for what even these attempts do not recover.
+ */
+const JOB_ATTEMPTS = 3;
+const JOB_BACKOFF_MS = 5000;
+
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
   removeOnComplete: { age: 3600, count: 1000 },
   removeOnFail: { age: 86400 },
+  attempts: JOB_ATTEMPTS,
+  backoff: { type: 'exponential', delay: JOB_BACKOFF_MS },
 };
 
 /**

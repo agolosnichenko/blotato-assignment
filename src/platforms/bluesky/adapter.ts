@@ -31,11 +31,13 @@ import { AppBskyFeedDefs, AppBskyFeedPost, AtpAgent } from '@atproto/api';
 import { classifyBlueskyFailure } from '#src/platforms/bluesky/errors.ts';
 import { detectFacets } from '#src/platforms/bluesky/facets.ts';
 import { normalizePost, parseFrontier, walkThread } from '#src/platforms/bluesky/thread.ts';
+import { hashSecret } from '#src/shared/crypto.ts';
 import {
   AuthError,
   PermanentError,
-  RetryableError,
   type AccountContext,
+  type AdapterError,
+  type AdapterOperation,
   type CommentPage,
   type CommentPlatformAdapter,
   type NormalizedComment,
@@ -68,31 +70,64 @@ function isBlueskyCredentials(value: unknown): value is BlueskyCredentials {
  * `AtpAgent`'s `CredentialSession` refreshes its access JWT itself before each request once it
  * has a session — "session refreshed inside the adapter" (spec.md §8.3) falls out of reusing one
  * agent rather than something this module implements by hand.
+ *
+ * The entry carries the fingerprint of the app password it was logged in with. A rotated
+ * credential produces a different fingerprint and therefore a fresh login: without that, this
+ * process would keep serving a session built from the superseded password until it restarts,
+ * because an agent that still refreshes successfully never looks stale.
  */
-const sessions = new Map<string, AtpAgent>();
+interface CachedSession {
+  readonly agent: AtpAgent;
+  readonly credentialFingerprint: string;
+}
+
+const sessions = new Map<string, CachedSession>();
+
+/** Drops a cached session whose credential the platform has just rejected. */
+function forgetSession(socialAccountId: string): void {
+  sessions.delete(socialAccountId);
+}
+
+/**
+ * Classifies an adapter failure and evicts the cached session when the credential was rejected.
+ *
+ * Without the eviction an `AuthError` would leave the rejected session in the map, so every later
+ * call on this account would fail the same way until the process restarts — including the calls
+ * made after an operator has already fixed the credential.
+ */
+function adapterFailure(
+  ctx: AccountContext,
+  error: unknown,
+  operation: AdapterOperation,
+): AdapterError {
+  const classified = classifyBlueskyFailure(error, operation);
+  if (classified instanceof AuthError) {
+    forgetSession(ctx.socialAccountId);
+  }
+  return classified;
+}
 
 async function sessionFor(ctx: AccountContext): Promise<AtpAgent> {
-  const cached = sessions.get(ctx.socialAccountId);
-  if (cached?.hasSession === true) {
-    return cached;
-  }
-
   if (!isBlueskyCredentials(ctx.credentials)) {
     throw new AuthError('bluesky adapter received credentials in an unrecognised shape');
+  }
+  const password = ctx.credentials.token.toString('utf8');
+  const credentialFingerprint = hashSecret(password);
+
+  const cached = sessions.get(ctx.socialAccountId);
+  if (cached?.agent.hasSession === true && cached.credentialFingerprint === credentialFingerprint) {
+    return cached.agent;
   }
 
   const agent = new AtpAgent({ service: BLUESKY_SERVICE });
   try {
     // `identifier` accepts the account DID directly, so this needs no separate stored handle.
-    await agent.login({
-      identifier: ctx.platformAccountId,
-      password: ctx.credentials.token.toString('utf8'),
-    });
+    await agent.login({ identifier: ctx.platformAccountId, password });
   } catch (error) {
-    throw classifyBlueskyFailure(error);
+    throw adapterFailure(ctx, error, 'read');
   }
 
-  sessions.set(ctx.socialAccountId, agent);
+  sessions.set(ctx.socialAccountId, { agent, credentialFingerprint });
   return agent;
 }
 
@@ -107,38 +142,47 @@ interface PostRef {
  * during this step, so however it fails, retrying it can never create a duplicate reply.
  */
 async function prepareReply(
+  ctx: AccountContext,
   agent: AtpAgent,
   input: PublishInput,
 ): Promise<{ root: PostRef; parent: PostRef; facets: Awaited<ReturnType<typeof detectFacets>> }> {
   const parentUri = input.platformParentId ?? input.platformPostId;
+
+  let posts;
   try {
     const uris = Array.from(new Set([input.platformPostId, parentUri]));
-    const { data } = await agent.getPosts({ uris });
-    const byUri = new Map(data.posts.map((post) => [post.uri, post] as const));
-    const rootPost = byUri.get(input.platformPostId);
-    const parentPost = byUri.get(parentUri);
-    if (rootPost === undefined || parentPost === undefined) {
-      throw new PermanentError('bluesky reply target no longer exists');
-    }
-    const facets = await detectFacets(agent, input.text);
-    return {
-      root: { uri: rootPost.uri, cid: rootPost.cid },
-      parent: { uri: parentPost.uri, cid: parentPost.cid },
-      facets,
-    };
+    ({ data: posts } = await agent.getPosts({ uris }));
   } catch (error) {
-    if (error instanceof PermanentError) {
-      throw error;
-    }
-    throw new RetryableError('failed to resolve the bluesky reply target before publishing', {
-      cause: error,
-    });
+    // These are reads, so no outcome here can be ambiguous — but they must keep their own type.
+    // Collapsing everything into `RetryableError` hid `AuthError` (a rotated app password never
+    // reached `account_health`) and dropped the `retryAfter` a 429 carries.
+    throw adapterFailure(ctx, error, 'read');
   }
+
+  const byUri = new Map(posts.posts.map((post) => [post.uri, post] as const));
+  const rootPost = byUri.get(input.platformPostId);
+  const parentPost = byUri.get(parentUri);
+  if (rootPost === undefined || parentPost === undefined) {
+    throw new PermanentError('bluesky reply target no longer exists');
+  }
+
+  let facets;
+  try {
+    facets = await detectFacets(agent, input.text);
+  } catch (error) {
+    throw adapterFailure(ctx, error, 'read');
+  }
+
+  return {
+    root: { uri: rootPost.uri, cid: rootPost.cid },
+    parent: { uri: parentPost.uri, cid: parentPost.cid },
+    facets,
+  };
 }
 
 async function publishComment(ctx: AccountContext, input: PublishInput): Promise<PublishedComment> {
   const agent = await sessionFor(ctx);
-  const { root, parent, facets } = await prepareReply(agent, input);
+  const { root, parent, facets } = await prepareReply(ctx, agent, input);
 
   const createdAt = new Date();
   try {
@@ -157,7 +201,7 @@ async function publishComment(ctx: AccountContext, input: PublishInput): Promise
   } catch (error) {
     // This is the one call that may have reached the platform before failing — every outcome
     // from here on goes through the full classifier, `OutcomeUnknownError` included.
-    throw classifyBlueskyFailure(error);
+    throw adapterFailure(ctx, error, 'write');
   }
 }
 
@@ -194,7 +238,7 @@ async function findPublishedComment(
   } catch (error) {
     // A search that fails must never be read as "not found" — that would let the caller retry a
     // publish that may already have succeeded.
-    throw classifyBlueskyFailure(error);
+    throw adapterFailure(ctx, error, 'read');
   }
   const { thread } = response.data;
 
@@ -258,7 +302,7 @@ async function listComments(
   } catch (error) {
     // A page that fails must never be read as an empty-but-complete one — that would let the
     // caller conclude this branch, or the whole post, has no comments.
-    throw classifyBlueskyFailure(error);
+    throw adapterFailure(ctx, error, 'read');
   }
   const { thread } = response.data;
 
@@ -271,7 +315,13 @@ async function listComments(
   const pendingFrontier: string[] = [];
   walkThread(thread, comments, deletedPlatformCommentIds, pendingFrontier, false);
 
-  const remaining = [...rest, ...pendingFrontier];
+  // Never re-queue the node this call already anchored on. `walkThread` queues any node reporting
+  // `replyCount > 0` with no `replies` array, which normally means the depth budget ran out — but
+  // the anchor itself can come back that way indefinitely when its children are unreadable
+  // (thread gating, hidden replies, a blocking author). Queueing it again would make this exact
+  // call repeat forever, and the walk loop has no other way to notice.
+  const frontier = pendingFrontier.filter((pending) => pending !== uri);
+  const remaining = [...rest, ...frontier];
   return {
     comments,
     deletedPlatformCommentIds,
@@ -289,7 +339,7 @@ async function fetchComment(
   try {
     response = await agent.getPostThread({ uri: platformCommentId, depth: 0 });
   } catch (error) {
-    throw classifyBlueskyFailure(error);
+    throw adapterFailure(ctx, error, 'read');
   }
   const { thread } = response.data;
 

@@ -919,3 +919,74 @@ implementation.
   outside `NormalizedComment` because otherwise every future consumer of `listComments` must remember
   it exists — which is exactly the mistake that occurred. This changes a contract shape; it revises no
   decision, so no D-number changes.
+- **The outbox relay publishes one row per transaction (extends D9).** Relaying the whole batch
+  inside a single transaction means one row BullMQ will never accept — a payload it rejects, a shape
+  Redis refuses as part of a key — rolls the batch back on every pass. The row sits at the front of
+  the oldest-100 selection and blocks every event behind it indefinitely, so a single poison event
+  stops domain-event delivery for the whole service. Each row therefore publishes and stamps in its
+  own transaction, re-read under `FOR UPDATE SKIP LOCKED`; a failing row increments
+  `outbox_events.attempts`, is logged, and the loop continues. The row is never deleted: the outbox
+  is the only record of the event, so dropping it would lose the event permanently — past ten
+  attempts the log level rises to `error` instead, which is what makes a stuck event an incident
+  rather than an invisible retry. A pass in which *every* row failed still rejects, so a total
+  outage is still reported as a failed pass. This extends a decision's implementation; D9 itself is
+  unchanged.
+- **The age-band group is a registry property, not a per-platform branch (extends §7.3, D28).** §7.3
+  gives refresh cadences per post age, and the two supported platform families need different
+  ladders. Branching on `platform` inside the scheduler would put platform knowledge back into a use
+  case, which Principle IV forbids. Each registry entry therefore carries a `syncIntervalGroup`
+  naming *which* configured band table applies; the minutes themselves stay in `SyncIntervalsConfig`
+  so a deployment can retune them without a code change. Adding a platform adds a registry entry, not
+  a branch. This extends a section; it revises no decision, so no D-number changes.
+- **A refresh-request test asserts the job row, not only the HTTP response (narrows §7.3's
+  acceptance).** A case that checks only the response shape of `POST /refresh` passes whether or not
+  a `comment_sync_jobs` row was actually created and whether or not the target's cooldown moved —
+  the two things the endpoint exists to do. Refresh-request tests therefore assert the committed row
+  and the cooldown alongside the response. This narrows how the behaviour is verified; it revises no
+  decision, so no D-number changes.
+- **A reconciliation guard survives between publish attempts (extends D14, §7.1 step 6).** D14
+  requires `findPublishedComment` to gate any second send after an unknown outcome, and the
+  implementation held that fact only in the failing attempt's own stack. A worker killed between the
+  platform accepting the write and this service committing `posted` therefore left a row the
+  stuck-work sweeper returned to `queued` with nothing recorded about the send that may have gone
+  out, and the next attempt published a second copy. `comments.needs_reconcile` records it instead:
+  set in its own committed transaction immediately before the adapter call, carried forward by
+  `markQueuedForRetry` when an attempt ends without learning the outcome, set unconditionally by the
+  sweeper when it recovers a `processing` row, and cleared only by a settled outcome or by a
+  completed search that found nothing. The cost is one extra `UPDATE` per publish attempt — the same
+  price §18's sweeper entry already accepts for a reconciliation read. This adds a column and
+  strengthens an existing gate; D14 itself is unchanged.
+- **A 5xx answer to a write is an unknown outcome, not a retryable one (corrects §4.3).** §4.3 lists
+  `RetryableError` as covering "429 / 5xx", which is right for a read and wrong for a write: a 5xx
+  means the request reached the platform, so the comment may already exist behind it, and
+  `RetryableError` is retried without reconciliation. That is the double post D14 exists to prevent.
+  The classifiers therefore take the operation kind: `>= 500` maps to `OutcomeUnknownError` on a
+  write and stays `RetryableError` on a read. A 429 stays retryable in both directions, because a
+  rate-limit rejection was never executed. This corrects a sentence in §4.3; D14 itself is unchanged.
+- **An abandoned `comment_sync_jobs` row is swept (extends §7.3).** The partial unique index on
+  `(target_id) WHERE status IN ('queued','running')` is what keeps one target from being walked
+  twice at once, and its cost is that a row nobody will ever finish holds that target forever: every
+  scheduler tick's `onConflictDoNothing` skips it without a word, `POST /refresh` keeps reporting the
+  dead job as active, and the post stops syncing with nothing logged. Three things produce such a
+  row — the scheduler committing a row and dying before `syncQueue.add`, a runner killed between
+  `markJobRunning` and `finalizeJob`, and losing Redis, which §4.1 explicitly permits. A sweeper
+  therefore re-enqueues `queued` rows past a threshold and finalises abandoned `running` rows as
+  `failed`, releasing the index so the next tick can schedule the target again. The scheduler also
+  moves its `syncQueue.add` after the transaction commits, which narrows the first case but cannot
+  close it — hence the sweeper rather than the ordering alone. This extends a section; it revises no
+  decision, so no D-number changes.
+- **The usage signal is reported sideways and acted on by the workers (implements §8.2).** §8.2
+  requires parsing `X-Business-Use-Case-Usage` / `X-App-Usage` and, under high usage, delaying that
+  account's jobs. Only the parsing existed: `GraphResponse.usage` had no reader anywhere in the
+  service, so the throttling half was absent while looking implemented. Routing the reading up
+  through the adapter port was rejected — `usage` is a Meta fact, and `CommentPage` /
+  `PublishedComment` are the platform-agnostic types every use case depends on, so carrying it
+  there would put one platform's vocabulary into all of them. The Graph client instead reports it
+  through an injected sink (`GraphClientOptions.onUsage`), which the two workers wire to a
+  short-lived per-account key in Redis. Before starting work for an account, each worker reads that
+  key and, past `META_USAGE_THROTTLE_PERCENT`, calls `moveToDelayed` for
+  `META_USAGE_THROTTLE_DELAY_MS` — the same treatment an empty token bucket already gets, spending
+  no retry attempt. Redis is the right home: the reading is advisory and per-account, and losing it
+  costs one un-throttled call, which is what §4.1 permits Redis to hold. "Nothing known" is
+  deliberately not "throttled", so an empty cache never stalls the deployment. This implements a
+  section; it revises no decision, so no D-number changes.

@@ -12,17 +12,25 @@
 import { eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { accountHealth } from '#src/modules/comments/infrastructure/schema.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export interface MarkAuthFailedInput {
   readonly socialAccountId: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly reason: string;
 }
 
 export interface AccountHealth {
   /** Upserts an `auth_failed` row for the account, e.g. after an adapter's `AuthError`. */
   markAuthFailed(input: MarkAuthFailedInput): Promise<void>;
-  /** Removes the account's `account_health` row, e.g. once the accounts service reconnects it. */
+  /**
+   * Removes the account's `account_health` row.
+   *
+   * The trigger is evidence, not a projection read: a **successful** platform call proves the
+   * credential works again (spec.md §18 clarifies D30 this way, because this service never writes
+   * `social_accounts.status` and so cannot observe a reconnect there). Its one production caller
+   * is a completed sync walk.
+   */
   clear(socialAccountId: string): Promise<void>;
 }
 

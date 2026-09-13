@@ -6,6 +6,7 @@
 // hide that wiring behind re-exports rather than remove any of it.
 
 import { pathToFileURL } from 'node:url';
+import { onShutdownSignal } from '#src/shared/shutdown.ts';
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
@@ -223,7 +224,7 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
 }
 
 /**
- * Registers the three read routes, the two write routes, the two sync routes and
+ * Registers the four read routes, the two write routes, the two sync routes and
  * `GET /v1/platforms` (T049, T069, T090, T098).
  */
 function registerCommentRoutes(
@@ -342,15 +343,10 @@ async function main(): Promise<void> {
   const container = buildContainer();
   const app = buildApi(container);
 
-  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-    process.once(signal, () => {
-      void (async () => {
-        app.log.info({ signal }, 'shutting down');
-        await app.close();
-        await container.close();
-      })();
-    });
-  }
+  onShutdownSignal(async () => {
+    await app.close();
+    await container.close();
+  }, app.log);
 
   await app.listen({ host: container.config.HOST, port: container.config.PORT });
 }

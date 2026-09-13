@@ -51,10 +51,11 @@ import {
   type OutboxTransaction,
 } from '#src/modules/comments/infrastructure/outbox.ts';
 import type { Accounts, SocialAccountRecord } from '#src/modules/platform-core/ports.ts';
-import { platformRegistry, type PlatformCapabilities } from '#src/platforms/registry.ts';
+import { lookupCapabilities, type PlatformCapabilities } from '#src/platforms/registry.ts';
 import type { Platform } from '#src/platforms/types.ts';
 import type { Database } from '#src/shared/db.ts';
 import { ApiError } from '#src/shared/errors.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 type SupportedPlatformCapabilities = Extract<
   PlatformCapabilities,
@@ -71,7 +72,7 @@ export interface CreateReplyDeps {
 }
 
 export interface CreateReplyInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly parentCommentId: string;
   readonly text: string;
   readonly idempotencyKey: string | null;
@@ -96,7 +97,7 @@ async function loadParent(deps: CreateReplyDeps, input: CreateReplyInput): Promi
  */
 async function resolveRootCommentId(
   repository: CommentRepository,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   parent: CommentRecord,
 ): Promise<string> {
   let current = parent;
@@ -114,8 +115,11 @@ async function resolveRootCommentId(
 }
 
 function assertSupportsComments(platform: string): SupportedPlatformCapabilities {
-  const capabilities = platformRegistry[platform as Platform];
-  if (!capabilities.supportsComments) {
+  // A platform this service has no entry for is the same answer as one whose entry says "no":
+  // the caller cannot comment on it. Indexing the registry with a cast instead produced
+  // `undefined` and a `TypeError`, i.e. a 500 where 422 is the truthful status.
+  const capabilities = lookupCapabilities(platform);
+  if (capabilities === undefined || !capabilities.supportsComments) {
     throw new ApiError('PLATFORM_NOT_SUPPORTED', `${platform} does not support comments`);
   }
   return capabilities;
@@ -123,7 +127,7 @@ function assertSupportsComments(platform: string): SupportedPlatformCapabilities
 
 async function assertDepthAllowed(
   repository: CommentRepository,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   capabilities: SupportedPlatformCapabilities,
   parent: CommentRecord,
 ): Promise<void> {
@@ -228,7 +232,7 @@ async function resolveIdempotencyConflict(
 async function reserveQuotaIfNeeded(
   tx: OutboxTransaction,
   deps: CreateReplyDeps,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   parent: CommentRecord,
   account: SocialAccountRecord,
   commentId: string,

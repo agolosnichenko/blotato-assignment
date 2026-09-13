@@ -85,7 +85,7 @@ import {
   type Platform,
 } from '#src/platforms/types.ts';
 import type { KeyMaterial } from '#src/shared/crypto.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_CREDENTIALS_ENCRYPTION_KEY } from '#src/shared/testing/test-env.ts';
 
@@ -107,7 +107,7 @@ const SYNC_INTERVALS_CONFIG = {
 const NON_DEFAULT_RETENTION_DAYS = 10;
 
 /**
- * I1 (final-review.md): `inferDeletions` now excludes rows updated inside its grace window around
+ * spec.md §18: `inferDeletions` now excludes rows updated inside its grace window around
  * `walkStartedAt`, so a case that means "this comment genuinely vanished from the platform" has to
  * seed it old enough to fall outside that window — exactly as a comment that predates the walk by a
  * real margin would be in production, not one seeded the same instant the walk runs.
@@ -137,12 +137,12 @@ async function teardownHarness(harness: Harness): Promise<void> {
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
 }
 
 async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccount> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
   await db.insert(workspaces).values({
     id: workspaceId,
@@ -385,7 +385,7 @@ describe('interrupted walk infers zero deletions (FR-019, SC-008)', () => {
 });
 
 /**
- * I1 (final-review.md): a walk's pages are fetched before a concurrent write — this service's own
+ * spec.md §18: a walk's pages are fetched before a concurrent write — this service's own
  * reply, or a webhook delivery — lands locally, or before the platform's own read path has
  * indexed it. Either way `seen` never had the chance to include it, so its absence must not be
  * read as a deletion. `recentId` stands in for that race: seeded with `updatedAt = now`, exactly
@@ -427,7 +427,7 @@ async function assertRaceWithAConcurrentWriteDoesNotInferDeletion(
   expect(stale?.status).toBe('deleted');
 }
 
-describe('a row racing the walk is not inferred deleted (I1, final-review.md)', () => {
+describe('a row racing the walk is not inferred deleted (spec.md §18)', () => {
   it('excludes a recently-updated row from deletion but still deletes a stale absent one', () =>
     assertRaceWithAConcurrentWriteDoesNotInferDeletion(harness));
 });
@@ -570,7 +570,7 @@ describe('an AuthError mid-walk is recorded in account_health, not social_accoun
 });
 
 /**
- * I2 (final-review.md): `AccountHealth.clear` had no production caller anywhere in the service, so
+ * spec.md §18: `AccountHealth.clear` had no production caller anywhere in the service, so
  * a reconnected account stayed `disconnected` forever (D30 §18). A walk that completes —
  * `loadAccountContext` decrypted the credential and `adapter.listComments` used it successfully for
  * the whole walk — is this module's own direct evidence the account works again, so `markSucceeded`
@@ -602,7 +602,7 @@ async function assertSuccessfulWalkClearsStaleAccountHealth(testHarness: Harness
   expect(health).toBeUndefined();
 }
 
-describe('a successful walk clears a stale account_health record (I2, final-review.md)', () => {
+describe('a successful walk clears a stale account_health record (spec.md §18)', () => {
   it('gives a reconnected account a working Accounts.findById again', () =>
     assertSuccessfulWalkClearsStaleAccountHealth(harness));
 });

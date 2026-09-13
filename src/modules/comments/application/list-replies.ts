@@ -12,13 +12,14 @@ import type {
 } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { ApiError } from '#src/shared/errors.ts';
 import type { KeysetCursor, SortOrder } from '#src/shared/pagination.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export interface ListRepliesDeps {
   readonly repository: CommentRepository;
 }
 
 export interface ListRepliesInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly parentCommentId: string;
   readonly limit: number;
   readonly cursor: KeysetCursor | null;

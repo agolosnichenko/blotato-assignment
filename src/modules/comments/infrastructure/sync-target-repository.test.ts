@@ -1,5 +1,5 @@
 /**
- * `computeNextSyncAt`'s age-band lookup (I3, final-review.md): the §7.3 schedule must be derivable
+ * `computeNextSyncAt`'s age-band lookup (spec.md §18): the §7.3 schedule must be derivable
  * from `registry.ts` alone, the same invariant Principle IV states for every other capability
  * decision ("adding a platform must not change the DB schema or the API" — an adapter plus a
  * registry entry, nothing else). Before this fix, the lookup was a `platform` literal `switch`

@@ -26,12 +26,14 @@ import type { FastifyBaseLogger, FastifyInstance, FastifyRequest, RawServerDefau
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ApiKeys } from '#src/modules/platform-core/ports.ts';
 import { hashSecret, secureCompare } from '#src/shared/crypto.ts';
+import { asWorkspaceId } from '#src/shared/ids.ts';
 import { ApiError } from '#src/shared/errors.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
     /** The workspace the authenticated API key belongs to (D20). Set by {@link registerApiKeyAuth}. */
-    workspaceId: string;
+    workspaceId: WorkspaceId;
     /** The authenticated API key's id. Set by {@link registerApiKeyAuth}; T034 rate-limits on it. */
     apiKeyId: string;
     /**
@@ -129,7 +131,9 @@ export function registerApiKeyAuth<Logger extends FastifyBaseLogger = FastifyBas
   app: FastifyInstance<RawServerDefault, IncomingMessage, ServerResponse, Logger>,
   apiKeys: ApiKeys,
 ): void {
-  app.decorateRequest('workspaceId', '');
+  // The placeholder every request starts with; the pre-handler below replaces it with the key's
+  // real workspace before any route runs.
+  app.decorateRequest('workspaceId', asWorkspaceId(''));
   app.decorateRequest('apiKeyId', '');
   app.decorateRequest('rateLimitPerMin', null);
 

@@ -24,7 +24,7 @@
 // import surface `create-reply.integration.test.ts` has for the same reason.
 // oxlint-disable max-lines -- the four D19 cases now each watch the `comment-sync` queue directly
 // (a job-count delta where no job should be enqueued, the enqueued job's `targetId` where one
-// should be), per I7 (final-review.md): a case that only asserts the HTTP response shape never
+// should be), per spec.md §18: a case that only asserts the HTTP response shape never
 // actually observes whether the queue was touched, so this file's job is incomplete without them.
 
 import { randomUUID } from 'node:crypto';
@@ -43,7 +43,7 @@ import { encryptCredentials } from '#src/modules/platform-core/local/account-cre
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_CREDENTIALS_ENCRYPTION_KEY, TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -56,7 +56,7 @@ interface Harness {
   app: Api;
   publishQueue: Queue;
   syncQueue: Queue;
-  workspaceId: string;
+  workspaceId: WorkspaceId;
 }
 
 async function startHarness(): Promise<Harness> {
@@ -72,7 +72,7 @@ async function startHarness(): Promise<Harness> {
   const app = buildApi(container);
   await app.ready();
 
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   await database.drizzle.insert(workspaces).values({
     id: workspaceId,
     name: 'Test workspace',

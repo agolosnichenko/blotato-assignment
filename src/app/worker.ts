@@ -1,11 +1,12 @@
 // oxlint-disable max-dependencies -- this is the worker role's composition point for every
-// `scheduler`-queue job (the stuck-work sweeper, the webhook-delivery sweeper, the sync scheduler,
-// the retention purge, the outbox relay, the domain-events trim) plus the
+// `scheduler`-queue job (the stuck-work sweeper, the webhook-delivery sweeper, the stuck sync-job
+// sweeper, the sync scheduler, the retention purge, the outbox relay, the domain-events trim) plus
+// the
 // `comment-publish`/`comment-sync`/`webhook-process` workers; each job's own constructor is a
 // separate import by design (§4.2), so the count rises whenever a job is added here rather than
 // indicating the file itself has grown unfocused.
 // oxlint-disable max-lines -- same reasoning: this file's length tracks the number of scheduler
-// jobs and worker roles it composes (six jobs, three queue-workers), each already factored into
+// jobs and worker roles it composes (seven jobs, three queue-workers), each already factored into
 // its own named constructor; splitting it would hide the wiring behind re-exports rather than
 // remove any of it (mirrors `src/app/api.ts`'s own exemption).
 
@@ -27,18 +28,22 @@ import {
   createStuckWorkSweeper,
   createWebhookDeliverySweeper,
 } from '#src/modules/comments/infrastructure/sweepers.ts';
+import { createStuckSyncJobSweeper } from '#src/modules/comments/infrastructure/sync-job-sweeper.ts';
 import { createWebhookWorker } from '#src/modules/comments/infrastructure/webhook-worker.ts';
 import { createMetaWebhookNormalizer } from '#src/platforms/meta/webhook-normalizer.ts';
 import { createLogger } from '#src/shared/logger.ts';
 import type { Logger } from 'pino';
 import { createQueue } from '#src/shared/queue.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
+import { onShutdownSignal } from '#src/shared/shutdown.ts';
 
 const SWEEP_STUCK_WORK_JOB = 'sweep-stuck-work';
 const SWEEP_INTERVAL_MS = 60_000;
 /** §7.2 step 5: the threshold itself (5 minutes) lives in `sweepers.ts`; this tick only decides
  * how often to check for it, same cadence as the stuck-work sweeper. */
 const SWEEP_WEBHOOK_DELIVERIES_JOB = 'sweep-webhook-deliveries';
+/** Frees a target whose `comment_sync_jobs` row was abandoned; thresholds live in `sync-job-sweeper.ts`. */
+const SWEEP_STUCK_SYNC_JOBS_JOB = 'sweep-stuck-sync-jobs';
 const SYNC_SCHEDULER_TICK_JOB = 'sync-due-targets';
 const SYNC_SCHEDULER_TICK_INTERVAL_MS = 60_000;
 const PURGE_RETENTION_JOB = 'purge-retention';
@@ -82,6 +87,9 @@ async function processSchedulerJob(
     case SWEEP_WEBHOOK_DELIVERIES_JOB:
       await jobDeps.webhookDeliverySweeper.sweep();
       return;
+    case SWEEP_STUCK_SYNC_JOBS_JOB:
+      await jobDeps.stuckSyncJobSweeper.sweep();
+      return;
     case SYNC_SCHEDULER_TICK_JOB:
       await jobDeps.syncScheduler.tick();
       return;
@@ -89,7 +97,7 @@ async function processSchedulerJob(
       await jobDeps.purgeRetention.run();
       return;
     case OUTBOX_RELAY_JOB:
-      await relayOutboxBatch(database, domainEventsQueue);
+      await relayOutboxBatch(database, domainEventsQueue, jobDeps.logger);
       return;
     case TRIM_DOMAIN_EVENTS_JOB:
       await jobDeps.domainEventsTrim.run();
@@ -114,12 +122,15 @@ interface Runtime {
 interface SchedulerJobDeps {
   readonly sweeper: ReturnType<typeof createStuckWorkSweeper>;
   readonly webhookDeliverySweeper: ReturnType<typeof createWebhookDeliverySweeper>;
+  readonly stuckSyncJobSweeper: ReturnType<typeof createStuckSyncJobSweeper>;
   readonly syncScheduler: SyncScheduler;
   readonly purgeRetention: ReturnType<typeof createPurgeRetention>;
   readonly domainEventsTrim: ReturnType<typeof createDomainEventsTrim>;
+  /** Passed to the outbox relay so a row that will not publish is reported, not just counted. */
+  readonly logger: Logger;
 }
 
-/** Builds the six jobs `schedulerWorker` dispatches between — see `processSchedulerJob`. */
+/** Builds the seven jobs `schedulerWorker` dispatches between — see `processSchedulerJob`. */
 function buildSchedulerJobDeps(
   container: Container,
   syncQueue: Queue,
@@ -137,6 +148,11 @@ function buildSchedulerJobDeps(
     webhookQueue,
     logger,
   });
+  const stuckSyncJobSweeper = createStuckSyncJobSweeper({
+    database: container.database.drizzle,
+    syncQueue,
+    logger,
+  });
   const syncScheduler = createSyncScheduler({ database: container.database.drizzle, syncQueue });
   const purgeRetention = createPurgeRetention({
     database: container.database.drizzle,
@@ -147,7 +163,15 @@ function buildSchedulerJobDeps(
     ttlHours: container.config.DOMAIN_EVENTS_TTL_HOURS,
     logger,
   });
-  return { sweeper, webhookDeliverySweeper, syncScheduler, purgeRetention, domainEventsTrim };
+  return {
+    sweeper,
+    webhookDeliverySweeper,
+    stuckSyncJobSweeper,
+    syncScheduler,
+    purgeRetention,
+    domainEventsTrim,
+    logger,
+  };
 }
 
 /** Builds the `webhook-process` worker (T081) — `IngestComments` wired the same way
@@ -298,6 +322,9 @@ async function main(): Promise<void> {
   await runtime.schedulerQueue.upsertJobScheduler(SWEEP_WEBHOOK_DELIVERIES_JOB, {
     every: SWEEP_INTERVAL_MS,
   });
+  await runtime.schedulerQueue.upsertJobScheduler(SWEEP_STUCK_SYNC_JOBS_JOB, {
+    every: SWEEP_INTERVAL_MS,
+  });
   await runtime.schedulerQueue.upsertJobScheduler(SYNC_SCHEDULER_TICK_JOB, {
     every: SYNC_SCHEDULER_TICK_INTERVAL_MS,
   });
@@ -313,11 +340,7 @@ async function main(): Promise<void> {
 
   logger.info('worker ready');
 
-  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-    process.once(signal, () => {
-      void shutdown(runtime, container, logger);
-    });
-  }
+  onShutdownSignal(() => shutdown(runtime, container, logger), logger);
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

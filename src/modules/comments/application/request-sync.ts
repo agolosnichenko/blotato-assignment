@@ -33,6 +33,7 @@ import type {
 } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import type { Posts } from '#src/modules/platform-core/ports.ts';
 import { ApiError } from '#src/shared/errors.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export type SyncJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 export type SyncJobTrigger = 'manual' | 'scheduled' | 'post_published';
@@ -59,12 +60,12 @@ export interface RequestSyncDeps {
 }
 
 export interface RequestSyncInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly postId: string;
 }
 
 export interface GetSyncJobInput {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly jobId: string;
 }
 

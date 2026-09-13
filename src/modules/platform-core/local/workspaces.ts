@@ -10,10 +10,11 @@ import {
   type WorkspaceRecord,
   type Workspaces,
 } from '#src/modules/platform-core/ports.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 export function createLocalWorkspaces(db: NodePgDatabase): Workspaces {
   return {
-    async findById(workspaceId: string): Promise<Found<WorkspaceRecord>> {
+    async findById(workspaceId: WorkspaceId): Promise<Found<WorkspaceRecord>> {
       const [row] = await db
         .select({
           id: workspaces.id,

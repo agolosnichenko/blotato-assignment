@@ -44,6 +44,7 @@ import { createLocalPosts } from '#src/modules/platform-core/local/posts.ts';
 import { createLocalWorkspaces } from '#src/modules/platform-core/local/workspaces.ts';
 import type { PlatformCorePorts } from '#src/app/container.ts';
 import { createDatabase } from '#src/shared/db.ts';
+import { closeQuietly } from './script-failure.ts';
 
 const OUTPUT_PATH = fileURLToPath(new URL('../openapi.json', import.meta.url));
 
@@ -69,6 +70,8 @@ function buildGeneratorConfig(): Config {
     META_WEBHOOK_VERIFY_TOKEN: 'unused',
     META_GRAPH_API_VERSION: 'v21.0',
     BLUESKY_THREAD_DEPTH: 10,
+    META_USAGE_THROTTLE_PERCENT: 90,
+    META_USAGE_THROTTLE_DELAY_MS: 60_000,
     RETENTION_DAYS: 45,
     DOMAIN_EVENTS_TTL_HOURS: 24,
     SYNC_INTERVALS_BLUESKY_UNDER_24H_MINUTES: 5,
@@ -145,8 +148,8 @@ async function main(): Promise<void> {
     // `format:check`-clean even if those rules change.
     await execFileAsync('pnpm', ['exec', 'oxfmt', OUTPUT_PATH]);
   } finally {
-    await app.close();
-    await deps.database.close();
+    await closeQuietly('the fastify app', () => app.close());
+    await closeQuietly('the database', () => deps.database.close());
   }
 }
 

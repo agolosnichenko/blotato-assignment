@@ -25,6 +25,7 @@ import path from 'node:path';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
+import { closeQuietly, reportFatal } from './script-failure.ts';
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, '../drizzle');
 
@@ -45,13 +46,12 @@ async function main(): Promise<void> {
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS_DIR });
     console.log('Migrations applied.');
   } finally {
-    await pool.end();
+    await closeQuietly('the database pool', () => pool.end());
   }
 }
 
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  reportFatal(error);
 }

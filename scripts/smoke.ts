@@ -35,10 +35,20 @@ import {
   type SmokeEnv,
   type SyncJobRecord,
 } from './smoke-checks.ts';
+import { reportFatal } from './script-failure.ts';
 
 const POLL_MAX_ATTEMPTS = 20;
 const POLL_INTERVAL_MS = 1500;
 const POLL_MAX_WALL_CLOCK_MS = 30_000;
+/**
+ * Per-request deadline.
+ *
+ * Node's `fetch` has no default socket timeout, so a deployment that accepts the connection and
+ * never answers hangs this script forever. The poll budgets above bound the *loops*, not a single
+ * request — without this a stuck deploy is reported by CI as a job timeout, with no output after
+ * the last PASS line and nothing saying which call hung.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
 
 /** One parsed HTTP response: status, headers and a JSON-or-null body. */
 interface ApiResponse {
@@ -76,14 +86,26 @@ async function callApi(
   path: string,
   body?: unknown,
 ): Promise<ApiResponse> {
-  const response = await fetch(new URL(path, env.SMOKE_BASE_URL), {
-    method,
-    headers: {
-      'blotato-api-key': env.SMOKE_API_KEY,
-      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  const url = new URL(path, env.SMOKE_BASE_URL);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        'blotato-api-key': env.SMOKE_API_KEY,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    // Named so the failure says which call hung, rather than surfacing as a bare AbortError.
+    throw new SmokeFailure(
+      `${method} ${path}`,
+      `a response within ${REQUEST_TIMEOUT_MS}ms`,
+      error instanceof Error ? error.name : 'a transport failure',
+    );
+  }
   const text = await response.text();
   // Not every response on this path comes from the service: a platform proxy answering 502 sends
   // HTML, and `JSON.parse` would then throw a bare SyntaxError that loses the status — the one
@@ -171,8 +193,14 @@ async function stepInstagramDepthExceeded(env: SmokeEnv): Promise<void> {
   const step = '5 instagram depth';
   const topLevelId = await stepConversation(env, step, env.SMOKE_INSTAGRAM_POST_ID);
   const repliesResponse = await callApi(env, 'GET', `/v1/comments/${topLevelId}/replies`);
-  const existingReply = (repliesResponse.body as { items: CommentRecord[] } | null)?.items[0];
-  if (repliesResponse.status !== 200 || existingReply === undefined) {
+  // Status first: `parseBody` deliberately hands back a raw string for a non-JSON response (a
+  // proxy's HTML 502), and reaching into `.items[0]` on that threw a TypeError *before* this
+  // check ran — losing the status and body that are the whole point of a smoke failure.
+  if (repliesResponse.status !== 200) {
+    throw new SmokeFailure(step, '200', String(repliesResponse.status), repliesResponse.body);
+  }
+  const existingReply = (repliesResponse.body as { items?: CommentRecord[] } | null)?.items?.[0];
+  if (existingReply === undefined) {
     const expected = 'an existing reply to reply to';
     throw new SmokeFailure(step, expected, 'no reply found', repliesResponse.body);
   }
@@ -196,7 +224,13 @@ async function stepSync(env: SmokeEnv, postId: string): Promise<void> {
   if (created.status !== 202) {
     throw new SmokeFailure(step, '202', String(created.status), created.body);
   }
-  const jobId = (created.body as SyncJobRecord).id;
+  const jobId = (created.body as Partial<SyncJobRecord> | null)?.id;
+  if (typeof jobId !== 'string') {
+    // Without this the cast yields `undefined` and the poll below spends its whole 30-second
+    // budget asking for `/v1/comment-sync-jobs/undefined`, then reports a timeout instead of the
+    // malformed response that actually caused it.
+    throw new SmokeFailure(step, 'a sync job id in the response', 'none', created.body);
+  }
 
   const deadline = Date.now() + POLL_MAX_WALL_CLOCK_MS;
   for (let attempt = 1; attempt <= POLL_MAX_ATTEMPTS && Date.now() < deadline; attempt += 1) {
@@ -242,7 +276,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
     await main();
   } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
+    reportFatal(error);
   }
 }

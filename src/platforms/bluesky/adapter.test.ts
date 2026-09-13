@@ -10,6 +10,7 @@ import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createBlueskyAdapter } from '#src/platforms/bluesky/adapter.ts';
 import { PermanentError, RetryableError, type AccountContext } from '#src/platforms/types.ts';
+import { asWorkspaceId } from '#src/shared/ids.ts';
 
 const SERVICE = 'https://bsky.social';
 const OWNER_DID = 'did:plc:owner';
@@ -44,7 +45,7 @@ let nextAccountId = 0;
 function accountContext(): AccountContext {
   nextAccountId += 1;
   return {
-    workspaceId: 'ws-1',
+    workspaceId: asWorkspaceId('ws-1'),
     socialAccountId: `account-${nextAccountId}`,
     platform: 'bluesky',
     platformAccountId: OWNER_DID,

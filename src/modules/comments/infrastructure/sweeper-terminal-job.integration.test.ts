@@ -31,7 +31,7 @@ import {
 } from '#src/modules/comments/infrastructure/sweepers.ts';
 import { comments, webhookDeliveries } from '#src/modules/comments/infrastructure/schema.ts';
 import { socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { createRedis } from '#src/shared/queue.ts';
 import { JOB_NAMES, QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
@@ -105,12 +105,12 @@ async function settleJobTerminally(
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
 }
 
 async function seedWorkspaceAndAccount(db: NodePgDatabase, now: Date): Promise<SeededAccount> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
 
   await db.insert(workspaces).values({

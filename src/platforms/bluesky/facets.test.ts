@@ -63,3 +63,28 @@ describe('detectFacets', () => {
     expect(facets).toEqual([]);
   });
 });
+
+describe('an unresolvable mention', () => {
+  it('is dropped instead of being published as an invalid DID', async () => {
+    // An empty `did` fails the PDS's lexicon validation, so `createRecord` answers 400 — which
+    // this service classifies as `PermanentError` and the customer's whole reply is discarded.
+    // One unresolvable `@handle` must cost the mention's link, not the reply.
+    server.use(
+      http.get(`${SERVICE}/xrpc/com.atproto.identity.resolveHandle`, () =>
+        HttpResponse.json(
+          { error: 'InvalidRequest', message: 'Unable to resolve handle' },
+          {
+            status: 400,
+          },
+        ),
+      ),
+    );
+    const agent = new AtpAgent({ service: SERVICE });
+
+    const facets = await detectFacets(agent, 'thanks @nobody.invalid — see https://example.com/x');
+
+    expect(facets.some((facet) => facet.features.some(AppBskyRichtextFacet.isMention))).toBe(false);
+    // The rest of the markup survives: only the unresolvable feature is removed.
+    expect(facets.some((facet) => facet.features.some(AppBskyRichtextFacet.isLink))).toBe(true);
+  });
+});

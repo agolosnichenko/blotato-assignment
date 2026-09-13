@@ -18,9 +18,9 @@ import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPurgeRetention } from '#src/modules/comments/application/purge-retention.ts';
-import { comments } from '#src/modules/comments/infrastructure/schema.ts';
+import { comments, outboxEvents } from '#src/modules/comments/infrastructure/schema.ts';
 import { socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -45,12 +45,12 @@ async function teardownHarness(harness: Harness): Promise<void> {
 }
 
 interface SeededAccount {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
 }
 
 async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccount> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   const socialAccountId = generateId();
 
   await db.insert(workspaces).values({
@@ -75,7 +75,7 @@ async function seedWorkspaceAndAccount(db: NodePgDatabase): Promise<SeededAccoun
 }
 
 interface SeedRootOptions {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platformCommentId: string;
   readonly createdAt: Date;
@@ -110,7 +110,7 @@ async function seedRoot(db: NodePgDatabase, opts: SeedRootOptions): Promise<stri
 }
 
 interface SeedReplyOptions {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly rootId: string;
   readonly platformCommentId: string;
@@ -211,5 +211,73 @@ describe('leaves an active thread untouched, including its older comments (§7.4
 
     expect(await commentExists(db, rootId)).toBe(true);
     expect(await commentExists(db, replyId)).toBe(true);
+  });
+});
+
+async function seedOutboxWorkspace(db: NodePgDatabase, name: string): Promise<WorkspaceId> {
+  const workspaceId = asWorkspaceId(generateId());
+  await db
+    .insert(workspaces)
+    .values({ id: workspaceId, name, contactLimitMonthly: 100, createdAt: new Date() });
+  return workspaceId;
+}
+
+async function seedOutboxEvent(
+  db: NodePgDatabase,
+  workspaceId: WorkspaceId,
+  publishedAt: Date | null,
+  createdAt: Date,
+): Promise<string> {
+  const [row] = await db
+    .insert(outboxEvents)
+    .values({
+      workspaceId,
+      type: 'comment.posted',
+      aggregateId: generateId(),
+      payload: {},
+      publishedAt,
+      createdAt,
+    })
+    .returning({ id: outboxEvents.id });
+  return row!.id;
+}
+
+describe('the outbox (D9)', () => {
+  it('never purges an unpublished event, however old it is', async () => {
+    // The load-bearing case. An unpublished row is work the relay still owes, and the outbox is
+    // the only record of that event — dropping it loses the event permanently. Removing the
+    // `published_at is not null` predicate is a one-line change that nothing else would catch.
+    const { db } = harness;
+    const workspaceId = await seedOutboxWorkspace(db, 'Outbox workspace');
+    const ancient = new Date(Date.now() - 400 * DAY_MS);
+
+    const unpublished = await seedOutboxEvent(db, workspaceId, null, ancient);
+    const published = await seedOutboxEvent(db, workspaceId, ancient, ancient);
+
+    await createPurgeRetention({ database: db, retentionDays: RETENTION_DAYS }).run();
+
+    const remaining = await db
+      .select({ id: outboxEvents.id })
+      .from(outboxEvents)
+      .where(eq(outboxEvents.workspaceId, workspaceId));
+    const remainingIds = remaining.map((row) => row.id);
+    expect(remainingIds).toContain(unpublished);
+    expect(remainingIds).not.toContain(published);
+  });
+
+  it('keeps a published event that is still inside the retention window', async () => {
+    const { db } = harness;
+    const workspaceId = await seedOutboxWorkspace(db, 'Recent outbox workspace');
+    // Six days old against a seven-day window: the boundary the `<` comparison decides.
+    const recent = new Date(Date.now() - 6 * DAY_MS);
+    const eventId = await seedOutboxEvent(db, workspaceId, recent, recent);
+
+    await createPurgeRetention({ database: db, retentionDays: RETENTION_DAYS }).run();
+
+    const remaining = await db
+      .select({ id: outboxEvents.id })
+      .from(outboxEvents)
+      .where(eq(outboxEvents.id, eventId));
+    expect(remaining).toHaveLength(1);
   });
 });

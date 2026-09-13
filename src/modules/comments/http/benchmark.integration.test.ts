@@ -55,7 +55,7 @@ import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platfor
 import type { CommentPlatformAdapter, Platform, PublishedComment } from '#src/platforms/types.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_CREDENTIALS_ENCRYPTION_KEY, TEST_ENV } from '#src/shared/testing/test-env.ts';
@@ -75,7 +75,7 @@ interface Harness {
   container: Container;
   database: Database;
   app: Api;
-  workspaceId: string;
+  workspaceId: WorkspaceId;
   socialAccountId: string;
   benchmarkPostId: string;
 }
@@ -84,7 +84,7 @@ function keyMaterial() {
   return { key: Buffer.from(TEST_CREDENTIALS_ENCRYPTION_KEY, 'base64'), keyVersion: 1 };
 }
 
-async function mintApiKey(database: Database, workspaceId: string): Promise<string> {
+async function mintApiKey(database: Database, workspaceId: WorkspaceId): Promise<string> {
   const prefix = randomBytes(6).toString('hex');
   const secret = randomBytes(32).toString('base64url');
   await database.drizzle.insert(apiKeys).values({
@@ -101,7 +101,7 @@ async function mintApiKey(database: Database, workspaceId: string): Promise<stri
 }
 
 /** One social account with real, decryptable credentials — the write benchmark publishes through it. */
-async function seedSocialAccount(database: Database, workspaceId: string): Promise<string> {
+async function seedSocialAccount(database: Database, workspaceId: WorkspaceId): Promise<string> {
   const socialAccountId = generateId();
   const credentialsCiphertext = encryptCredentials(Buffer.from('app-password'), keyMaterial());
   await database.drizzle.insert(socialAccounts).values({
@@ -120,7 +120,7 @@ async function seedSocialAccount(database: Database, workspaceId: string): Promi
 
 async function seedPost(
   database: Database,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   socialAccountId: string,
   index: number,
 ) {
@@ -140,7 +140,7 @@ async function seedPost(
 type CommentInsert = typeof comments.$inferInsert;
 
 function buildComment(
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   socialAccountId: string,
   postId: string,
   occurredAt: Date,
@@ -180,7 +180,7 @@ function buildComment(
  */
 async function seedManyPostsAndComments(
   database: Database,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   socialAccountId: string,
 ): Promise<string> {
   const base = Date.parse('2026-01-01T00:00:00.000Z');
@@ -230,7 +230,7 @@ async function startHarness(): Promise<Harness> {
   const app = buildApi(container);
   await app.ready();
 
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   await database.drizzle.insert(workspaces).values({
     id: workspaceId,
     name: 'Benchmark workspace',
@@ -284,7 +284,7 @@ async function measureReadLatencies(
  */
 async function explainTopLevelQuery(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   postId: string,
 ): Promise<Record<string, unknown>> {
   const rows = await db.execute<{ 'QUERY PLAN': [{ Plan: Record<string, unknown> }] }>(sql`

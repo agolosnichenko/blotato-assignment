@@ -1343,46 +1343,74 @@
                     "items": {
                       "type": "array",
                       "items": {
-                        "type": "object",
-                        "properties": {
-                          "platform": {
-                            "type": "string"
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "platform": {
+                                "type": "string"
+                              },
+                              "supportsComments": {
+                                "type": "boolean",
+                                "enum": [true]
+                              },
+                              "canCreateTopLevel": {
+                                "type": "boolean"
+                              },
+                              "canReply": {
+                                "type": "boolean"
+                              },
+                              "maxReplyDepth": {
+                                "nullable": true,
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "textLimit": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "exclusiveMinimum": true,
+                                "maximum": 9007199254740991
+                              },
+                              "textUnit": {
+                                "type": "string",
+                                "enum": ["characters", "graphemes"]
+                              },
+                              "ingestion": {
+                                "type": "string",
+                                "enum": ["webhook+sync", "sync"]
+                              }
+                            },
+                            "required": [
+                              "platform",
+                              "supportsComments",
+                              "canCreateTopLevel",
+                              "canReply",
+                              "maxReplyDepth",
+                              "textLimit",
+                              "textUnit",
+                              "ingestion"
+                            ],
+                            "additionalProperties": false
                           },
-                          "supportsComments": {
-                            "type": "boolean"
-                          },
-                          "canCreateTopLevel": {
-                            "type": "boolean"
-                          },
-                          "canReply": {
-                            "type": "boolean"
-                          },
-                          "maxReplyDepth": {
-                            "nullable": true,
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": 9007199254740991
-                          },
-                          "textLimit": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "exclusiveMinimum": true,
-                            "maximum": 9007199254740991
-                          },
-                          "textUnit": {
-                            "type": "string",
-                            "enum": ["characters", "graphemes"]
-                          },
-                          "ingestion": {
-                            "type": "string",
-                            "enum": ["webhook+sync", "sync"]
-                          },
-                          "unsupportedReason": {
-                            "type": "string"
+                          {
+                            "type": "object",
+                            "properties": {
+                              "platform": {
+                                "type": "string"
+                              },
+                              "supportsComments": {
+                                "type": "boolean",
+                                "enum": [false]
+                              },
+                              "unsupportedReason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": ["platform", "supportsComments", "unsupportedReason"],
+                            "additionalProperties": false
                           }
-                        },
-                        "required": ["platform", "supportsComments"],
-                        "additionalProperties": false
+                        ]
                       }
                     }
                   },

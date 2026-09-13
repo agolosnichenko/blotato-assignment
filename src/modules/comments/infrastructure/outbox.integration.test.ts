@@ -20,7 +20,7 @@ import { Redis } from 'ioredis';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '#src/app/config.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { createDatabase, type Database } from '#src/shared/db.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
@@ -76,7 +76,7 @@ function commentFixture() {
   const rkey = generateId();
   return {
     id: generateId(),
-    workspaceId: generateId(),
+    workspaceId: asWorkspaceId(generateId()),
     socialAccountId: generateId(),
     platform: 'bluesky',
     platformPostId: 'at://did:plc:test/app.bsky.feed.post/post-1',
@@ -205,7 +205,7 @@ function registerRelayTests(getHarness: () => Harness): void {
 
 /**
  * A `Queue`-shaped double whose `add` rejects for one chosen job id and resolves for every other
- * — the minimal double needed for I5 (final-review.md): no real BullMQ/Redis payload reliably
+ * — the minimal double needed for spec.md §18: no real BullMQ/Redis payload reliably
  * reproduces "a row BullMQ can never accept", so this stands in for that row directly instead.
  */
 function poisonedQueueDouble(poisonedEventId: string): Queue {
@@ -254,7 +254,7 @@ async function assertAllRowsFailingStillRejects(harness: Harness): Promise<void>
 }
 
 function registerPoisonRowTests(getHarness: () => Harness): void {
-  describe('a poisoned row (I5, final-review.md)', () => {
+  describe('a poisoned row (spec.md §18)', () => {
     it('does not block a healthy row in the same batch, and records the attempt', async () => {
       await assertPoisonRowDoesNotBlockSuccessors(getHarness());
     });
@@ -357,7 +357,7 @@ async function relayAndFetchEnvelope(
 ): Promise<unknown> {
   const { queue, connection } = buildQueue(harness.containers.redisUrl);
   try {
-    const workspaceId = generateId();
+    const workspaceId = asWorkspaceId(generateId());
     let eventId = '';
     await harness.database.drizzle.transaction(async (tx: OutboxTransaction) => {
       eventId = await appendToOutbox(tx, { workspaceId, type, aggregateId, data });
@@ -386,7 +386,7 @@ async function assertEnvelopeMatchesContract(
   const result = (await relayAndFetchEnvelope(harness, type, generateId(), data)) as {
     job?: { data: unknown };
     eventId: string;
-    workspaceId: string;
+    workspaceId: WorkspaceId;
   };
   expect(result.job?.data).toEqual({
     id: result.eventId,

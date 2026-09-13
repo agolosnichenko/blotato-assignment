@@ -12,7 +12,7 @@
  * comparison, `(occurred_at, id) < (cursor)`, not the `occurred_at < cursor OR (occurred_at =
  * cursor AND id < cursor)` form that is easy to get subtly wrong (R-02).
  *
- * The placeholder rule (FR-005, A4) is applied once, here, for both list methods: a `deleted`
+ * The placeholder rule (FR-005, A4) is applied once, here, for all three list methods: a `deleted`
  * comment is included only while `reply_count > 0` (it still has live replies hanging off it) —
  * `getById` is a direct lookup by id, not a list, and applies no such filter (T050).
  *
@@ -58,11 +58,12 @@ import {
   commentSyncTargets,
 } from '#src/modules/comments/infrastructure/schema.ts';
 import type { KeysetCursor, SortOrder } from '#src/shared/pagination.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 
 /** One comment row, as read back from `comments` — no API-shape mapping here (that's http/schemas.ts). */
 export interface CommentRecord {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: string;
   readonly postId: string | null;
@@ -75,7 +76,7 @@ export interface CommentRecord {
   readonly authorUsername: string | null;
   readonly authorDisplayName: string | null;
   readonly text: string | null;
-  readonly status: string;
+  readonly status: CommentStatus;
   readonly errorCode: string | null;
   readonly errorMessage: string | null;
   readonly replyCount: number;
@@ -141,14 +142,24 @@ export interface MarkFailedInput {
   readonly errorMessage: string;
 }
 
+export interface MarkQueuedForRetryInput {
+  /**
+   * Whether the next attempt must reconcile before it sends.
+   *
+   * `true` when this attempt ended without learning whether the platform accepted the write,
+   * `false` when the failure proves nothing was sent.
+   */
+  readonly needsReconcile: boolean;
+}
+
 export interface CommentRepository {
   listTopLevelByPost(
-    workspaceId: string,
+    workspaceId: WorkspaceId,
     postId: string,
     pagination: ListPagination,
   ): Promise<ListResult>;
   listRepliesByParent(
-    workspaceId: string,
+    workspaceId: WorkspaceId,
     parentCommentId: string,
     pagination: ListPagination,
   ): Promise<ListResult>;
@@ -161,14 +172,17 @@ export interface CommentRepository {
    * `comments_post_top_level_idx` does.
    */
   listByAccount(
-    workspaceId: string,
+    workspaceId: WorkspaceId,
     socialAccountId: string,
     filters: ListByAccountFilters,
     pagination: ListPagination,
   ): Promise<ListResult>;
-  getById(workspaceId: string, commentId: string): Promise<CommentRecord | null>;
-  getSyncStatus(workspaceId: string, postId: string): Promise<SyncStatus>;
-  findByIdempotencyKey(workspaceId: string, idempotencyKey: string): Promise<CommentRecord | null>;
+  getById(workspaceId: WorkspaceId, commentId: string): Promise<CommentRecord | null>;
+  getSyncStatus(workspaceId: WorkspaceId, postId: string): Promise<SyncStatus>;
+  findByIdempotencyKey(
+    workspaceId: WorkspaceId,
+    idempotencyKey: string,
+  ): Promise<CommentRecord | null>;
   /**
    * Inserts a `queued`, API-created comment. With a `parentCommentId`, this is a reply: depth and
    * root are derived from the parent row, and — in the same transaction — the parent's
@@ -179,7 +193,7 @@ export interface CommentRepository {
    */
   insertQueued(
     tx: OutboxTransaction,
-    workspaceId: string,
+    workspaceId: WorkspaceId,
     input: InsertQueuedInput,
   ): Promise<CommentRecord>;
   /**
@@ -188,7 +202,11 @@ export interface CommentRepository {
    * Returns `false`, not an error, when the row was not `queued` (another worker already claimed
    * it) — the caller must stop, not proceed to publish.
    */
-  markProcessing(tx: OutboxTransaction, workspaceId: string, commentId: string): Promise<boolean>;
+  markProcessing(
+    tx: OutboxTransaction,
+    workspaceId: WorkspaceId,
+    commentId: string,
+  ): Promise<boolean>;
   /**
    * `processing -> posted`. Also clears `errorCode`/`errorMessage`: a row can re-enter
    * `processing` after an earlier attempt failed and was retried (`markQueuedForRetry`), and
@@ -199,7 +217,7 @@ export interface CommentRepository {
    */
   markPosted(
     tx: OutboxTransaction,
-    workspaceId: string,
+    workspaceId: WorkspaceId,
     commentId: string,
     input: MarkPostedInput,
   ): Promise<boolean>;
@@ -209,7 +227,7 @@ export interface CommentRepository {
    */
   markFailed(
     tx: OutboxTransaction,
-    workspaceId: string,
+    workspaceId: WorkspaceId,
     commentId: string,
     input: MarkFailedInput,
   ): Promise<boolean>;
@@ -217,11 +235,33 @@ export interface CommentRepository {
    * `processing -> queued`, for a bounded retry (`RetryableError` / `OutcomeUnknownError` with no
    * reconciled outcome). Leaves `lastAttemptStartedAt` untouched — it stays the sweeper's anchor
    * for "how long has this retry been pending" until the next `markProcessing` call updates it.
+   * Carries `needsReconcile` forward so an unresolved outcome is not forgotten between attempts.
    * Returns `false`, not an error, when the row was not `processing`.
    */
   markQueuedForRetry(
     tx: OutboxTransaction,
-    workspaceId: string,
+    workspaceId: WorkspaceId,
+    commentId: string,
+    input: MarkQueuedForRetryInput,
+  ): Promise<boolean>;
+  /**
+   * Arms the D14 reconciliation guard on a `processing` row, committed before the send goes out.
+   *
+   * Returns `false` when the row is no longer `processing` — another worker settled it, and this
+   * attempt must not send.
+   */
+  markSendAttempted(
+    tx: OutboxTransaction,
+    workspaceId: WorkspaceId,
+    commentId: string,
+  ): Promise<boolean>;
+  /**
+   * Clears the guard after a reconciliation search completed and found nothing — the one piece of
+   * evidence that makes a fresh send safe again.
+   */
+  clearReconcileGuard(
+    tx: OutboxTransaction,
+    workspaceId: WorkspaceId,
     commentId: string,
   ): Promise<boolean>;
 }
@@ -310,7 +350,7 @@ const ACTIVE_SYNC_JOB_STATUSES = ['queued', 'running'] as const;
 
 function listTopLevelByPost(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   postId: string,
   pagination: ListPagination,
 ): Promise<ListResult> {
@@ -327,7 +367,7 @@ function listTopLevelByPost(
 
 function listRepliesByParent(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   parentCommentId: string,
   pagination: ListPagination,
 ): Promise<ListResult> {
@@ -343,7 +383,7 @@ function listRepliesByParent(
 
 function listByAccount(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   socialAccountId: string,
   filters: ListByAccountFilters,
   pagination: ListPagination,
@@ -366,7 +406,7 @@ function listByAccount(
 
 async function getById(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   commentId: string,
 ): Promise<CommentRecord | null> {
   const [row] = await db
@@ -379,7 +419,7 @@ async function getById(
 
 async function getSyncStatus(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   postId: string,
 ): Promise<SyncStatus> {
   const [target] = await db
@@ -410,7 +450,7 @@ async function getSyncStatus(
 
 async function findByIdempotencyKey(
   db: NodePgDatabase,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   idempotencyKey: string,
 ): Promise<CommentRecord | null> {
   const [row] = await db
@@ -430,7 +470,7 @@ interface ParentForInsert {
 /** The parent row's `depth` and `rootCommentId`, scoped by workspace — {@link insertQueued}'s only read. */
 async function loadParentForInsert(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   parentCommentId: string,
 ): Promise<ParentForInsert | null> {
   const [row] = await tx
@@ -455,7 +495,7 @@ interface Placement {
  */
 async function resolvePlacement(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   parentCommentId: string | null,
 ): Promise<Placement> {
   if (parentCommentId === null) {
@@ -478,7 +518,7 @@ async function resolvePlacement(
  */
 async function bumpParentAndRoot(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   placement: Placement,
   now: Date,
 ): Promise<void> {
@@ -499,7 +539,7 @@ async function bumpParentAndRoot(
 
 async function insertQueued(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   input: InsertQueuedInput,
 ): Promise<CommentRecord> {
   const now = new Date();
@@ -547,7 +587,7 @@ async function insertQueued(
  */
 async function applyTransition(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   commentId: string,
   from: CommentStatus,
   to: CommentStatus,
@@ -573,7 +613,7 @@ async function applyTransition(
 
 function markProcessing(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   commentId: string,
 ): Promise<boolean> {
   return applyTransition(tx, workspaceId, commentId, 'queued', 'processing', {
@@ -584,7 +624,7 @@ function markProcessing(
 
 function markPosted(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   commentId: string,
   input: MarkPostedInput,
 ): Promise<boolean> {
@@ -592,27 +632,91 @@ function markPosted(
     platformCommentId: input.platformCommentId,
     errorCode: null,
     errorMessage: null,
+    needsReconcile: false,
   });
 }
 
 function markFailed(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   commentId: string,
   input: MarkFailedInput,
 ): Promise<boolean> {
   return applyTransition(tx, workspaceId, commentId, 'processing', 'failed', {
     errorCode: input.errorCode,
     errorMessage: input.errorMessage,
+    needsReconcile: false,
   });
 }
 
-function markQueuedForRetry(
+/**
+ * Writes the reconciliation guard on a row that is still `processing`.
+ *
+ * Not a status transition — the status does not move — so it does not go through
+ * {@link applyTransition}; the `status = 'processing'` predicate is there so a row another worker
+ * has already settled is left alone rather than being re-armed behind that worker's back.
+ */
+async function setReconcileGuard(
   tx: OutboxTransaction,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
+  commentId: string,
+  needsReconcile: boolean,
+): Promise<boolean> {
+  const result = await tx
+    .update(comments)
+    .set({ needsReconcile, updatedAt: new Date() })
+    .where(
+      and(
+        eq(comments.id, commentId),
+        eq(comments.workspaceId, workspaceId),
+        eq(comments.status, 'processing'),
+      ),
+    );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Arms the reconciliation guard for the send that is about to go out (D14).
+ *
+ * Committed *before* `adapter.publishComment` is called, so that a worker killed mid-send leaves
+ * behind a row that says "a send may have happened here". Without it the sweeper's
+ * `processing -> queued` recovery would hand the next attempt a row indistinguishable from one
+ * that never reached the platform, and that attempt would publish a second copy.
+ */
+function markSendAttempted(
+  tx: OutboxTransaction,
+  workspaceId: WorkspaceId,
   commentId: string,
 ): Promise<boolean> {
-  return applyTransition(tx, workspaceId, commentId, 'processing', 'queued', {});
+  return setReconcileGuard(tx, workspaceId, commentId, true);
+}
+
+/**
+ * `processing -> queued` for another attempt.
+ *
+ * `needsReconcile` carries forward what this attempt learned: `false` when the failure proves
+ * nothing was sent (a rate-limit rejection), `true` when the outcome stayed unknown. Clearing it
+ * unconditionally — as an empty `set` did — is what let an unresolved `OutcomeUnknownError` be
+ * forgotten between attempts.
+ */
+function markQueuedForRetry(
+  tx: OutboxTransaction,
+  workspaceId: WorkspaceId,
+  commentId: string,
+  input: MarkQueuedForRetryInput,
+): Promise<boolean> {
+  return applyTransition(tx, workspaceId, commentId, 'processing', 'queued', {
+    needsReconcile: input.needsReconcile,
+  });
+}
+
+/** Clears the guard once reconciliation has proved the comment is not on the platform. */
+function clearReconcileGuard(
+  tx: OutboxTransaction,
+  workspaceId: WorkspaceId,
+  commentId: string,
+): Promise<boolean> {
+  return setReconcileGuard(tx, workspaceId, commentId, false);
 }
 
 /** Backs {@link CommentRepository}; construct once per database handle (T043). */
@@ -634,7 +738,11 @@ export function createCommentRepository(db: NodePgDatabase): CommentRepository {
       markPosted(tx, workspaceId, commentId, input),
     markFailed: (tx, workspaceId, commentId, input) =>
       markFailed(tx, workspaceId, commentId, input),
-    markQueuedForRetry: (tx, workspaceId, commentId) =>
-      markQueuedForRetry(tx, workspaceId, commentId),
+    markQueuedForRetry: (tx, workspaceId, commentId, input) =>
+      markQueuedForRetry(tx, workspaceId, commentId, input),
+    markSendAttempted: (tx, workspaceId, commentId) =>
+      markSendAttempted(tx, workspaceId, commentId),
+    clearReconcileGuard: (tx, workspaceId, commentId) =>
+      clearReconcileGuard(tx, workspaceId, commentId),
   };
 }

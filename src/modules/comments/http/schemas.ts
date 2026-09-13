@@ -16,6 +16,7 @@ import type { CommentRecord } from '#src/modules/comments/infrastructure/comment
 import type { SyncJobRecord } from '#src/modules/comments/application/request-sync.ts';
 import type { PlatformCapabilities } from '#src/platforms/registry.ts';
 import type { SortOrder } from '#src/shared/pagination.ts';
+import { COMMENT_STATUSES } from '#src/modules/comments/domain/status.ts';
 
 export const postIdParamsSchema = z.object({ postId: z.uuid() });
 export const commentIdParamsSchema = z.object({ commentId: z.uuid() });
@@ -77,7 +78,9 @@ export const commentSchema = z.object({
   isOwn: z.boolean(),
   author: commentAuthorSchema,
   text: z.string().nullable(),
-  status: z.enum(['queued', 'processing', 'posted', 'failed', 'deleted']),
+  // Derived from the domain's own list, so the wire contract cannot drift from the state
+  // machine the way three hand-kept copies of these literals could.
+  status: z.enum(COMMENT_STATUSES),
   error: commentErrorSchema,
   replyCount: z.number().int().nonnegative(),
   occurredAt: z.iso.datetime(),
@@ -109,17 +112,37 @@ export type CreateCommentBody = z.infer<typeof createCommentBodySchema>;
  * `supportsComments`: a supported entry carries `canCreateTopLevel`/`canReply`/`maxReplyDepth`/
  * `textLimit`/`textUnit`/`ingestion`, an unsupported one carries only `unsupportedReason`.
  */
-export const platformCapabilitiesSchema = z.object({
+const supportedPlatformSchema = z.object({
   platform: z.string(),
-  supportsComments: z.boolean(),
-  canCreateTopLevel: z.boolean().optional(),
-  canReply: z.boolean().optional(),
-  maxReplyDepth: z.number().int().nonnegative().nullable().optional(),
-  textLimit: z.number().int().positive().optional(),
-  textUnit: z.enum(['characters', 'graphemes']).optional(),
-  ingestion: z.enum(['webhook+sync', 'sync']).optional(),
-  unsupportedReason: z.string().optional(),
+  supportsComments: z.literal(true),
+  canCreateTopLevel: z.boolean(),
+  canReply: z.boolean(),
+  maxReplyDepth: z.number().int().nonnegative().nullable(),
+  textLimit: z.number().int().positive(),
+  textUnit: z.enum(['characters', 'graphemes']),
+  ingestion: z.enum(['webhook+sync', 'sync']),
 });
+
+const unsupportedPlatformSchema = z.object({
+  platform: z.string(),
+  supportsComments: z.literal(false),
+  unsupportedReason: z.string(),
+});
+
+/**
+ * A discriminated union, mirroring `registry.ts`'s own `PlatformCapabilities`.
+ *
+ * A flat object with every distinguishing field `optional()` accepts
+ * `{ supportsComments: true }` with no `textLimit`, and `supportsComments: false` carrying one —
+ * states the domain type makes unrepresentable. The schema is what OpenAPI publishes, so the
+ * contract clients read was weaker than the contract the service actually keeps. The `oneOf` this
+ * produces is more verbose, but it tells a client exactly which fields it can rely on once it has
+ * looked at `supportsComments`.
+ */
+export const platformCapabilitiesSchema = z.discriminatedUnion('supportsComments', [
+  supportedPlatformSchema,
+  unsupportedPlatformSchema,
+]);
 
 export type PlatformCapabilitiesResponse = z.infer<typeof platformCapabilitiesSchema>;
 
@@ -231,7 +254,7 @@ export function toCommentResponse(record: CommentRecord): CommentResponse {
             displayName: record.authorDisplayName,
           },
     text: record.text,
-    status: record.status as CommentResponse['status'],
+    status: record.status,
     error:
       record.status === 'failed' && record.errorCode !== null
         ? { code: record.errorCode, message: record.errorMessage ?? '' }

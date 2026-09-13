@@ -14,12 +14,12 @@
  * routes in the write rate-limit bucket (`isReadRequest` keys on HTTP method, not a route list).
  */
 
-// oxlint-disable max-dependencies -- this file now registers all seven comment/platform HTTP
-// routes (four read, two write, one capability listing), so it imports every use case, port and
+// oxlint-disable max-dependencies -- this file registers all nine comment/platform HTTP routes
+// (four read, two write, two sync, one capability listing), so it imports every use case, port and
 // schema those routes call; splitting it would not reduce that fan-in, only hide it behind
 // re-exports — the same trade `create-reply.ts` and `create-top-level-comment.ts` make for the
 // same reason.
-// oxlint-disable max-lines -- seven routes, each already factored into its own named
+// oxlint-disable max-lines -- nine routes, each already factored into its own named
 // `registerXRoute` function with its own docstring, is the file's actual scope, not padding.
 
 import type { Queue } from 'bullmq';

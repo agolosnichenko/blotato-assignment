@@ -42,6 +42,13 @@ const envSchema = z.object({
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(1),
   META_GRAPH_API_VERSION: z.string().min(1).default('v21.0'),
   BLUESKY_THREAD_DEPTH: positiveInt().default(10),
+  /**
+   * The `X-App-Usage` / `X-Business-Use-Case-Usage` percentage at which an account's jobs start
+   * being held back (spec.md §8.2). Meta throttles at 100; backing off before that is the point.
+   */
+  META_USAGE_THROTTLE_PERCENT: positiveInt().default(90),
+  /** How long a throttled account's next job waits. The reading itself expires after 5 minutes. */
+  META_USAGE_THROTTLE_DELAY_MS: positiveInt().default(60_000),
 
   RETENTION_DAYS: positiveInt().default(45),
   DOMAIN_EVENTS_TTL_HOURS: positiveInt().default(24),

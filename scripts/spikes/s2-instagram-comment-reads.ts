@@ -35,8 +35,11 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { reportFatal } from '../script-failure.ts';
 
 const DEFAULT_API_VERSION = 'v21.0';
+/** Node's `fetch` has no default socket timeout; without this a hung host stalls the spike. */
+const REQUEST_TIMEOUT_MS = 10_000;
 const FIXTURES_DIR = path.join(import.meta.dirname, '../../src/platforms/meta/__fixtures__');
 const COMMENT_FIELDS = 'id,text,timestamp,from,replies{id,text,timestamp,from}';
 
@@ -117,8 +120,23 @@ async function readVariant(
     access_token: variant.token,
   }).toString();
 
-  const response = await fetch(url);
-  const body: unknown = await response.json().catch(() => null);
+  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  const raw = await response.text();
+
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch (error) {
+    // A body that will not parse is not an observation about Meta's behaviour, and it must not be
+    // written over the fixture T097 replays: `null` there would be recorded as "this variant
+    // returned nothing" and silently become the spike's finding. A transport or proxy failure is
+    // the spike failing, not an answer.
+    throw new Error(
+      `${variant.name}: HTTP ${response.status} returned a body that is not JSON; the fixture was ` +
+        `left untouched. First 200 characters: ${raw.slice(0, 200)}`,
+      { cause: error },
+    );
+  }
 
   await mkdir(FIXTURES_DIR, { recursive: true });
   const fixturePath = path.join(FIXTURES_DIR, variant.fixtureFile);
@@ -214,6 +232,5 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  reportFatal(error);
 }

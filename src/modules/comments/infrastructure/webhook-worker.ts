@@ -5,7 +5,7 @@
  * delete path — the one place a Meta webhook delivery and a sync walk converge on the same row
  * per `(social_account_id, platform_comment_id)` (that file's own docstring). This worker adds no
  * second upsert/delete logic of its own; its job is turning one stored `webhook_deliveries` row
- * into the `AccountContext`/`IngestTarget` that path needs, plus the four decisions specific to
+ * into the `AccountContext`/`IngestTarget` that path needs, plus the five decisions specific to
  * this channel:
  *
  *   1. **Every matching account, not just one** (spec.md §18 "`Accounts.listByPlatformAccount`").
@@ -149,7 +149,7 @@ async function markProcessed(db: NodePgDatabase, deliveryId: string): Promise<vo
 /**
  * The internal `postId` for `(socialAccountId, platformPostId)`, if this service has seen this
  * post before (via `PostPublished` or an earlier comment) — `comment_sync_targets` is this
- * module's own table (module docstring, point 3), queried directly rather than through
+ * module's own table (module docstring, point 4), queried directly rather than through
  * `SyncTargetRepository`, which exposes no lookup by platform post id. `null` when no target
  * exists yet: the post is genuinely external, and `ingest-comments.ts`'s own
  * `ensureSyncTargetIfExternal` creates the row.
@@ -224,7 +224,7 @@ async function recordAuthFailure(
 }
 
 /**
- * Resolves one `upsert` event's comment data (A18, module docstring point 2): the payload's own
+ * Resolves one `upsert` event's comment data (A18, module docstring point 3): the payload's own
  * data if it was complete, or `adapter.fetchComment`'s result if it was thin. `null` means the
  * comment no longer exists on the platform — nothing for the caller to ingest.
  */

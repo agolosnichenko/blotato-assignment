@@ -17,6 +17,8 @@ import {
   OutcomeUnknownError,
   PermanentError,
   RetryableError,
+  type AdapterError,
+  type AdapterOperation,
 } from '#src/platforms/types.ts';
 
 // `@atproto/xrpc`'s `ResponseType` enum, inlined: importing it would reach past `@atproto/api`
@@ -86,21 +88,23 @@ function parseRetryAfter(
  *
  * Args:
  *   error: The value caught from an `AtpAgent`/`XrpcClient` call.
+ *   operation: Whether the failed call was writing to the PDS or reading from it — a 5xx answer to
+ *     a write may have applied the record, the same status on a read cannot have.
  *
  * Returns:
  *   One of `RetryableError`, `OutcomeUnknownError`, `PermanentError` or `AuthError`, wrapping
  *   `error` as `cause` so the original failure is never discarded.
  */
-export function classifyBlueskyFailure(error: unknown): Error {
+export function classifyBlueskyFailure(error: unknown, operation: AdapterOperation): AdapterError {
   if (error instanceof XRPCError) {
-    return classifyXrpcFailure(error);
+    return classifyXrpcFailure(error, operation);
   }
   // Every call in this adapter goes through @atproto/xrpc, so this should be unreachable in
   // production; treat it as unknown outcome rather than assuming it is safe to retry.
   return new OutcomeUnknownError('bluesky request failed in an unrecognised way', { cause: error });
 }
 
-function classifyXrpcFailure(error: XRPCError): Error {
+function classifyXrpcFailure(error: XRPCError, operation: AdapterOperation): AdapterError {
   if (error.status === STATUS_NETWORK_FAILURE) {
     return classifyNetworkFailure(error.cause);
   }
@@ -108,6 +112,13 @@ function classifyXrpcFailure(error: XRPCError): Error {
     // The PDS answered (write may have succeeded) but its body failed lexicon validation — the
     // adapter cannot read back what was created, so the outcome is unknown, not a hard failure.
     return new OutcomeUnknownError('bluesky returned a response this adapter could not validate', {
+      cause: error,
+    });
+  }
+  if (error.status >= 500 && operation === 'write') {
+    // The write reached the PDS and may have been applied before it answered — reconciliation
+    // must gate the next send (D14). A 429 stays retryable: a rejected request was never run.
+    return new OutcomeUnknownError('bluesky write outcome unknown after a server error', {
       cause: error,
     });
   }

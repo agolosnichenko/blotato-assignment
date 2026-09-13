@@ -17,6 +17,8 @@ import {
 } from '#src/modules/platform-core/local/account-credentials.ts';
 import type { createLocalPostPublished } from '#src/modules/platform-core/local/post-published.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
+import { AuthError } from '#src/platforms/types.ts';
+import type { WorkspaceId } from '#src/shared/ids.ts';
 import { hashSecret, type KeyMaterial } from '#src/shared/crypto.ts';
 import { generateId } from '#src/shared/ids.ts';
 import {
@@ -32,7 +34,7 @@ const PREFIX_BYTES = 6;
 
 export type Db = NodePgDatabase;
 
-export async function seedWorkspace(db: Db, workspaceId: string): Promise<void> {
+export async function seedWorkspace(db: Db, workspaceId: WorkspaceId): Promise<void> {
   const [inserted] = await db
     .insert(workspaces)
     .values({
@@ -66,14 +68,21 @@ async function storedCredentialFingerprint(
       socialAccountId,
     );
     return found.found ? credentialFingerprint(found.value.token) : 'absent';
-  } catch {
-    // An undecryptable row (a different key, a botched rotation) is reported as a conflict rather
-    // than crashing the seed: the operator's next step is the same either way — clear the row.
-    return 'undecryptable';
+  } catch (error) {
+    // Only a genuine decryption failure — `AccountCredentials` narrows those to `AuthError` — is
+    // reported as a conflict rather than crashing the seed: the operator's next step is the same
+    // either way, clear the row. Everything else here is a database problem (a dropped
+    // connection, a statement timeout, a column missing after a partial migration), and reporting
+    // one of those as a corrupt key would tell the operator to wipe the demo workspace over a
+    // network blip.
+    if (error instanceof AuthError) {
+      return 'undecryptable';
+    }
+    throw error;
   }
 }
 
-async function checkAccountForConflicts(
+export async function checkAccountForConflicts(
   db: Db,
   account: DemoAccount,
   resolved: ResolvedAccountValues,
@@ -122,7 +131,7 @@ async function checkAccountForConflicts(
 
 export async function seedAccount(
   db: Db,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   account: DemoAccount,
   resolved: ResolvedAccountValues,
   keyMaterial: KeyMaterial,
@@ -159,7 +168,7 @@ export async function seedAccount(
 }
 
 /** Mints one fresh API key (see `seed-account.ts`'s module docstring: never reused, unlike the rest). */
-export async function seedApiKey(db: Db, workspaceId: string): Promise<void> {
+export async function seedApiKey(db: Db, workspaceId: WorkspaceId): Promise<void> {
   const prefix = randomBytes(PREFIX_BYTES).toString('hex');
   const secret = randomBytes(SECRET_ENTROPY_BYTES).toString('base64url');
   const fullKey = `blt_${prefix}_${secret}`;
@@ -188,7 +197,7 @@ export async function seedApiKey(db: Db, workspaceId: string): Promise<void> {
  */
 export async function seedPost(
   db: Db,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   postPublished: ReturnType<typeof createLocalPostPublished>,
   account: DemoAccount,
   resolved: ResolvedAccountValues,

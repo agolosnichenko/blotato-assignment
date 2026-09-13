@@ -101,7 +101,7 @@ export interface SyncPost {
 const ZERO_STATS: SyncPostStats = { fetched: 0, inserted: 0, updated: 0, deleted: 0 };
 
 /**
- * I1 (final-review.md): a walk's pages are fetched over several seconds, and this service's own
+ * spec.md §18: a walk's pages are fetched over several seconds, and this service's own
  * writes — a reply this walk's own account just published, a webhook delivery landing mid-walk —
  * can commit locally after the walk already paged past the platform's view of the thread, or
  * before the platform's read path has indexed them (ordinary eventual consistency on the Graph
@@ -114,18 +114,53 @@ const ZERO_STATS: SyncPostStats = { fetched: 0, inserted: 0, updated: 0, deleted
  */
 const DELETION_INFERENCE_GRACE_MS = 5 * 60_000;
 
-/** Builds the account context a sync walk needs — the platform itself comes from `Accounts`, not
- * `SyncTargetRecord` (which carries no platform column of its own). Throws a plain `Error` (never
- * a typed adapter error) on a missing account or credentials — a local data problem, not a signal
- * from the platform, so {@link handleWalkFailure} must not mistake it for a `PermanentError`. */
-async function loadAccountContext(
-  deps: SyncPostDeps,
-  target: SyncTargetRecord,
-): Promise<AccountContext> {
+/**
+ * Hard bound on one walk's pages.
+ *
+ * A cursor is whatever the adapter says it is, and Bluesky's is a queue of branch URIs rather than
+ * a platform cursor — so a branch that keeps reporting unexpanded children it will never return
+ * can, in principle, keep the walk going forever. That failure has no error to surface: the job
+ * simply never finishes, holding one of the sync worker's ten concurrency slots for good, and
+ * enough such posts stall the queue entirely. The bound converts a hang into a failed job, which
+ * the sync-job row and the sweeper can both see.
+ */
+const MAX_WALK_PAGES = 500;
+
+/** What the account lookup establishes before any credential is touched. */
+interface ResolvedAccount {
+  readonly platform: Platform;
+  readonly platformAccountId: string;
+}
+
+/** Resolves the account's platform — `SyncTargetRecord` carries no platform column of its own.
+ * Throws a plain `Error` (never a typed adapter error) when the account is missing: a local data
+ * problem, not a signal from the platform, so {@link handleWalkFailure} must not mistake it for a
+ * `PermanentError`. */
+async function loadAccount(deps: SyncPostDeps, target: SyncTargetRecord): Promise<ResolvedAccount> {
   const account = await deps.accounts.findById(target.socialAccountId);
   if (!account.found) {
     throw new Error(`sync-post: social account ${target.socialAccountId} not found`);
   }
+  return {
+    platform: account.value.platform as Platform,
+    platformAccountId: account.value.platformAccountId,
+  };
+}
+
+/**
+ * Adds the decrypted credentials to an already-resolved account.
+ *
+ * Kept separate from {@link loadAccount} on purpose: `AccountCredentials.findBySocialAccountId`
+ * raises `AuthError` when the stored token will not decrypt (spec.md §18), and the caller needs
+ * the platform *already in hand* when that happens — otherwise the failure reaches
+ * {@link handleWalkFailure} with no platform to name and used to be dropped there in silence,
+ * leaving `account_health` untouched while every later walk failed the same way.
+ */
+async function loadAccountContext(
+  deps: SyncPostDeps,
+  target: SyncTargetRecord,
+  account: ResolvedAccount,
+): Promise<AccountContext> {
   const credentials = await deps.accountCredentials.findBySocialAccountId(target.socialAccountId);
   if (!credentials.found) {
     throw new Error(
@@ -135,8 +170,8 @@ async function loadAccountContext(
   return {
     workspaceId: target.workspaceId,
     socialAccountId: target.socialAccountId,
-    platform: account.value.platform as Platform,
-    platformAccountId: account.value.platformAccountId,
+    platform: account.platform,
+    platformAccountId: account.platformAccountId,
     credentials: credentials.value,
   };
 }
@@ -254,7 +289,16 @@ async function walkAndIngest(
   };
 
   let cursor: string | undefined;
+  let pages = 0;
   do {
+    pages += 1;
+    if (pages > MAX_WALK_PAGES) {
+      // Throwing is the safe direction: an interrupted walk never reaches `inferDeletions`, so a
+      // bounded walk can cost a delayed deletion but never a wrong one.
+      throw new Error(
+        `sync-post: target ${target.id} exceeded ${MAX_WALK_PAGES} pages; refusing to page further`,
+      );
+    }
     // Each page's cursor is only known once the previous page came back — genuinely sequential,
     // not a candidate for Promise.all.
     // oxlint-disable-next-line no-await-in-loop
@@ -273,7 +317,7 @@ async function walkAndIngest(
  * nulled and `reply_count` decremented identically either way. Only reached after a complete walk.
  *
  * Excludes any row updated at or after `walkStartedAt - DELETION_INFERENCE_GRACE_MS` (I1,
- * final-review.md): a row this recently touched could be a write that raced this very walk rather
+ * spec.md §18): a row this recently touched could be a write that raced this very walk rather
  * than evidence the platform removed it, and {@link run} is explicit that "complete" is read
  * relative to what the walk *could* have seen.
  */
@@ -322,7 +366,7 @@ async function inferDeletions(
  * here reads the target's prior `next_sync_at`, so a `null` before this call is no different from
  * any other value.
  *
- * I2 (final-review.md, D30 §18): also clears this account's `account_health` row, if any.
+ * (spec.md §18, D30 §18): also clears this account's `account_health` row, if any.
  * `run()` reaching here means `loadAccountContext` decrypted a credential and `adapter.listComments`
  * used it successfully for the whole walk — direct evidence the account works again, and the only
  * such evidence this module can observe on its own. `AccountHealth.clear` had no caller anywhere in
@@ -357,24 +401,29 @@ async function markSucceeded(
  * status a refresh-only failure leaves behind stays `active` while the publish path's equivalent
  * failure would have disconnected it.
  *
- * `platform` is `undefined` only if the credential was unreadable before {@link loadAccountContext}
- * could resolve it — that function never itself throws `AuthError`, so this guard is defensive
- * against a future adapter change rather than a path reachable today.
+ * `platform` is `undefined` only when the account lookup itself failed, which is a plain `Error`
+ * rather than an `AuthError` — so in practice it is always known here. It is still tolerated
+ * rather than assumed: `account_health` does not need the platform, and recording the credential
+ * failure matters more than the event that announces it. Skipping *both* — as an earlier version
+ * did whenever `platform` was undefined — left the account looking healthy while every subsequent
+ * walk failed identically.
  */
 async function recordAuthFailure(
   deps: SyncPostDeps,
   target: SyncTargetRecord,
-  platform: Platform,
+  platform: Platform | undefined,
   reason: string,
 ): Promise<void> {
-  await deps.database.transaction((tx) =>
-    appendToOutbox(tx, {
-      workspaceId: target.workspaceId,
-      type: 'account.auth_failed',
-      aggregateId: target.socialAccountId,
-      data: { socialAccountId: target.socialAccountId, platform, reason },
-    }),
-  );
+  if (platform !== undefined) {
+    await deps.database.transaction((tx) =>
+      appendToOutbox(tx, {
+        workspaceId: target.workspaceId,
+        type: 'account.auth_failed',
+        aggregateId: target.socialAccountId,
+        data: { socialAccountId: target.socialAccountId, platform, reason },
+      }),
+    );
+  }
   await deps.accountHealth.markAuthFailed({
     socialAccountId: target.socialAccountId,
     workspaceId: target.workspaceId,
@@ -385,7 +434,8 @@ async function recordAuthFailure(
 /**
  * §7.3, T087: an `AuthError` is recorded in `account_health` (above); a `PermanentError`
  * deactivates the target; a `RetryableError` — and anything else the walk raised, typed or not —
- * leaves the schedule exactly as it was.
+ * leaves the *schedule* exactly as it was, but still records why, so a target failing on every
+ * tick is visible on the target itself and not only in a `comment_sync_jobs` row.
  */
 async function handleWalkFailure(
   deps: SyncPostDeps,
@@ -395,14 +445,18 @@ async function handleWalkFailure(
   error: unknown,
 ): Promise<void> {
   if (error instanceof AuthError) {
-    if (platform !== undefined) {
-      await recordAuthFailure(deps, target, platform, error.message);
-    }
+    await recordAuthFailure(deps, target, platform, error.message);
+    // The credential is the account's problem, not this target's — but the target did fail, and
+    // leaving no trace on it is how a permanently failing target became invisible.
+    await deps.syncTargetRepository.recordFailure(targetId, error.message);
     return;
   }
   if (error instanceof PermanentError) {
+    // `deactivate` writes `last_error` itself, alongside clearing the schedule.
     await deps.syncTargetRepository.deactivate(targetId, error.message);
+    return;
   }
+  await deps.syncTargetRepository.recordFailure(targetId, errorMessage(error));
 }
 
 function errorMessage(error: unknown): string {
@@ -434,8 +488,11 @@ async function run(deps: SyncPostDeps, targetId: string): Promise<SyncPostResult
   // before the walk finishes — `handleWalkFailure` needs the platform to record it correctly.
   let resolvedPlatform: Platform | undefined;
   try {
-    const ctx = await loadAccountContext(deps, target);
-    resolvedPlatform = ctx.platform;
+    // Resolved before the credential is read, so an `AuthError` from decryption still knows which
+    // platform it belongs to.
+    const account = await loadAccount(deps, target);
+    resolvedPlatform = account.platform;
+    const ctx = await loadAccountContext(deps, target, account);
     const adapter = deps.getAdapter(ctx.platform);
     const ingestionSource: IngestionSource = target.lastSyncedAt === null ? 'backfill' : 'sync';
 

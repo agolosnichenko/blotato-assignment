@@ -39,6 +39,10 @@
 // oxlint-disable max-dependencies -- this worker wires every port `PublishComment` needs (the
 // repository, contact quota, account health, the three platform adapters), plus BullMQ and the
 // token-bucket primitives; splitting the file would not reduce that, only hide it behind re-exports.
+// oxlint-disable max-lines -- the same reasoning: one worker, its Lua token bucket and the two
+// independent reasons it delays a job (our own bucket, and Meta's reported usage, §8.2). Each is
+// already its own named function; moving them apart would separate the bucket from its only
+// caller rather than remove anything.
 
 import { eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -57,6 +61,12 @@ import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import { createBlueskyAdapter } from '#src/platforms/bluesky/adapter.ts';
 import { createFacebookAdapter } from '#src/platforms/meta/facebook-adapter.ts';
 import { createInstagramAdapter } from '#src/platforms/meta/instagram-adapter.ts';
+import type { GraphUsage } from '#src/platforms/meta/graph-client.ts';
+import {
+  readGraphUsage,
+  recordGraphUsage,
+  usageDelayMs,
+} from '#src/modules/comments/infrastructure/graph-usage.ts';
 import type { AccountCredentials, Accounts, Workspaces } from '#src/modules/platform-core/ports.ts';
 import type { CommentPlatformAdapter, Platform } from '#src/platforms/types.ts';
 import { forJob } from '#src/shared/logger.ts';
@@ -163,10 +173,13 @@ async function loadSocialAccountId(db: NodePgDatabase, commentId: string): Promi
  * `switch`, keeps platform dispatch data-driven (Principle IV) — the same shape `registry.ts`
  * already uses for capabilities.
  */
-function buildAdapterRegistry(config: Config): (platform: Platform) => CommentPlatformAdapter {
+function buildAdapterRegistry(
+  config: Config,
+  onUsage: (socialAccountId: string, usage: GraphUsage) => void,
+): (platform: Platform) => CommentPlatformAdapter {
   const adapters: Partial<Record<Platform, CommentPlatformAdapter>> = {
-    instagram: createInstagramAdapter({ apiVersion: config.META_GRAPH_API_VERSION }),
-    facebook: createFacebookAdapter({ apiVersion: config.META_GRAPH_API_VERSION }),
+    instagram: createInstagramAdapter({ apiVersion: config.META_GRAPH_API_VERSION, onUsage }),
+    facebook: createFacebookAdapter({ apiVersion: config.META_GRAPH_API_VERSION, onUsage }),
     bluesky: createBlueskyAdapter({ threadDepth: config.BLUESKY_THREAD_DEPTH }),
   };
 
@@ -192,7 +205,7 @@ async function delayJob(
   token: string | undefined,
   delayMs: number,
   jobLogger: Logger,
-  reason: 'account-rate-limited' | 'platform-retry',
+  reason: 'account-rate-limited' | 'platform-retry' | 'platform-usage-high',
   extra: Record<string, unknown>,
 ): Promise<never> {
   if (token === undefined) {
@@ -255,16 +268,25 @@ export interface PublishWorkerDeps {
  * Returns:
  *   The running `Worker`. The caller owns its lifecycle (`close()` on shutdown).
  */
-export function createPublishWorker(deps: PublishWorkerDeps): Worker {
-  const publishComment = createPublishComment({
+function buildPublishComment(deps: PublishWorkerDeps): ReturnType<typeof createPublishComment> {
+  return createPublishComment({
     database: deps.database,
     commentRepository: createCommentRepository(deps.database),
     contactQuota: createContactQuota(deps.database, deps.workspaces),
     accounts: deps.accounts,
     accountCredentials: deps.accountCredentials,
     accountHealth: createAccountHealth(deps.database),
-    getAdapter: buildAdapterRegistry(deps.config),
+    getAdapter: buildAdapterRegistry(deps.config, (socialAccountId, usage) => {
+      // Fire-and-forget by design: recording is advisory, and awaiting it inside an adapter call
+      // would put a Redis round trip on the publish path for a hint. `recordGraphUsage` never
+      // rejects, so there is no floating rejection here.
+      void recordGraphUsage(deps.redis, socialAccountId, usage.highestPercent);
+    }),
   });
+}
+
+export function createPublishWorker(deps: PublishWorkerDeps): Worker {
+  const publishComment = buildPublishComment(deps);
 
   return new Worker(
     QUEUE_NAMES.commentPublish,
@@ -283,6 +305,19 @@ export function createPublishWorker(deps: PublishWorkerDeps): Worker {
         // so a missing row means a stale or malformed jobId, not a race worth reconciling.
         jobLogger.warn('publish-worker: comment not found, skipping');
         return;
+      }
+
+      // Meta's own view of how hard this account is being worked (spec.md §8.2). Checked before
+      // the token bucket because it is the platform's limit rather than ours, and spending a
+      // token on a call Meta is about to throttle helps nobody.
+      const usageDelay = usageDelayMs(
+        await readGraphUsage(deps.redis, socialAccountId),
+        deps.config,
+      );
+      if (usageDelay > 0) {
+        await delayJob(job, token, usageDelay, jobLogger, 'platform-usage-high', {
+          socialAccountId,
+        });
       }
 
       const bucket = await tryAcquireToken(deps.redis, socialAccountId);

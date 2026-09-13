@@ -10,6 +10,8 @@
 // live together in this file, alongside the ports they belong to; splitting them would fragment
 // the port that later adapters and use cases import from.
 
+import type { WorkspaceId } from '#src/shared/ids.ts';
+
 /** The nine publishing platforms; only three currently support comments (registry.ts). */
 export type Platform =
   | 'instagram'
@@ -33,7 +35,7 @@ export type Platform =
  * (`src/platforms/meta/graph-client.ts`), Bluesky and the six unsupported platforms included.
  */
 export interface AccountContext {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly platform: Platform;
   readonly platformAccountId: string;
@@ -93,7 +95,16 @@ export interface ReconcileProbe {
 export interface NormalizedComment {
   readonly platformCommentId: string;
   readonly platformParentId: string | null;
-  readonly authorPlatformId: string;
+  /**
+   * `null` when the platform did not tell us who wrote it — a commenter the connected account
+   * cannot see, which Meta signals by omitting `from` entirely.
+   *
+   * Distinct from the empty string an adapter used to substitute: every anonymous commenter then
+   * shared one `contact_quota_usage` key, so a whole workspace's anonymous contacts consumed a
+   * single unit of the monthly allowance between them (D16), and `create-reply.ts`'s explicit
+   * "no author to reserve quota against" guard could never fire.
+   */
+  readonly authorPlatformId: string | null;
   readonly authorUsername: string | null;
   readonly authorDisplayName: string | null;
   readonly text: string;
@@ -112,33 +123,6 @@ export interface CommentPlatformAdapter {
     probe: ReconcileProbe,
   ): Promise<PublishedComment | null>;
   fetchComment(ctx: AccountContext, platformCommentId: string): Promise<NormalizedComment | null>;
-}
-
-/** One normalized change coming out of a verified webhook payload. */
-export type IngestionEvent =
-  | {
-      readonly type: 'upsert';
-      readonly platform: Platform;
-      readonly platformAccountId: string;
-      readonly platformPostId: string;
-      readonly comment: NormalizedComment;
-    }
-  | {
-      readonly type: 'delete';
-      readonly platform: Platform;
-      readonly platformAccountId: string;
-      readonly platformCommentId: string;
-    };
-
-/**
- * Turns a verified webhook payload into `IngestionEvent`s (Meta only).
- *
- * Signature verification over the raw body happens before this port is reached (R-04) — `payload`
- * is already-parsed JSON. An event for an account this service does not know is recorded as
- * unprocessable and acknowledged, never retried; that decision belongs to the caller, not this port.
- */
-export interface WebhookNormalizer {
-  normalize(payload: unknown): readonly IngestionEvent[];
 }
 
 /**
@@ -183,3 +167,24 @@ export class PermanentError extends Error {
 export class AuthError extends Error {
   override readonly name = 'AuthError';
 }
+
+/**
+ * The closed set of errors an adapter is allowed to raise for a platform failure.
+ *
+ * Every classifier returns this union rather than `Error`, so a new branch that forgets to wrap
+ * its failure in one of the four types fails to compile instead of falling through the
+ * `instanceof` chain in `publish-comment.ts` and being rethrown unclassified.
+ *
+ * A programmer error (a bug in a client, a credential for the wrong platform) is deliberately not
+ * a member: it never reached the platform, so it is rethrown untouched rather than classified.
+ */
+export type AdapterError = RetryableError | OutcomeUnknownError | PermanentError | AuthError;
+
+/**
+ * Whether a failed call was reading from the platform or writing to it.
+ *
+ * The distinction only matters for failures that prove the request arrived — a 5xx answer to a
+ * write may have created the comment before failing, so it is an unknown outcome, while the same
+ * status on a read is merely retryable (D14).
+ */
+export type AdapterOperation = 'read' | 'write';

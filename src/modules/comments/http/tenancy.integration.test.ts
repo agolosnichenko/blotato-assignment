@@ -47,7 +47,7 @@ import {
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
-import { generateId } from '#src/shared/ids.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -66,7 +66,7 @@ interface MintOptions {
 
 async function mintApiKey(
   database: Database,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   options: MintOptions = {},
 ): Promise<string> {
   const prefix = randomBytes(6).toString('hex');
@@ -86,7 +86,7 @@ async function mintApiKey(
 
 /** Every workspace-scoped resource this file needs, each route's tenancy case draws one id from. */
 interface SeededWorkspace {
-  readonly workspaceId: string;
+  readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
   readonly postId: string;
   readonly platformPostId: string;
@@ -102,10 +102,10 @@ interface SeededAccountAndPost {
 
 /** Seeds a workspace, an active Instagram account under it, and a post it published. */
 async function seedWorkspaceAndPost(database: Database): Promise<{
-  workspaceId: string;
+  workspaceId: WorkspaceId;
   post: SeededAccountAndPost;
 }> {
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   await database.drizzle.insert(workspaces).values({
     id: workspaceId,
     name: 'Test workspace',
@@ -144,7 +144,7 @@ async function seedWorkspaceAndPost(database: Database): Promise<{
 /** Seeds a posted top-level comment on `post`, ready to be read, replied to, or fetched by id. */
 async function seedTopLevelComment(
   database: Database,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   post: SeededAccountAndPost,
 ): Promise<string> {
   const topLevelCommentId = generateId();
@@ -179,7 +179,7 @@ async function seedTopLevelComment(
 /** Seeds a sync target for `post` and a `succeeded` job against it, ready to be fetched by id. */
 async function seedSyncJob(
   database: Database,
-  workspaceId: string,
+  workspaceId: WorkspaceId,
   post: SeededAccountAndPost,
 ): Promise<string> {
   const now = new Date();
@@ -408,7 +408,10 @@ function buildBogusKey(): string {
   return `blt_${randomBytes(6).toString('hex')}_${randomBytes(16).toString('base64url')}`;
 }
 
-function registerCredentialTests(getHarness: () => Harness, getOwnWorkspaceId: () => string): void {
+function registerCredentialTests(
+  getHarness: () => Harness,
+  getOwnWorkspaceId: () => WorkspaceId,
+): void {
   describe('credential rejection (D20, FR-026)', () => {
     it('rejects a request with no API key header as 401 UNAUTHORIZED', async () => {
       const harness = getHarness();

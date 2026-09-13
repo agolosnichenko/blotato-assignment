@@ -43,7 +43,8 @@ import { accountHealth, comments } from '#src/modules/comments/infrastructure/sc
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
-import { generateId } from '#src/shared/ids.ts';
+import type { CommentStatus } from '#src/modules/comments/domain/status.ts';
+import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_ENV } from '#src/shared/testing/test-env.ts';
 
@@ -53,10 +54,10 @@ interface Harness {
   redis: Redis;
   app: Api;
   publishQueue: Queue;
-  workspaceId: string;
+  workspaceId: WorkspaceId;
 }
 
-async function mintApiKey(database: Database, workspaceId: string): Promise<string> {
+async function mintApiKey(database: Database, workspaceId: WorkspaceId): Promise<string> {
   const prefix = randomUUID().replaceAll('-', '');
   const secret = randomUUID();
   await database.drizzle.insert(apiKeys).values({
@@ -89,7 +90,7 @@ async function startHarness(): Promise<Harness> {
   const app = buildApi(container);
   await app.ready();
 
-  const workspaceId = generateId();
+  const workspaceId = asWorkspaceId(generateId());
   await database.drizzle.insert(workspaces).values({
     id: workspaceId,
     name: 'Test workspace',
@@ -175,7 +176,7 @@ interface SeedCommentInput {
   readonly parentCommentId?: string | null;
   readonly rootCommentId?: string | null;
   readonly depth?: number;
-  readonly status?: string;
+  readonly status?: CommentStatus;
   readonly authorPlatformId?: string;
   readonly idempotencyKey?: string | null;
 }
