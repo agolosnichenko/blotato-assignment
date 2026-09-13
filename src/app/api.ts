@@ -242,6 +242,8 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
     enableDraftSpec: true,
     keyGenerator: (request) =>
       `${isReadRequest(request.method) ? 'read' : 'write'}:${request.apiKeyId}`,
+    // `registerHealthRoutes`'s /healthz and /readyz rely on this exact predicate to stay
+    // unlimited — see that function's doc comment for the coupling.
     allowList: (request) => request.apiKeyId === '',
     max: (request) => {
       const envDefault = isReadRequest(request.method)
@@ -339,6 +341,15 @@ function registerWebhookRoutes(
  * outside avvio's queue, so it would run — and add its route to the router — before that hook
  * exists, silently vanishing from the published document (T035, R-09: `GET /healthz` and
  * `GET /readyz` are meant to be the two operations the exemption actually clears).
+ *
+ * Side effect: `@fastify/rate-limit`'s `onRoute` hook (`registerRateLimit`, registered earlier)
+ * now sees these two routes too, and attaches its `preHandler` to them — before this change they
+ * were bare `app.get()` calls that ran before that hook existed, so it never saw them at all.
+ * They stay unlimited today only because `registerRateLimit`'s `allowList` exempts any request
+ * with `apiKeyId === ''`, which both routes always have ({@link PUBLIC_ROUTES} skips the auth hook
+ * before it sets `apiKeyId`). If `allowList`'s predicate ever changes to key on something else,
+ * these two liveness/readiness probes could start getting rate-limited with no warning — see the
+ * `allowList` line in `registerRateLimit` for the other half of this coupling.
  */
 function registerHealthRoutes(app: Api, database: Database, redis: Redis): void {
   app.register((instance, _opts, done) => {
