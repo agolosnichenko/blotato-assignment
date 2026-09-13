@@ -68,7 +68,7 @@ async function callApi(
   const response = await fetch(new URL(path, env.SMOKE_BASE_URL), {
     method,
     headers: {
-      'X-API-Key': env.SMOKE_API_KEY,
+      'blotato-api-key': env.SMOKE_API_KEY,
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),

@@ -679,6 +679,20 @@ Infrastructure:
     Standard Access, and this spike has not established it.
 - **S3. Railway Redis.** Confirm that `maxmemory-policy noeviction` can be set and persistence enabled;
   otherwise run Redis from a Docker image with a volume.
+  - **Result (2026-09-13), half negative.** Against the deployed managed Redis,
+    `CONFIG GET maxmemory-policy appendonly` returned `noeviction` and `appendonly no`. The
+    eviction half holds by default, as Railway's own guide says; the persistence half does not, and
+    the `redis()` helper exposes no way to pass server flags, so it cannot be turned on from
+    configuration. The pre-committed fallback therefore applies: Redis runs from `redis:8.10.1-alpine`
+    — the image `docker-compose.yml` already uses — started with the same flags and a volume at
+    `/data`, with `REDIS_URL` set by hand to the service's private address. This changes deployment
+    configuration only, as the Complexity Tracking table anticipated; no application code moves.
+  - **Why the AOF half is not optional here.** Postgres is the source of truth, and the sweepers
+    re-enqueue work whose job was lost — so a Redis restart is survivable in the sense that no
+    comment is lost. What it is not is *invisible*: every in-flight job would have to be rediscovered
+    by a sweeper on its own schedule, and `domain-events`, which has no consumer in this deployment
+    (D9) and is trimmed on a timer rather than drained, would be emptied outright. `noeviction`
+    without persistence protects the queue from a full memory buffer and not from a restart.
 - **S4. Bluesky limits.** Check current rate limits for `createRecord` and `getPostThread` and tune the
   polling intervals.
   - **Result (2026-09-13),** from the published limits (docs.bsky.app/docs/advanced-guides/rate-limits).
