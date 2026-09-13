@@ -10,7 +10,12 @@ One repository, one Docker image, two runtime roles: `api` (Fastify — REST, we
 UI) and `worker` (BullMQ — publishing, sync, webhook processing, the outbox relay, retention). See
 [DESIGN.md §1–§2](./DESIGN.md) for why the roles are not split into separate services.
 
-## Deployment
+## For the reviewer — start here
+
+Nothing to install and nothing to seed: the service is deployed, and its demo workspace holds three
+**real** connected accounts — an Instagram business account, a Facebook Page and a Bluesky account —
+each with a real published post registered as a sync target. Comments you create through the API
+appear on those accounts, and you can open them in a browser to check.
 
 **https://api-production-6ef5.up.railway.app** — Swagger UI at
 [`/docs`](https://api-production-6ef5.up.railway.app/docs), the OpenAPI document at
@@ -18,13 +23,116 @@ UI) and `worker` (BullMQ — publishing, sync, webhook processing, the outbox re
 [`/healthz`](https://api-production-6ef5.up.railway.app/healthz) and `/readyz` (the latter pings
 Postgres and Redis and reports each).
 
-The whole SC-012 walkthrough has been run against that URL with real connected accounts — a real
-Instagram business account and a real Bluesky account, not fixtures:
+The demo API key is sent separately by email — never committed to this repository (D25). It is
+scoped to the demo workspace, rate-limited, and revocable.
+
+```bash
+export BASE=https://api-production-6ef5.up.railway.app
+export API_KEY=blt_...   # from the email
+
+# the demo workspace's three posts, by the service's own id
+export IG_POST=33333333-3333-4333-8333-333333333331
+export FB_POST=33333333-3333-4333-8333-333333333332
+export BSKY_POST=33333333-3333-4333-8333-333333333333
+```
+
+The platform's own id for each is in the `platformPostId` field of every comment response, so you can
+always get from a row here back to the object on the platform.
+
+### Seven requests
+
+**1 — the capability registry.** Nine platforms, three of which support comments; the other six say
+why not. Every depth and text-limit check in the service reads this same table.
+
+```bash
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
+```
+
+**2 — read a real thread.** Instagram comments that were ingested from the platform, newest first
+(D27), each with its `replyCount`:
+
+```bash
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/posts/$IG_POST/comments"
+```
+
+Take an `id` from `items[]` — call it `$COMMENT` — and read its replies (ascending, D27):
+
+```bash
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/$COMMENT/replies"
+```
+
+**3 — reply to it.** The write is asynchronous: `202`, not `201`, because the row exists but the
+platform call has not happened yet (A11). Note the `Location` header.
+
+```bash
+curl -si -X POST "$BASE/v1/comments/$COMMENT/replies" \
+  -H "blotato-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: review-$RANDOM" \
+  -d '{"text":"Reviewing the Blotato take-home 👋"}'
+```
+
+**4 — poll the `Location`** until `status` goes `queued → processing → posted`. When it does,
+`platformCommentId` is the real Instagram comment id — **open the Instagram post below and you will
+see this comment there.**
+
+```bash
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/<id from Location>"
+```
+
+**5 — the depth limit.** Instagram's `maxReplyDepth` is 1, so replying to a reply is refused up front
+rather than silently re-parented (D12). Use one of the `id`s from the replies list in step 2:
+
+```bash
+curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/comments/$REPLY_ID/replies" \
+  -H "blotato-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"text":"one level too deep"}'
+# 422 REPLY_DEPTH_EXCEEDED
+```
+
+The identical request against a Bluesky reply (`maxReplyDepth: null`) is accepted and posts — same
+code path, different capability. That contrast is the point of the registry.
+
+**6 — refresh from the platform.** Enqueues a sync walk; poll the returned job id:
+
+```bash
+curl -s -X POST "$BASE/v1/posts/$IG_POST/comments/sync" -H "blotato-api-key: $API_KEY"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comment-sync-jobs/<jobId>"
+```
+
+**7 — tenancy and auth.** No key is `401`; another workspace's post is `404`, never `403`, so a key
+cannot use the status code to learn whether a resource exists (D20):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE/v1/posts/$IG_POST/comments"
+curl -s -o /dev/null -w '%{http_code}\n' -H "blotato-api-key: $API_KEY" \
+  "$BASE/v1/posts/00000000-0000-0000-0000-000000000000/comments"
+# 401
+# 404
+```
+
+`pnpm smoke` runs exactly this sequence with assertions instead of eyeballs — see
+[`scripts/smoke.ts`](./scripts/smoke.ts); it needs `SMOKE_BASE_URL`, `SMOKE_API_KEY`,
+`SMOKE_INSTAGRAM_POST_ID` and `SMOKE_BLUESKY_POST_ID`.
+
+### Where to check the results on the platform
+
+| account | profile | the post the demo runs against |
+| --- | --- | --- |
+| Instagram | [@blotato_demo](https://www.instagram.com/blotato_demo/) | [instagram.com/p/DdNhTg6Rylh](https://www.instagram.com/p/DdNhTg6Rylh/) |
+| Bluesky | [@blotato-demo.bsky.social](https://bsky.app/profile/blotato-demo.bsky.social) | [the demo post](https://bsky.app/profile/blotato-demo.bsky.social/post/3mvfgblffyv2p) |
+| Facebook | [Blotato-demo](https://www.facebook.com/1423986634121660) | post `1423986634121660_122093382351485339` (read-blocked, see below) |
+
+Comments posted through the API appear under those posts within seconds of the status turning
+`posted`. They are visible to anyone — no login needed for Instagram or Bluesky.
+
+### What was already verified there
+
+The whole SC-012 walkthrough has been run against that URL with those accounts, not fixtures:
 
 | step | what happened |
 | --- | --- |
 | `GET /v1/platforms` | nine platforms, three supporting comments |
-| `GET /v1/posts/:postId/comments` | the post's two real Instagram comments, newest first, one with a reply |
+| `GET /v1/posts/:postId/comments` | the post's real Instagram comments, newest first, one with a reply |
 | `POST /v1/comments/:id/replies` | `202 queued` with a `Location` |
 | poll to `posted` | Instagram comment `18112975520094858` — posted on the platform |
 | reply to a reply (Instagram) | `422 REPLY_DEPTH_EXCEEDED`, `maxReplyDepth 1` (D12) |
@@ -41,11 +149,10 @@ Access' feature` — and Meta's own login dialog rejects that permission as inva
 the sync path and the error handling are the same code Instagram and Bluesky run; what is missing
 is a Meta approval, which is exactly what D23 anticipates.
 
-A demo API key for trying the endpoints above is sent separately (by email), never committed to
-this repository (D25) — it's scoped to a demo workspace with a reduced rate limit and can be
-revoked.
+## Curl walkthrough (local run, with response bodies)
 
-## Curl walkthrough
+The section above is the fastest path and needs nothing but the key. This one shows the actual
+response bodies, and is what a local run looks like when no real account is connected.
 
 Every response below is real output from a local run of this exact code (PostgreSQL 18.6 + Redis
 8.10.1 via `docker compose`, `pnpm dev:api` + `pnpm dev:worker`), not a hand-written example.
