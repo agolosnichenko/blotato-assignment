@@ -128,6 +128,18 @@ export function assertDescendingOccurredAt(items: readonly { occurredAt: string 
     }
     const previousTime = new Date(previous.occurredAt).getTime();
     const currentTime = new Date(current.occurredAt).getTime();
+    // An unparseable timestamp yields NaN, and every comparison against NaN is false — so without
+    // this the ordering check would pass on a page it could not actually order.
+    if (Number.isNaN(previousTime) || Number.isNaN(currentTime)) {
+      // The value's *type* is correct, a string; what is wrong is its content, which is an
+      // ordinary assertion failure. Every other failure here throws Error, and the caller catches
+      // one kind.
+      // oxlint-disable-next-line unicorn/prefer-type-error
+      throw new Error(
+        `unparseable occurredAt at index ${index}: ` +
+          `${previous.occurredAt} / ${current.occurredAt}`,
+      );
+    }
     if (currentTime > previousTime) {
       throw new Error(
         `comments not newest-first at index ${index}: ` +

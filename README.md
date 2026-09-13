@@ -220,9 +220,9 @@ src/
     types.ts        CommentPlatformAdapter port, normalized types, the four typed adapter errors
     meta/           Graph API client (host/token by auth_variant), Instagram + Facebook adapters
     bluesky/        AT Protocol adapter
-scripts/          create-api-key, seed-account, generate-openapi, and the Meta spikes. `smoke`
-                  (T108, a deployed-walkthrough check) is declared in package.json but its script
-                  does not exist yet — it waits on a deployment URL (see §9, "Not deployed")
+scripts/          create-api-key, seed-account, generate-openapi, the Meta spikes, and `smoke`
+                  (T108) — the SC-012 walkthrough run against a deployment, with its assertions in
+                  smoke-checks.ts so they are unit-tested without a server
 drizzle/          SQL migrations (generated, committed, reviewed)
 specs/            the spec-kit artifacts this was planned from (plan, data model, contracts, tasks)
 ```

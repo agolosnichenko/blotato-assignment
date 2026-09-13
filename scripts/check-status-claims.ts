@@ -60,6 +60,11 @@ const CLAIMS: readonly StatusClaim[] = [
     falsifiedBy: 'src/platforms/meta/__fixtures__/s2-facebook-login-comments.json',
     hint: 'spike S2 ran; the read path is built against its recorded fixture',
   },
+  {
+    phrase: 'its script does not exist yet',
+    falsifiedBy: 'scripts/smoke.ts',
+    hint: 'T108 landed; describe what `pnpm smoke` runs and which variables it needs',
+  },
 ];
 
 async function exists(relativePath: string): Promise<boolean> {

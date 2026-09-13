@@ -66,6 +66,13 @@ describe('assertDescendingOccurredAt', () => {
     expect(() => assertDescendingOccurredAt(items)).toThrowError(/not newest-first at index 1/u);
   });
 
+  it('fails on an unparseable timestamp rather than passing by NaN comparison', () => {
+    const items = [{ occurredAt: '2026-09-13T12:00:00.000Z' }, { occurredAt: 'not a date' }];
+    expect(() => assertDescendingOccurredAt(items)).toThrowError(
+      /unparseable occurredAt at index 1/u,
+    );
+  });
+
   it('passes on an empty or single-item page', () => {
     expect(() => assertDescendingOccurredAt([])).not.toThrow();
     expect(() =>

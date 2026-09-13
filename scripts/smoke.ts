@@ -47,6 +47,17 @@ interface ApiResponse {
   readonly body: unknown;
 }
 
+function parseBody(text: string): unknown {
+  if (text.length === 0) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 /**
  * Calls the deployment's REST API. Never logs the API key.
  *
@@ -74,8 +85,11 @@ async function callApi(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
-  const parsed = text.length === 0 ? null : JSON.parse(text);
-  return { status: response.status, headers: response.headers, body: parsed };
+  // Not every response on this path comes from the service: a platform proxy answering 502 sends
+  // HTML, and `JSON.parse` would then throw a bare SyntaxError that loses the status — the one
+  // fact a smoke failure exists to report. The undecodable body is carried through as a string so
+  // the failing step still prints it as evidence.
+  return { status: response.status, headers: response.headers, body: parseBody(text) };
 }
 
 function smokeCommentText(): string {
@@ -97,18 +111,21 @@ async function stepPlatforms(env: SmokeEnv): Promise<void> {
   logPass('1 platforms', `${items.length} platforms, 3 comment-capable`);
 }
 
-async function stepConversation(env: SmokeEnv, postId: string): Promise<string> {
+/** `step` is a parameter because step 5 reads a conversation too, and the printed output is the
+ * reviewer's evidence — a line labelled "2 conversation" while step 5 is running misreports which
+ * check passed. */
+async function stepConversation(env: SmokeEnv, step: string, postId: string): Promise<string> {
   const response = await callApi(env, 'GET', `/v1/posts/${postId}/comments`);
   if (response.status !== 200) {
-    throw new SmokeFailure('2 conversation', '200', String(response.status), response.body);
+    throw new SmokeFailure(step, '200', String(response.status), response.body);
   }
   const items = (response.body as { items: CommentRecord[] }).items;
   assertDescendingOccurredAt(items);
   const topLevel = items[0];
   if (topLevel === undefined) {
-    throw new SmokeFailure('2 conversation', 'at least one comment', '0 comments');
+    throw new SmokeFailure(step, 'at least one comment', '0 comments');
   }
-  logPass('2 conversation', `${items.length} comments, newest-first, top-level id ${topLevel.id}`);
+  logPass(step, `${items.length} comments, newest-first, top-level id ${topLevel.id}`);
   return topLevel.id;
 }
 
@@ -152,7 +169,7 @@ async function pollComment(env: SmokeEnv, step: string, commentId: string): Prom
 
 async function stepInstagramDepthExceeded(env: SmokeEnv): Promise<void> {
   const step = '5 instagram depth';
-  const topLevelId = await stepConversation(env, env.SMOKE_INSTAGRAM_POST_ID);
+  const topLevelId = await stepConversation(env, step, env.SMOKE_INSTAGRAM_POST_ID);
   const repliesResponse = await callApi(env, 'GET', `/v1/comments/${topLevelId}/replies`);
   const existingReply = (repliesResponse.body as { items: CommentRecord[] } | null)?.items[0];
   if (repliesResponse.status !== 200 || existingReply === undefined) {
@@ -209,7 +226,7 @@ async function main(): Promise<void> {
 
   await stepPlatforms(env);
 
-  const topLevelId = await stepConversation(env, env.SMOKE_BLUESKY_POST_ID);
+  const topLevelId = await stepConversation(env, '2 conversation', env.SMOKE_BLUESKY_POST_ID);
   const replyId = await stepCreateReply(env, '3 create reply', topLevelId);
   await pollComment(env, '4 poll posted', replyId);
 
