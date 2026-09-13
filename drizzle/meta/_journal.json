@@ -29,6 +29,13 @@
       "when": 1789314324914,
       "tag": "0003_great_power_man",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789322001144,
+      "tag": "0004_dapper_mulholland_black",
+      "breakpoints": true
     }
   ]
 }

@@ -108,6 +108,24 @@ export interface ListByAccountFilters {
   readonly isOwn?: boolean;
 }
 
+/**
+ * Filters for the flat `GET /v1/comments` listing (D31), on top of the `workspaceId` scope every
+ * `list` call carries regardless. Every key is optional and, when the filter is absent, omitted
+ * rather than set to `undefined` — `exactOptionalPropertyTypes` treats `{ x: undefined }` and `{}`
+ * as different types, and {@link selectionPredicate} relies on that to decide which conditions to
+ * `AND` in.
+ */
+export interface CommentSelection {
+  readonly postId?: string;
+  readonly parentCommentId?: string;
+  readonly accountId?: string;
+  readonly platforms?: readonly string[];
+  readonly topLevelOnly?: boolean;
+  readonly isOwn?: boolean;
+  readonly since?: Date;
+  readonly until?: Date;
+}
+
 /** `comment_sync_targets` / `comment_sync_jobs` for one post, as reported in a page's `sync` block. */
 export interface SyncStatus {
   readonly lastSyncedAt: Date | null;
@@ -175,6 +193,17 @@ export interface CommentRepository {
     workspaceId: WorkspaceId,
     socialAccountId: string,
     filters: ListByAccountFilters,
+    pagination: ListPagination,
+  ): Promise<ListResult>;
+  /**
+   * The flat `GET /v1/comments` listing (D31), driving `comments_workspace_idx` (`workspace_id,
+   * occurred_at DESC, id DESC`) via {@link selectionPredicate}. Replaces `listTopLevelByPost`,
+   * `listRepliesByParent` and `listByAccount` for callers migrated to the flat route; those three
+   * stay in place until every caller has moved.
+   */
+  list(
+    workspaceId: WorkspaceId,
+    selection: CommentSelection,
     pagination: ListPagination,
   ): Promise<ListResult>;
   getById(workspaceId: WorkspaceId, commentId: string): Promise<CommentRecord | null>;
@@ -379,6 +408,33 @@ function listRepliesByParent(
     ) as SQL,
     pagination,
   );
+}
+
+/**
+ * The `AND`-of-present-conditions predicate for the flat `GET /v1/comments` listing (D31). Starts
+ * from the workspace scope every repository call carries (D20) and adds one condition per present
+ * `selection` key — this phase wires the workspace scope only; a later task extends the `if`
+ * ladder below with the remaining eight `CommentSelection` keys, each its own addition here rather
+ * than a rewrite of this function.
+ *
+ * No branch here picks an index or a query shape — Postgres's planner does that from the resulting
+ * predicate against `comments_workspace_idx` and the other four comment indexes.
+ */
+function selectionPredicate(workspaceId: WorkspaceId, selection: CommentSelection): SQL {
+  const conditions: SQL[] = [eq(comments.workspaceId, workspaceId)];
+  // Unused until the follow-up task adds the remaining eight conditions.
+  void selection;
+
+  return and(...conditions) as SQL;
+}
+
+function list(
+  db: NodePgDatabase,
+  workspaceId: WorkspaceId,
+  selection: CommentSelection,
+  pagination: ListPagination,
+): Promise<ListResult> {
+  return listByPredicate(db, selectionPredicate(workspaceId, selection), pagination);
 }
 
 function listByAccount(
@@ -728,6 +784,7 @@ export function createCommentRepository(db: NodePgDatabase): CommentRepository {
       listRepliesByParent(db, workspaceId, parentCommentId, pagination),
     listByAccount: (workspaceId, socialAccountId, filters, pagination) =>
       listByAccount(db, workspaceId, socialAccountId, filters, pagination),
+    list: (workspaceId, selection, pagination) => list(db, workspaceId, selection, pagination),
     getById: (workspaceId, commentId) => getById(db, workspaceId, commentId),
     getSyncStatus: (workspaceId, postId) => getSyncStatus(db, workspaceId, postId),
     findByIdempotencyKey: (workspaceId, idempotencyKey) =>

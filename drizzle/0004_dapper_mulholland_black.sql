@@ -1,0 +1,1 @@
+CREATE INDEX "comments_workspace_idx" ON "comments" USING btree ("workspace_id","occurred_at" DESC NULLS LAST,"id" DESC NULLS LAST);

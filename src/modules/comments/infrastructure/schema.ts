@@ -135,6 +135,8 @@ export const comments = pgTable(
     index('comments_stuck_work_idx')
       .on(table.status, table.lastAttemptStartedAt)
       .where(sql`${table.status} in ('queued', 'processing')`),
+    // The flat GET /v1/comments listing, both scan directions (D31).
+    index('comments_workspace_idx').on(table.workspaceId, table.occurredAt.desc(), table.id.desc()),
   ],
 );
 
