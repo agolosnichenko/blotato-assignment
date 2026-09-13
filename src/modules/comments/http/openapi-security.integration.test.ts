@@ -69,11 +69,12 @@ function splitMethods(method: string | string[]): readonly string[] {
 
 /**
  * Registers the collector before `app.ready()` runs Fastify's avvio boot queue, so it sees every
- * route registered through `app.register()` — which is every route in this app (T035's fix to
- * `registerHealthRoutes` in `api.ts` moved `/healthz`/`/readyz` into that category too, so
- * `@fastify/swagger`'s own `onRoute` hook, itself attached only once its `.register()`'d plugin
- * body runs, sees them as well). See `api.ts`'s comment on `registerHealthRoutes` for why a bare
- * `app.get()` call would be invisible to a hook attached this way.
+ * route registered through `app.register()` — which is every route in this app: T035 moved
+ * `/healthz`/`/readyz` into that category (`registerHealthRoutes`), and fix round 2 did the same
+ * for `/openapi.json` (`registerOpenApiDocRoute`), closing the last route that was still a bare
+ * `app.get()` call and therefore invisible to this collector regardless of `hide`. See `api.ts`'s
+ * comment on `registerOpenApiDocRoute` for why a bare `app.get()` call is invisible to a hook
+ * attached this way, should a future route repeat the mistake.
  */
 function collectLiveRoutes(app: Api): readonly LiveRoute[] {
   const collected: LiveRoute[] = [];

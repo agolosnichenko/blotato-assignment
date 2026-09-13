@@ -164,18 +164,19 @@ const transformWithPublicRoutes: SwaggerTransform = (input) => {
 /**
  * Registers `@fastify/swagger` + `@fastify/swagger-ui` at `/docs`, driven by the Zod schemas
  * routes declare via `ZodTypeProvider` (T036, R-03) — one schema object serves request
- * validation, static types and this document. `/openapi.json` is a plain route rather than
- * swagger-ui's own `/docs/json`, to match the path spec.md §6.1 documents.
+ * validation, static types and this document.
  *
  * The `apiKey` security scheme (T035, R-09, D31) mirrors what `auth.ts`'s `onRequest` hook
  * already enforces: applied globally (`security: [{ apiKey: [] }]`) with per-operation
  * exemptions, never the inverse — a route added without thought is published as authenticated,
  * the same way the hook itself fails closed for a route added without being exempted.
+ *
+ * `/openapi.json` itself is registered separately, by {@link registerOpenApiDocRoute} — see that
+ * function's doc comment for why it must not be a bare route defined here.
  */
 function registerDocs(app: Api): void {
   // `.register()` queues the plugin for Fastify's own boot sequence (resolved by `.ready()`/
-  // `.listen()`), so it is not awaited here — the route below only calls `app.swagger()` inside a
-  // handler, by which point boot has already completed.
+  // `.listen()`), so it is not awaited here.
   app.register(fastifySwagger, {
     openapi: {
       info: { title: 'Blotato Comments API', version: '0.1.0' },
@@ -189,7 +190,34 @@ function registerDocs(app: Api): void {
     transform: transformWithPublicRoutes,
   });
   app.register(fastifySwaggerUi, { routePrefix: '/docs' });
-  app.get('/openapi.json', { schema: { hide: true } }, () => app.swagger());
+}
+
+/**
+ * Registers `GET /openapi.json` (spec.md §6.1 — a plain route, not swagger-ui's own `/docs/json`),
+ * the same category of fix `registerHealthRoutes` (T035) applied to `/healthz`/`/readyz` (fix
+ * round 2): registered through `app.register()`, deferred to avvio's boot queue, rather than as a
+ * bare `app.get()` call on `app` directly. A bare call fires synchronously — before `registerDocs`'s
+ * own `fastifySwagger` plugin has even started its deferred boot, let alone before
+ * `registerRateLimit`'s `onRoute` hook exists — so the route would vanish from every tool that
+ * observes routes via `onRoute` (this repository's own OpenAPI-security test harness included,
+ * `openapi-security.integration.test.ts`'s `collectLiveRoutes`) while `schema: { hide: true }`
+ * still correctly keeps it out of the *published document* either way (`@fastify/swagger` reads
+ * `hide` off the final route table when `app.swagger()` is called, not off `onRoute` events, so
+ * that guarantee never depended on registration timing).
+ *
+ * Called last in {@link buildApi}, after {@link registerRateLimit}, so that hook has already
+ * finished wiring `onRoute` up by the time this route is defined — same ordering
+ * `registerHealthRoutes` relies on, and the same `allowList` coupling: `/openapi.json` is
+ * `published: false` in {@link PUBLIC_ROUTES}, so the auth hook never sets `apiKeyId` for it, and
+ * `registerRateLimit`'s `allowList: (request) => request.apiKeyId === ''` exempts it from rate
+ * limiting the same way it exempts `/healthz`/`/readyz` — see that function's `allowList` line for
+ * the other half of this coupling.
+ */
+function registerOpenApiDocRoute(app: Api): void {
+  app.register((instance, _opts, done) => {
+    instance.get('/openapi.json', { schema: { hide: true } }, () => instance.swagger());
+    done();
+  });
 }
 
 const READ_METHODS = new Set(['GET', 'HEAD']);
@@ -242,8 +270,9 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
     enableDraftSpec: true,
     keyGenerator: (request) =>
       `${isReadRequest(request.method) ? 'read' : 'write'}:${request.apiKeyId}`,
-    // `registerHealthRoutes`'s /healthz and /readyz rely on this exact predicate to stay
-    // unlimited — see that function's doc comment for the coupling.
+    // `registerHealthRoutes`'s /healthz and /readyz, and `registerOpenApiDocRoute`'s
+    // /openapi.json, all rely on this exact predicate to stay unlimited — see those functions'
+    // doc comments for the coupling.
     allowList: (request) => request.apiKeyId === '',
     max: (request) => {
       const envDefault = isReadRequest(request.method)
@@ -391,6 +420,7 @@ export function buildApi(deps: ApiDependencies) {
   registerCommentRoutes(app, deps, logger);
   registerWebhookRoutes(app, deps, logger);
   registerHealthRoutes(app, deps.database, deps.redis);
+  registerOpenApiDocRoute(app);
 
   return app;
 }
