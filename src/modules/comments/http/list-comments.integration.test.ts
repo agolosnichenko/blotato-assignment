@@ -959,6 +959,82 @@ function registerSinceAfterUntilTest(getHarness: () => Harness): void {
   });
 }
 
+/**
+ * M-5: `since`/`until` are documented as inclusive at both ends (contracts/rest-api.md), and
+ * `comment-repository.ts` implements that with `gte`/`lte`. Before this test, the only time-range
+ * coverage was {@link registerSinceAfterUntilTest}'s empty-page case, which stays green whether
+ * the repository compares with `gte`/`lte` or `gt`/`lt` — a boundary comment is included either
+ * way it is missing there. This asserts a comment exactly on each boundary is returned.
+ */
+function registerInclusiveBoundsTest(getHarness: () => Harness): void {
+  it('includes comments exactly on the since and until boundaries', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const since = '2026-04-01T00:00:00.000Z';
+    const until = '2026-04-03T00:00:00.000Z';
+    const onSinceId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(since),
+    });
+    const onUntilId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(until),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, { since, until });
+
+    expect(response.statusCode).toBe(200);
+    const ids = (response.body as unknown as CommentsPage).items.map((item) => item.id);
+    expect(ids).toEqual(expect.arrayContaining([onSinceId, onUntilId]));
+  });
+}
+
+/**
+ * M-4: `contracts/rest-api.md` promises plain ISO 8601 for `since`/`until`, which includes a
+ * numeric timezone offset, not only `Z` — `listCommentsQuerySchema` used to reject one with a
+ * `400` (`z.iso.datetime()` defaults to `Z`-only). Asserts an offset-bearing `since` both parses
+ * (no `400`) and filters correctly against a UTC-stamped row, so the fix is in the comparison, not
+ * only in what the validator accepts.
+ */
+function registerTimezoneOffsetTest(getHarness: () => Harness): void {
+  it('accepts a since with a numeric timezone offset and filters by it', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    // 2026-04-01T00:00:00+02:00 is 2026-03-31T22:00:00Z.
+    const beforeId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date('2026-03-31T21:00:00.000Z'),
+    });
+    const afterId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date('2026-03-31T23:00:00.000Z'),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, { since: '2026-04-01T00:00:00+02:00' });
+
+    expect(response.statusCode).toBe(200);
+    const ids = (response.body as unknown as CommentsPage).items.map((item) => item.id);
+    expect(ids).toEqual([afterId]);
+    expect(ids).not.toContain(beforeId);
+  });
+}
+
 /** T020: `isOwn=false` is honoured as `false`, not coerced to `true` — the negative case both an
  * absent filter and a broken coercion would pass. */
 function registerIsOwnFalseHonouredTest(getHarness: () => Harness): void {
@@ -1123,6 +1199,8 @@ describe('GET /v1/comments', () => {
     registerTopLevelOnlyWithParentIntersectionTest(() => harness);
     registerPostIdWithMismatchedParentPostTest(() => harness);
     registerSinceAfterUntilTest(() => harness);
+    registerInclusiveBoundsTest(() => harness);
+    registerTimezoneOffsetTest(() => harness);
     registerIsOwnFalseHonouredTest(() => harness);
     registerNonPostedStatusesVisibleTest(() => harness);
     registerSyncPresentForPostIdTest(() => harness);

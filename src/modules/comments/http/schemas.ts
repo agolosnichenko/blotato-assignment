@@ -71,8 +71,10 @@ export const listCommentsQuerySchema = paginationQuerySchema('desc').extend({
   parentCommentId: z.uuid().optional(),
   accountId: z.uuid().optional(),
   platform: z.preprocess(toPlatformArray, z.array(z.enum(PLATFORM_KEYS))).optional(),
-  since: z.iso.datetime().optional(),
-  until: z.iso.datetime().optional(),
+  // `offset: true` accepts a numeric timezone offset (`+02:00`), not only `Z` — plain ISO 8601,
+  // as contracts/rest-api.md promises for `since`/`until` (M-4); the default rejected an offset.
+  since: z.iso.datetime({ offset: true }).optional(),
+  until: z.iso.datetime({ offset: true }).optional(),
   topLevelOnly: booleanQueryParam(),
   isOwn: booleanQueryParam(),
 });
@@ -117,10 +119,10 @@ export const commentSchema = z.object({
 export type CommentResponse = z.infer<typeof commentSchema>;
 
 /**
- * `sync` (T014) is optional so the serialized body can **omit the key entirely** for a page that
- * has no single post to report freshness for — the flat `GET /v1/comments` listing, absent since
- * a collection spanning every post has no one `lastSyncedAt`/`activeJobId` to report. Port
- * resolution that would populate it for a `postId`-filtered selection arrives in a later phase.
+ * `sync` (T014) is optional so the serialized body can **omit the key entirely** for a page with
+ * no single post to report freshness for — an unfiltered or multi-post `GET /v1/comments` listing
+ * omits it, since no one `lastSyncedAt`/`activeJobId` describes more than one post, but a
+ * `postId`-filtered selection gets it populated (`list-comments.ts` resolves the sync port then).
  */
 export const commentsPageSchema = z.object({
   items: z.array(commentSchema),

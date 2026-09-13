@@ -288,7 +288,7 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
 }
 
 /**
- * Registers the four read routes, the two write routes, the two sync routes and
+ * Registers the two read routes, the two write routes, the two sync routes and
  * `GET /v1/platforms` (T049, T069, T090, T098).
  */
 function registerCommentRoutes(

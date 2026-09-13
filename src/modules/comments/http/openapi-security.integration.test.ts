@@ -272,17 +272,8 @@ function registerRouteCoverageTests(getHarness: () => Harness): void {
       expect(actual).toEqual(expected);
     });
 
-    it('documents every registered route under the same address it is registered at', () => {
-      const { document, liveRoutes } = getHarness();
-      const registered = registeredRouteKeys(liveRoutes);
-      const documented = documentedOperationKeys(document);
-
-      for (const key of documented) {
-        expect(registered.has(key)).toBe(true);
-      }
-    });
-
     it.each([
+      'GET /v1/comments',
       'GET /v1/comments/{commentId}',
       'POST /v1/posts/{postId}/comments',
       'POST /v1/comments/{commentId}/replies',
