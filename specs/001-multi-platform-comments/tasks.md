@@ -559,13 +559,13 @@ platform side and verify a complete refresh marks it deleted.
       loading truncated branches, normalizing AT URIs and `cid`, deciding "own" by matching the
       author DID, and surfacing a `notFoundPost` marker as an **explicit tombstone** that may mark
       that comment deleted on its own — while absence still requires a complete walk (§8.3, FR-019)
-- [ ] T084 [US3] **Facebook half done; Instagram half blocked by S2.** Implement `listComments` and `fetchComment` in
+- [X] T084 [US3] Implement `listComments` and `fetchComment` in
       `src/platforms/meta/instagram-adapter.ts` (`GET /{media-id}/comments` with the `replies`
       expansion) and `src/platforms/meta/facebook-adapter.ts`
       (`GET /{post-id}/comments?filter=stream`), paging to exhaustion and deciding "own" by matching
-      `from.id` against the account (§8.2). *(The Instagram half is blocked by T070 — S2 is the spike
-      that establishes whether those reads return data at all; the Facebook half is not gated, since
-      S1 concerns webhook delivery rather than reads)*
+      `from.id` against the account (§8.2). *(S2 ran against a real Meta App (§17); the Instagram half
+      is built against the recorded `facebook_login` fixture, not the Graph docs. The Facebook half was
+      already done and is unchanged.)*
 - [X] T085 [US3] Create `src/modules/comments/infrastructure/sync-target-repository.ts`:
       create-or-get a target from the `PostPublished` port and from the first ingested comment on an
       external post — **the only way an external post becomes tracked** — plus the age-band
@@ -655,10 +655,13 @@ reason the registry gives.
       `unsupportedReason` — and **the depth, text limit and unit it reports for a platform are the
       same values the write path enforces**, so the registry cannot drift from behaviour (FR-031,
       SC-009)
-- [ ] T097 [P] [US5] Create `src/platforms/meta/instagram-adapter.integration.test.ts` (V9): one
-      parameterized test body run against fixtures for **both** login variants — `facebook_login` on
+- [X] T097 [P] [US5] Create `src/platforms/meta/instagram-adapter.integration.test.ts` (V9): one
+      parameterized test body run against **both** login variants — `facebook_login` on
       `graph.facebook.com` and `instagram_login` on `graph.instagram.com` — asserting identical
-      normalized comments, identical publish results and identical "own" detection (D28, A17)
+      normalized comments, identical publish results and identical "own" detection (D28, A17).
+      *(Per spec.md §18, both arms replay the same recorded `facebook_login` body — the
+      `instagram_login` fixture was never attempted (§17 S2) — so the test proves variant
+      independence without asserting a response nobody has observed.)*
 
 ### Implementation for User Story 5
 
