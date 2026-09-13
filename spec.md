@@ -677,16 +677,42 @@ Infrastructure:
     login variants cannot coexist in one app) and its own OAuth flow. Not attempted is deliberately
     recorded as distinct from "returned nothing": the latter is a claim about Meta's behaviour under
     Standard Access, and this spike has not established it.
-- **S6 (unplanned, 2026-09-13). Reading Facebook Page comments needs a permission Meta will not
-  grant.** Running the walkthrough against the deployment with real accounts, the Facebook sync job
-  failed with `(#10) This endpoint requires the 'pages_read_user_content' permission or the 'Page
-  Public Content Access' feature`, while Meta's own login dialog refuses that permission with
-  `Invalid Scopes: pages_read_user_content` — it is no longer grantable without App Review, and the
-  new Business Login configuration flow cannot request it at all. Instagram and Bluesky ran the same
-  path end to end (ingest, publish, depth check), so the adapter and the sync walk are exercised;
-  what Facebook lacks is an approval, which is the shape of constraint D23 already records. No code
-  changes: the failure surfaced as a typed platform rejection with the platform's own message, which
-  is what §6.3 asks of it.
+- **S6 (unplanned, 2026-09-13). Facebook Page comments: an access-model dead end that was not one.**
+  Running the walkthrough against the deployment, the Facebook sync failed with `(#10) This endpoint
+  requires the 'pages_read_user_content' permission or the 'Page Public Content Access' feature`, and
+  publishing failed with `(#200) You do not have sufficient permissions`. Meta's login dialog
+  answered `Invalid Scopes: pages_read_user_content` when that permission was requested.
+  - **First conclusion, recorded here and wrong: "no longer grantable without App Review."** It is
+    kept rather than edited away because the reasoning error is the useful part. `Invalid Scopes`
+    was read as a statement about *authorization* — Meta refusing to grant — when it is a statement
+    about *existence*: under the use-case model a permission is only requestable once it has been
+    added to one of the app's use cases, and separately enabled on the Facebook Login for Business
+    configuration the dialog resolves. Unadded, it reports as invalid, which is indistinguishable
+    from denied by message alone. Three dialog attempts were spent before the difference was noticed.
+  - **What the token actually showed.** `debug_token` on the Page token: type `PAGE`, never expiring,
+    granular `pages_read_engagement`, `pages_show_list`, `pages_manage_metadata`, each targeted at
+    the Page — a correct token missing exactly two permissions. Reading the post object succeeded
+    while every comment read failed, which located the gap on the comments edge rather than on the
+    token, the object id, or the host.
+  - **The fix (2026-09-13), no App Review and no Business Verification.** `pages_read_user_content`
+    and `pages_manage_engagement` are optional permissions of the *Manage everything on your Page*
+    use case, and Standard Access covers them for a Page the app admin owns. Two dashboard edits in
+    order — add them to the use case, then enable them on the Login for Business configuration —
+    then a fresh token from the Graph API Explorer, exchanged for a long-lived user token and a
+    never-expiring Page token.
+  - **Result.** `GET /{post-id}/comments` returns the Page post's comments with
+    `paging.cursors.after` and no `paging.next` — the terminal-page shape the adapter has to read as
+    "walk complete", exercised for real for the first time. `POST /{post-id}/comments` publishes.
+    Through the deployment: sync `fetched: 3, inserted: 3`, a published reply
+    (`122093382351485339_936214829041858`), and `422 REPLY_DEPTH_EXCEEDED` on the second level.
+  - **One shape difference worth keeping.** Facebook's `from` carries `{id, name}` and no username;
+    Instagram's carries `{id, username}` and no name (S2). Two platforms from one vendor disagree on
+    the author field, so `author_username` is null for Facebook and `author_display_name` is null for
+    Instagram — both normalizations are load-bearing, neither is defensive.
+  - **No code changed.** The adapter, the sync walk and the error typing were correct throughout; the
+    failure had surfaced as a typed platform rejection carrying the platform's own message, which is
+    what §6.3 asks of it. What was wrong was a document, and D23's remaining consequence is narrower
+    than it looked: Standard Access blocks *webhook delivery* (S1), not Page reads.
 - **S3. Railway Redis.** Confirm that `maxmemory-policy noeviction` can be set and persistence enabled;
   otherwise run Redis from a Docker image with a volume.
   - **Result (2026-09-13), half negative.** Against the deployed managed Redis,

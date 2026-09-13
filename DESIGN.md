@@ -546,10 +546,15 @@ published to Instagram (`18112975520094858`) and two to Bluesky, and the reply-d
 `422 REPLY_DEPTH_EXCEEDED` on Instagram while Bluesky accepted the same shape (D12). README has the
 step-by-step result.
 
-Facebook is the exception, and not because of this code: its sync fails with `(#10) This endpoint
-requires the 'pages_read_user_content' permission`, while Meta's login dialog rejects that
-permission as invalid because granting it needs App Review. Same adapter, same sync path, same
-typed errors as the two platforms that work — the gap is a Meta approval (D23).
+Facebook now runs there too: its sync ingested the Page post's three comments, a reply published
+(`122093382351485339_936214829041858`) and the second level came back `422`. It took a detour worth
+recording, because the first diagnosis was wrong. The sync failed with `(#10) This endpoint requires
+the 'pages_read_user_content' permission`, and Meta's login dialog answered `Invalid Scopes` for that
+same permission — which reads like "App Review required" and is not. Under Meta's use-case model a
+permission has to be added to the app's use case *and* to the Facebook Login for Business
+configuration before it exists for the dialog at all; unadded, it reports as invalid rather than as
+unauthorized. Both edits are Standard Access for a Page the app admin owns, so the fix was two
+dashboard clicks and a fresh token — no App Review, no Business Verification. §17 S6 records it.
 
 **Two honest gaps in what's running today, not design decisions:**
 

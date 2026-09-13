@@ -120,7 +120,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "blotato-api-key: $API_KEY" \
 | --- | --- | --- |
 | Instagram | [@blotato_demo](https://www.instagram.com/blotato_demo/) | [instagram.com/p/DdNhTg6Rylh](https://www.instagram.com/p/DdNhTg6Rylh/) |
 | Bluesky | [@blotato-demo.bsky.social](https://bsky.app/profile/blotato-demo.bsky.social) | [the demo post](https://bsky.app/profile/blotato-demo.bsky.social/post/3mvfgblffyv2p) |
-| Facebook | [Blotato-demo](https://www.facebook.com/1423986634121660) | post `1423986634121660_122093382351485339` (read-blocked, see below) |
+| Facebook | [Blotato-demo](https://www.facebook.com/1423986634121660) | [the demo post](https://www.facebook.com/1423986634121660/posts/122093382351485339) |
 
 Comments posted through the API appear under those posts within seconds of the status turning
 `posted`. They are visible to anyone — no login needed for Instagram or Bluesky.
@@ -137,17 +137,14 @@ The whole SC-012 walkthrough has been run against that URL with those accounts, 
 | poll to `posted` | Instagram comment `18112975520094858` — posted on the platform |
 | reply to a reply (Instagram) | `422 REPLY_DEPTH_EXCEEDED`, `maxReplyDepth 1` (D12) |
 | reply to a reply (Bluesky) | `202` → `posted`, `at://…/3mvfhkkaki72x` |
-| `POST …/comments/sync` | Instagram `fetched: 3, inserted: 3`; Bluesky `succeeded` |
+| `POST …/comments/sync` | Instagram `fetched: 3, inserted: 3`; Facebook `fetched: 3, inserted: 3`; Bluesky `succeeded` |
+| Facebook end to end | ingested two visitor comments and its own, published reply `122093382351485339_936214829041858`, and refused the second level with `422` |
 
 Also verified there: `/readyz` reports Postgres and Redis reachable, a request without a key is
 `401`, and another workspace's post is `404` rather than `403` (D20).
 
-**Facebook is read-blocked by Meta's access model, not by this code.** Its sync job fails with
-`(#10) This endpoint requires the 'pages_read_user_content' permission or the 'Page Public Content
-Access' feature` — and Meta's own login dialog rejects that permission as invalid
-(`Invalid Scopes: pages_read_user_content`), because granting it needs App Review. The adapter,
-the sync path and the error handling are the same code Instagram and Bluesky run; what is missing
-is a Meta approval, which is exactly what D23 anticipates.
+All three comment-capable platforms run live: Instagram, Facebook and Bluesky each ingest real
+comments and publish real ones, through the same use cases and the same adapter port.
 
 ## Curl walkthrough (local run, with response bodies)
 
