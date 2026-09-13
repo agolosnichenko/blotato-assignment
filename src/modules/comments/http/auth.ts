@@ -82,9 +82,22 @@ function verifySecret(secret: string, keyHash: string): boolean {
  */
 const DUMMY_KEY_HASH = hashSecret('blt-dummy-key-hash-used-when-no-record-is-found');
 
+/**
+ * `published` answers a question the OpenAPI document (R-09, D31) cannot answer for itself: does
+ * this exemption correspond to an operation the document actually contains? `matches` is applied
+ * both to real request paths, by this module's own hook, and — in `api.ts`'s `transform` wrapper
+ * — to OpenAPI path *templates*. Every current entry is a literal path, so the two coincide; a
+ * future exempt route carrying a path parameter must write its entry to match `/v1/x/:id`, not a
+ * concrete id, or the template comparison silently stops matching.
+ *
+ * The field is required, not defaulted, so a new entry cannot be added without answering it —
+ * that requirement is what keeps this array and the document's `security: []` annotations one
+ * list instead of two hand-kept copies (FR-012).
+ */
 interface PublicRoute {
   readonly method: string;
   readonly matches: (path: string) => boolean;
+  readonly published: boolean;
 }
 
 /**
@@ -93,18 +106,27 @@ interface PublicRoute {
  * checks, not a regex — widening it is meant to be a reviewable, one-line diff, and the `/docs`
  * check is anchored to the whole `/docs` path segment so it can never accidentally widen to match
  * a route under `/v1` that happens to start with the same characters.
+ *
+ * `GET /healthz` and `GET /readyz` are the only two entries the OpenAPI document contains as
+ * operations, so they are the only two marked `published`; the other four are registered with
+ * `schema: { hide: true }` or served entirely outside `fastify-type-provider-zod` (the `/docs`
+ * assets), so no `transform` call ever sees them (see `api.ts`'s `registerDocs`).
  */
-const PUBLIC_ROUTES: readonly PublicRoute[] = [
-  { method: 'GET', matches: (path) => path === '/healthz' },
-  { method: 'GET', matches: (path) => path === '/readyz' },
-  { method: 'GET', matches: (path) => path === '/openapi.json' },
+export const PUBLIC_ROUTES: readonly PublicRoute[] = [
+  { method: 'GET', matches: (path) => path === '/healthz', published: true },
+  { method: 'GET', matches: (path) => path === '/readyz', published: true },
+  { method: 'GET', matches: (path) => path === '/openapi.json', published: false },
   // Swagger UI serves several asset paths beneath /docs (the page itself, /docs/json, /docs/static/*).
-  { method: 'GET', matches: (path) => path === '/docs' || path.startsWith('/docs/') },
-  { method: 'GET', matches: (path) => path === '/webhooks/meta' },
-  { method: 'POST', matches: (path) => path === '/webhooks/meta' },
+  {
+    method: 'GET',
+    matches: (path) => path === '/docs' || path.startsWith('/docs/'),
+    published: false,
+  },
+  { method: 'GET', matches: (path) => path === '/webhooks/meta', published: false },
+  { method: 'POST', matches: (path) => path === '/webhooks/meta', published: false },
 ];
 
-function isPublicRoute(method: string, path: string): boolean {
+export function isPublicRoute(method: string, path: string): boolean {
   return PUBLIC_ROUTES.some((route) => route.method === method && route.matches(path));
 }
 
