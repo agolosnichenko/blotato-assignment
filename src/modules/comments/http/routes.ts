@@ -120,7 +120,7 @@ function toSelection(query: ListCommentsFilters): CommentSelection {
     ...(query.parentCommentId !== undefined && { parentCommentId: query.parentCommentId }),
     ...(query.accountId !== undefined && { accountId: query.accountId }),
     ...(query.platform !== undefined && { platforms: query.platform }),
-    ...(query.topLevelOnly !== undefined && { topLevelOnly: query.topLevelOnly }),
+    ...(query.topLevelOnly === true && { topLevelOnly: true as const }),
     ...(query.isOwn !== undefined && { isOwn: query.isOwn }),
     ...(query.since !== undefined && { since: new Date(query.since) }),
     ...(query.until !== undefined && { until: new Date(query.until) }),

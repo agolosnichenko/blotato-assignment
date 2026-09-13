@@ -45,6 +45,7 @@ import {
   commentSyncJobs,
   commentSyncTargets,
 } from '#src/modules/comments/infrastructure/schema.ts';
+import type { Platform } from '#src/platforms/types.ts';
 import type { KeysetCursor, SortOrder } from '#src/shared/pagination.ts';
 import type { WorkspaceId } from '#src/shared/ids.ts';
 
@@ -95,8 +96,15 @@ export interface CommentSelection {
   readonly postId?: string;
   readonly parentCommentId?: string;
   readonly accountId?: string;
-  readonly platforms?: readonly string[];
-  readonly topLevelOnly?: boolean;
+  /** Registry keys, not free strings — the HTTP layer has already validated them against it. */
+  readonly platforms?: readonly Platform[];
+  /**
+   * Present only to select top-level comments. `topLevelOnly=false` is "no filter", which this
+   * type spells as absence rather than as a second value meaning the same thing — otherwise
+   * {@link selectionPredicate} has to ignore one of two representations, the asymmetry that made
+   * the neighbouring `isOwn` (where `false` genuinely filters) read as an inconsistency.
+   */
+  readonly topLevelOnly?: true;
   readonly isOwn?: boolean;
   readonly since?: Date;
   readonly until?: Date;
@@ -382,7 +390,7 @@ export function selectionPredicate(workspaceId: WorkspaceId, selection: CommentS
   if (selection.platforms !== undefined) {
     conditions.push(inArray(comments.platform, selection.platforms));
   }
-  if (selection.topLevelOnly === true) {
+  if (selection.topLevelOnly !== undefined) {
     conditions.push(isNull(comments.parentCommentId));
   }
   if (selection.isOwn !== undefined) {

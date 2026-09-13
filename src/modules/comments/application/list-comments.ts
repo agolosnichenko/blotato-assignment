@@ -17,6 +17,7 @@ import type {
   CommentRecord,
   CommentRepository,
   CommentSelection,
+  SyncStatus,
 } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { Accounts, Posts } from '#src/modules/platform-core/ports.ts';
 import { ApiError } from '#src/shared/errors.ts';
@@ -40,7 +41,7 @@ export interface ListCommentsInput {
 export interface ListCommentsResult {
   readonly items: readonly CommentRecord[];
   readonly nextCursor: KeysetCursor | null;
-  readonly sync?: { readonly lastSyncedAt: Date | null; readonly activeJobId: string | null };
+  readonly sync?: SyncStatus;
 }
 
 /** Resolves `postId` through the `Posts` port; `404 NOT_FOUND` outside this workspace (D20). */
