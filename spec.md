@@ -1074,3 +1074,28 @@ implementation.
     A16 rather than changing it, and so carries no decision of its own. Which exempt routes are
     published is a property of how they are registered, not a decision: the webhook operations and
     `/openapi.json` are `hide: true`, and `/docs` is plugin-served.
+- **An unrecognized query parameter on `GET /v1/comments` is a `400` (clarifies D31, §6.3).** D31
+  states that filters intersect and that an unsatisfiable *combination* is an empty `200`. It said
+  nothing about a parameter name the schema does not define, and a Zod object strips one by default —
+  so `?post_id=…` in snake_case, or `?platform[]=…` in the bracket-array convention, answered `200`
+  with the whole workspace's history. The filter the client asked for was never applied, and no field
+  of the response says so; on a read where every parameter narrows the result, that is
+  indistinguishable from a wrong answer. The query schema is strict: an unrecognized name is
+  `400 VALIDATION_ERROR`. A combination of *recognized* filters still produces an empty page, so this
+  narrows nothing D31 promised. It revises no decision — it answers a question D31 left open.
+- **Both `order` values are indexed only while neither the index nor the `ORDER BY` names a NULL
+  placement (implements D27, §5.2).** D27's "B-tree indexes are readable in both directions" is true
+  of the index and false of a query that disagrees with it about where nulls sort: a Postgres pathkey
+  includes NULL placement, and the planner does not use a column's `NOT NULL` to match one. Naming
+  `NULLS LAST` on the ordering clause cost `order=asc` its index on all three `DESC` listing indexes,
+  and cost a `parentCommentId` selection — whose default is `desc` — `comments_replies_idx`; each
+  planned a full `Sort` of the selection. Both sides now stay at Postgres's default for the direction
+  (migration `0005`), and `benchmark.integration.test.ts` asserts the whole selection × direction
+  matrix. This is an implementation fact about D27, not a change to it.
+- **`comments.occurred_at` is `timestamptz(3)` (implements D27, data-model.md §2).** The keyset cursor
+  encodes `toISOString()`, which is millisecond-precision, while the column accepted microseconds.
+  A stored value the cursor cannot express makes paging lossy in both directions — `desc` skips the
+  rest of that millisecond, `asc` repeats the cursor row — and it is invisible from TypeScript, since
+  the driver parses timestamps into a millisecond-precision `Date`. Every writer passes a JS `Date`,
+  so nothing stored microseconds; pinning the column (migration `0006`) makes that the database's
+  guarantee rather than a convention each new writer must know.
