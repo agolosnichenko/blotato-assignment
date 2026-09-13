@@ -312,8 +312,15 @@ function workspacePredicate(workspaceId: WorkspaceId): SQL {
   return sql`workspace_id = ${workspaceId} AND ${VISIBLE_IN_LIST_SQL}`;
 }
 
-const DESC_ORDER_SQL = sql`occurred_at DESC, id DESC`;
-const ASC_ORDER_SQL = sql`occurred_at ASC, id ASC`;
+/**
+ * `NULLS LAST` explicitly on both, matching `orderByFor` (`comment-repository.ts`) — not the bare
+ * `DESC`/`ASC` `listByPredicate` would get from a naive `ORDER BY`. Postgres defaults `DESC` to
+ * `NULLS FIRST`, which does not match the `NULLS LAST` every `occurred_at`/`id` index in
+ * `schema.ts` carries; without stating it here too, this file would be asserting against a query
+ * `orderByFor` does not actually run.
+ */
+const DESC_ORDER_SQL = sql`occurred_at DESC NULLS LAST, id DESC NULLS LAST`;
+const ASC_ORDER_SQL = sql`occurred_at ASC NULLS LAST, id ASC NULLS LAST`;
 
 /**
  * `EXPLAIN (FORMAT JSON)` on one predicate/order pair, limited the same way `listByPredicate`

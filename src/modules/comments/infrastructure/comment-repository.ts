@@ -34,21 +34,7 @@
 // would duplicate CommentRecord, COMMENT_COLUMNS and the workspace-scoping discipline documented
 // above instead of removing any of it.
 
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gt,
-  gte,
-  inArray,
-  isNull,
-  lte,
-  ne,
-  or,
-  sql,
-  type SQL,
-} from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNull, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { canTransition, type CommentStatus } from '#src/modules/comments/domain/status.ts';
 import type { OutboxTransaction } from '#src/modules/comments/infrastructure/outbox.ts';
@@ -340,10 +326,23 @@ function keysetPredicate(cursor: KeysetCursor | null, order: SortOrder): SQL | u
   return sql`(${comments.occurredAt}, ${comments.id}) ${operator} (${cursor.occurredAt}, ${cursor.id})`;
 }
 
+/**
+ * The `ORDER BY` for one page, matching the `NULLS LAST` every `occurred_at`/`id` index carries
+ * (schema.ts's `.desc()`/`.asc()` on an `IndexedColumn` default to it). drizzle-orm's own
+ * `desc()`/`asc()` query-builder helpers emit a bare `DESC`/`ASC` with no `NULLS` clause, which
+ * Postgres defaults to `NULLS FIRST` for `DESC` — a pathkey none of the `DESC` indexes
+ * (`comments_post_top_level_idx`, `comments_social_account_idx`, `comments_workspace_idx`) supply,
+ * so the planner falls back to an explicit `Sort`, or a full `Seq Scan` once the predicate stops
+ * being selective, instead of an index scan a `LIMIT` can terminate early. `occurred_at`/`id` are
+ * both `NOT NULL`, so no row's position changes — only whether the index can supply the
+ * ordering — but the coupling is stated explicitly here rather than left to two defaults that
+ * happen to agree for `ASC` (which is why `comments_replies_idx` alone was never affected) and
+ * disagree for `DESC`.
+ */
 function orderByFor(order: SortOrder): SQL[] {
   return order === 'desc'
-    ? [desc(comments.occurredAt), desc(comments.id)]
-    : [asc(comments.occurredAt), asc(comments.id)];
+    ? [sql`${comments.occurredAt} DESC NULLS LAST`, sql`${comments.id} DESC NULLS LAST`]
+    : [sql`${comments.occurredAt} ASC NULLS LAST`, sql`${comments.id} ASC NULLS LAST`];
 }
 
 async function listByPredicate(
