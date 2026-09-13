@@ -34,7 +34,7 @@ Single project, repository root: `src/`, `scripts/`, `drizzle/`. Tests are coloc
 
 **Purpose**: the record comes first (Principle I, FR-014).
 
-- [ ] T001 Verify root `spec.md` carries **D31** in §18 and the revised endpoint table in §6.1
+- [X] T001 Verify root `spec.md` carries **D31** in §18 and the revised endpoint table in §6.1
       (three nested read rows removed, `GET /v1/comments` added), and commit that edit **on its own,
       before any source change**, with `per D31` in the commit body — Principle I, FR-014. The
       working tree already holds these edits; this task is to confirm they are complete and land
@@ -51,27 +51,27 @@ Single project, repository root: `src/`, `scripts/`, `drizzle/`. Tests are coloc
 **⚠️ CRITICAL**: US1 and US2 cannot begin until this phase is complete. **US3 does not depend on it**
 and may start immediately after Phase 1.
 
-- [ ] T003 Add `index('comments_workspace_idx').on(table.workspaceId, table.occurredAt.desc(),
+- [X] T003 Add `index('comments_workspace_idx').on(table.workspaceId, table.occurredAt.desc(),
       table.id.desc())` to the `comments` table definition in
       `src/modules/comments/infrastructure/schema.ts`, next to the five existing indexes. Exactly
       `(workspace_id, occurred_at DESC, id DESC)` — the column order the keyset scan needs
       (data-model.md §1). Add no column, no table and no foreign key.
-- [ ] T004 Generate the migration with `pnpm db:generate` and commit the resulting single
+- [X] T004 Generate the migration with `pnpm db:generate` and commit the resulting single
       `CREATE INDEX` file under `drizzle/` plus its `drizzle/meta/` snapshot. Verify the generated
       SQL contains only `CREATE INDEX` — no `DROP`, no `ALTER TABLE ... ADD COLUMN`, no rewrite.
-- [ ] T005 Define the selection value type in
+- [X] T005 Define the selection value type in
       `src/modules/comments/infrastructure/comment-repository.ts`, replacing `ListByAccountFilters`:
       `CommentSelection` with all-optional `postId?: string`, `parentCommentId?: string`,
       `accountId?: string`, `platforms?: readonly string[]`, `topLevelOnly?: boolean`,
       `isOwn?: boolean`, `since?: Date`, `until?: Date`. Each key is **omitted** when the filter is
       absent, never set to `undefined` — `exactOptionalPropertyTypes` is on (plan.md Technical
       Context). `workspaceId` is not a field: it is the method's own first parameter (D20).
-- [ ] T006 Add `list(workspaceId: WorkspaceId, selection: CommentSelection, pagination:
+- [X] T006 Add `list(workspaceId: WorkspaceId, selection: CommentSelection, pagination:
       ListPagination): Promise<ListResult>` to the `CommentRepository` interface in
       `src/modules/comments/infrastructure/comment-repository.ts`. Leave
       `listTopLevelByPost`/`listRepliesByParent`/`listByAccount` in place for now — US2 removes them
       once every caller is gone (data-model.md §4).
-- [ ] T007 Implement a `selectionPredicate(workspaceId, selection): SQL` helper in
+- [X] T007 Implement a `selectionPredicate(workspaceId, selection): SQL` helper in
       `src/modules/comments/infrastructure/comment-repository.ts` that starts from
       `eq(comments.workspaceId, workspaceId)` and `AND`s one condition per **present** key, then
       wire `list` to pass it to the existing `listByPredicate`. In this phase handle the workspace
@@ -96,18 +96,18 @@ forward with the returned cursor walks the whole history without repeating or sk
 
 > Write these first and confirm they fail before implementing T013–T016.
 
-- [ ] T008 [P] [US1] Create `src/modules/comments/http/list-comments.integration.test.ts` covering
+- [X] T008 [P] [US1] Create `src/modules/comments/http/list-comments.integration.test.ts` covering
       quickstart V1: two seeded accounts both appear in one unfiltered page; a third workspace's
       comments never do; the page is ordered newest first; an empty workspace answers
       `200 { items: [], nextCursor: null }` rather than an error.
-- [ ] T009 [P] [US1] In the same file, assert FR-005 as a behaviour: register the `Posts` and
+- [X] T009 [P] [US1] In the same file, assert FR-005 as a behaviour: register the `Posts` and
       `Accounts` ports as spies and assert **neither is called** on an identifier-free request.
-- [ ] T010 [P] [US1] In the same file, assert FR-008 / acceptance 1.4: seed a comment whose `postId`
+- [X] T010 [P] [US1] In the same file, assert FR-008 / acceptance 1.4: seed a comment whose `postId`
       is absent from the platform-core projection **by deleting the projection row**, not by nulling
       the comment's `postId`, and assert the comment is still returned.
-- [ ] T011 [P] [US1] In the same file, assert FR-006's negative half: `'sync' in body === false` for
+- [X] T011 [P] [US1] In the same file, assert FR-006's negative half: `'sync' in body === false` for
       an identifier-free request — absent, not `null` (R-08).
-- [ ] T012 [P] [US1] In the same file, assert SC-003 (quickstart V2): walk a seeded history to
+- [X] T012 [P] [US1] In the same file, assert SC-003 (quickstart V2): walk a seeded history to
       exhaustion at `limit=5`, inserting new comments between pages, and assert the multiset of
       returned ids equals the seeded set — no duplicate, no gap. Run it for `order=desc` and
       `order=asc`. Assert `limit=0`, `limit=101`, a truncated cursor, and a `desc` cursor replayed
@@ -115,25 +115,25 @@ forward with the returned cursor walks the whole history without repeating or sk
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Add `listCommentsQuerySchema` to `src/modules/comments/http/schemas.ts`, built on
+- [X] T013 [US1] Add `listCommentsQuerySchema` to `src/modules/comments/http/schemas.ts`, built on
       `paginationQuerySchema('desc')` — `limit` integer `1..100` default `20`, `cursor` optional
       opaque string, `order` `'asc' | 'desc'` **default `desc` for every selection** (R-06, D31).
       Filters arrive in US2's T021; this task establishes the schema and its default.
-- [ ] T014 [US1] Extend `commentsPageSchema` in `src/modules/comments/http/schemas.ts` with an
+- [X] T014 [US1] Extend `commentsPageSchema` in `src/modules/comments/http/schemas.ts` with an
       **optional** `sync: { lastSyncedAt: string | null, activeJobId: string | null }`, and leave
       `postCommentsPageSchema` in place until US2 removes its last caller. The field must be
       optional in the Zod schema so the serialized body can omit the key entirely (R-08).
-- [ ] T015 [US1] Create `src/modules/comments/application/list-comments.ts`: one use case that takes
+- [X] T015 [US1] Create `src/modules/comments/application/list-comments.ts`: one use case that takes
       `{ workspaceId, selection, limit, cursor, order }`, calls `repository.list` **once**, and
       returns `{ items, nextCursor }`. It contains no branch that chooses a query shape (plan.md
       "list-comments.ts is one use case, not a dispatcher"). Port resolution and the `sync` block
       arrive in US2.
-- [ ] T016 [US1] Register `GET /v1/comments` in `src/modules/comments/http/routes.ts` as a
+- [X] T016 [US1] Register `GET /v1/comments` in `src/modules/comments/http/routes.ts` as a
       `registerListCommentsRoute` function inside `registerCommentReadRoutes`, using
       `listCommentsQuerySchema` and `commentsPageSchema`, reusing the existing `parseCursor` helper
       and `encodeCursor`. Leave the three nested read routes registered — US2 removes them. Confirm
       it does not collide with `GET /v1/comments/:commentId` (R-01).
-- [ ] T017 [US1] Rework the structural half of
+- [X] T017 [US1] Rework the structural half of
       `src/modules/comments/http/benchmark.integration.test.ts` (quickstart V7). The file today holds
       **one** `EXPLAIN` assertion — `explainTopLevelQuery`, the post's top level — and its
       `assertPlanUsesIndex` helper checks only that *some* node type contains `Index`, without
@@ -149,12 +149,12 @@ forward with the returned cursor walks the whole history without repeating or sk
       `comments_replies_idx` (`parentCommentId`), `comments_social_account_idx` (`accountId`) and
       `comments_workspace_idx` (no filter at all — `workspace_id` plus the `visibleInList` residual).
       The file's existing absolute p95 budgets are feature 001's and stay untouched (R-10).
-- [ ] T018 [P] [US1] Create `scripts/bench-listing.ts`: seed two workspaces whose comment histories
+- [X] T018 [P] [US1] Create `scripts/bench-listing.ts`: seed two workspaces whose comment histories
       differ by a factor of ten, issue the unfiltered listing against both at equal page size, print
       the p95 of each and their ratio, and exit non-zero when the ratio exceeds **1.5** (SC-005,
       R-10). Follow the existing `scripts/smoke.ts` + `scripts/script-failure.ts` conventions. It is
       **not** a vitest test and **not** a CI step.
-- [ ] T002 [P] [US1] Add the `bench:listing` script (`tsx scripts/bench-listing.ts`) to the `scripts`
+- [X] T002 [P] [US1] Add the `bench:listing` script (`tsx scripts/bench-listing.ts`) to the `scripts`
       block of `package.json`, alongside the existing `smoke` entry — the on-demand SC-005 harness
       (R-10). Listed here, out of numeric order, because a committed script entry must not precede
       the file it points at: do it with T018, not in Phase 1.
@@ -175,14 +175,14 @@ that exactly the matching comments come back — and that the previously nested 
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T019 [P] [US2] Rewrite `src/modules/comments/http/post-comments.integration.test.ts`,
+- [X] T019 [P] [US2] Rewrite `src/modules/comments/http/post-comments.integration.test.ts`,
       `replies.integration.test.ts` and `inbox.integration.test.ts` to drive the collection
       (`?postId=:id&topLevelOnly=true`, `?parentCommentId=:id&order=asc`, `?accountId=:id`), keeping
       every original assertion, and add to each the assertion that its **old** address now answers
       `404` with `code: NOT_FOUND` in `application/problem+json` (quickstart V3, acceptance 2.6,
       FR-009). Seed data that partly matches and partly does not for every filter, so a silently
       ignored filter fails the test rather than passing it. Three files, one per old route.
-- [ ] T020 [P] [US2] Extend `src/modules/comments/http/list-comments.integration.test.ts` with the
+- [X] T020 [P] [US2] Extend `src/modules/comments/http/list-comments.integration.test.ts` with the
       filter semantics: `platform=instagram&platform=bluesky` returns the union;
       `platform=tiktok` is accepted and returns nothing; `platform=nonsense` is `400`;
       `topLevelOnly=true` together with `parentCommentId` is an empty `200`, **not** `400`
@@ -194,7 +194,7 @@ that exactly the matching comments come back — and that the previously nested 
       `?accountId=…` and for `?parentCommentId=…`. T011 only covers the identifier-free request, and
       a condition written as "an identifier filter is present" rather than "a post is named" passes
       T011 and fails FR-006 (acceptance 2.4, R-08).
-- [ ] T021 [P] [US2] Update `src/modules/comments/http/tenancy.integration.test.ts`: drop the three
+- [X] T021 [P] [US2] Update `src/modules/comments/http/tenancy.integration.test.ts`: drop the three
       per-endpoint rows for the removed routes and add one case per identifier-shaped filter
       (`postId`, `accountId`, `parentCommentId`) asserting `404` with `code: NOT_FOUND` for a
       resource in another workspace — never `403`, never an empty `200` (SC-004, FR-004, D20,
@@ -276,7 +276,7 @@ valid key, invoke the comment collection from the page, and receive data rather 
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T033 [P] [US3] Create `src/modules/comments/http/openapi-security.integration.test.ts`
+- [X] T033 [P] [US3] Create `src/modules/comments/http/openapi-security.integration.test.ts`
       (quickstart V6, machine-readable half): `components.securitySchemes.apiKey` equals
       `{ type: 'apiKey', name: 'blotato-api-key', in: 'header' }`; the document's global `security`
       requires it; the set of operations carrying `security: []` is **computed in the assertion from
@@ -290,7 +290,7 @@ valid key, invoke the comment collection from the page, and receive data rather 
 
 ### Implementation for User Story 3
 
-- [ ] T034 [US3] Export `PUBLIC_ROUTES` and `isPublicRoute` from
+- [X] T034 [US3] Export `PUBLIC_ROUTES` and `isPublicRoute` from
       `src/modules/comments/http/auth.ts`, and add a required `published: boolean` field to the
       `PublicRoute` type and to all six entries: `true` for `GET /healthz` and `GET /readyz`, `false`
       for `GET|POST /webhooks/meta` and `GET /openapi.json` (registered `schema: { hide: true }`) and
@@ -300,12 +300,12 @@ valid key, invoke the comment collection from the page, and receive data rather 
       R-09 names: the `matches` predicates are now applied to **OpenAPI path templates** as well as
       request paths. Every current entry is a literal path, so the two coincide; a future exempt
       route carrying a path parameter must match `/v1/x/:id` rather than a concrete id.
-- [ ] T035 [US3] In `src/app/api.ts`, add to the `@fastify/swagger` registration:
+- [X] T035 [US3] In `src/app/api.ts`, add to the `@fastify/swagger` registration:
       `components.securitySchemes.apiKey = { type: 'apiKey', name: 'blotato-api-key', in: 'header' }`
       and a global `security: [{ apiKey: [] }]`. Global-plus-exemptions, never the inverse — a route
       added without thought is then published as authenticated, matching how the auth hook itself
       fails closed (R-09).
-- [ ] T036 [US3] In the same file, replace `transform: jsonSchemaTransform` with a wrapper that
+- [X] T036 [US3] In the same file, replace `transform: jsonSchemaTransform` with a wrapper that
       calls `jsonSchemaTransform` first and then sets `security: []` on the operation when
       `isPublicRoute(route.method, url)` is true. `@fastify/swagger`'s `transform` hook receives
       `{ schema, url, route }`, so `route.method` plus `url` is exactly the pair `isPublicRoute`
@@ -316,7 +316,16 @@ valid key, invoke the comment collection from the page, and receive data rather 
       the UI plugin (acceptance 3.3, spec Assumptions). `isPublicRoute` may therefore stay as it is;
       it is T033 that reads the `published` flag, since only the test needs to know which exempt
       routes the document should be missing.
-- [ ] T037 [US3] Manually walk quickstart V6 in a browser with no terminal open: `$BASE/docs` offers
+- [~] T037 [US3] **Partly done — the browser half was not executed.** The served document and the
+      live auth behaviour were verified against a running instance with curl:
+      `components.securitySchemes.apiKey` is `{ type: apiKey, name: blotato-api-key, in: header }`,
+      the global `security` requires it, `security: []` appears on exactly `GET /healthz` and
+      `GET /readyz`, neither `/webhooks/meta` operation is in the document, `GET /v1/comments` is,
+      an unauthenticated call answers `401` and the same call with the demo key answers `200`.
+      Not executed: opening `$BASE/docs` in a browser to see the **Authorize** control rendered —
+      the Chrome profile was held by another session. That control is a deterministic function of
+      `components.securitySchemes` being present, which is verified, but it was not observed.
+      Original task text: Manually walk quickstart V6 in a browser with no terminal open: `$BASE/docs` offers
       an **Authorize** control naming `blotato-api-key` as a header; after pasting the demo key,
       "Try it out" on `GET /v1/comments` returns data rather than `401`; `GET /healthz` and
       `GET /readyz` show as requiring no key, and the two `/webhooks/meta` operations are absent from
@@ -330,29 +339,29 @@ comments from the browser.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T038 [P] Rewrite the `README.md` curl walkthrough to **start** at
+- [X] T038 [P] Rewrite the `README.md` curl walkthrough to **start** at
       `GET /v1/comments` with no identifier at all, then drill down with filters — an identifier-free
       first step is the property FR-015 names.
-- [ ] T039 [P] Update `scripts/smoke.ts` and `scripts/smoke-checks.ts` to follow the same order:
+- [X] T039 [P] Update `scripts/smoke.ts` and `scripts/smoke-checks.ts` to follow the same order:
       the identifier-free listing first, then the filtered reads that replace the removed routes
       (FR-015, quickstart V9). Update `scripts/smoke.test.ts` alongside them.
-- [ ] T040 [P] Write the reasoning FR-014 and SC-008 require into `DESIGN.md`: why reads are one
+- [X] T040 [P] Write the reasoning FR-014 and SC-008 require into `DESIGN.md`: why reads are one
       filtered collection (the missing cross-account inbox — explicitly **not** discoverability),
       why writes stay addressed to their target, why `topLevelOnly` exists as a filter, and why the
       refresh command stays addressed to a post. A reader must be able to state it without asking
       the author.
-- [ ] T041 Run `pnpm bench:listing` and record the two p95 figures, their ratio and the machine in
+- [X] T041 Run `pnpm bench:listing` and record the two p95 figures, their ratio and the machine in
       `DESIGN.md` (SC-005, R-10). Pass is ratio ≤ 1.5; a genuinely bounded listing measures near
       1.0, and a result near the limit is itself the signal that it is not.
-- [ ] T042 Perform the three deliberate breaks of quickstart V8 and confirm each turns a test red
+- [X] T042 Perform the three deliberate breaks of quickstart V8 and confirm each turns a test red
       before reverting: (a) drop `workspace_id` from the list predicate → T008's cross-workspace
       assertion and every T021 case; (b) resolve `postId` through a join instead of the `Posts` port
       → T009's port-spy assertion and T021's post case; (c) hand-annotate `GET /readyz`'s
       `security: []` instead of deriving it from `PUBLIC_ROUTES`, and separately flip one
       `published: false` entry to `true` → T033's two derived-set assertions, one per direction.
-- [ ] T043 Regenerate and commit the published description: `pnpm generate-openapi`, then
+- [X] T043 Regenerate and commit the published description: `pnpm generate-openapi`, then
       `git diff --exit-code openapi.json` must be clean — the check CI runs (FR-011, D18).
-- [ ] T044 Run the full gate before the final commit: `pnpm lint && pnpm format:check &&
+- [X] T044 Run the full gate before the final commit: `pnpm lint && pnpm format:check &&
       pnpm typecheck`, `pnpm test:unit`, `pnpm test:integration`. Warnings count as failures; fix
       every one rather than suppressing it.
 
