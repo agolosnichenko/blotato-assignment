@@ -22,8 +22,23 @@
  * `comments_workspace_idx` — is a different, deterministic claim and lives in
  * `src/modules/comments/http/benchmark.integration.test.ts` (quickstart.md V7), not here.
  *
- * Requires the same local stack `pnpm dev:api` does: `docker compose up -d` and a populated `.env`
- * (copy from `.env.example`).
+ * The measured latencies are **in-process**: this script builds its own `Container`/`Api` and
+ * calls `app.inject(...)` directly (no `pnpm dev:api`, no HTTP, no network layer) — the same
+ * reasoning `benchmark.integration.test.ts` uses, and why the printed report says so explicitly.
+ * It needs only the backing store: `docker compose up -d` and a populated `.env` (copy from
+ * `.env.example`).
+ *
+ * **Calibration.** The pass line (`MAX_RATIO`) is only trustworthy if this harness can actually
+ * trip it for the failure SC-005 guards against — an unbounded scan of the larger history. Verify
+ * that once, on any machine, by forcing the planner off the index it would otherwise choose and
+ * re-running:
+ *
+ *   psql "$DATABASE_URL" -c 'ALTER SYSTEM SET enable_indexscan = off; SELECT pg_reload_conf();'
+ *   pnpm bench:listing
+ *   psql "$DATABASE_URL" -c 'ALTER SYSTEM RESET enable_indexscan; SELECT pg_reload_conf();'
+ *
+ * (add `enable_bitmapscan = off` too if the planner still finds a way around) — the ratio should
+ * climb well past `MAX_RATIO`. See the report for this script's own calibration run.
  *
  * Usage:
  *   pnpm bench:listing
@@ -42,7 +57,13 @@ import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts'
 import { closeQuietly, reportFatal } from './script-failure.ts';
 
 const PLATFORM = 'bluesky';
-const SMALL_HISTORY_COMMENTS = 1_000;
+/**
+ * 10,000 and 100,000 (below), not 1,000/10,000: at the smaller scale a full unbounded scan of the
+ * larger history is itself cheap enough (low single-digit ms) to sit near `app.inject`'s own fixed
+ * cost, so a genuine regression and measurement noise would be indistinguishable — the same reason
+ * `benchmark.integration.test.ts` calibrates its structural claim at 100,000 rows.
+ */
+const SMALL_HISTORY_COMMENTS = 10_000;
 /** Ten times {@link SMALL_HISTORY_COMMENTS} — the factor-of-ten spread R-10 asks for. */
 const LARGE_HISTORY_COMMENTS = SMALL_HISTORY_COMMENTS * 10;
 const SEED_CHUNK_SIZE = 1_000;
@@ -250,8 +271,14 @@ function reportResult(
   large: SeededWorkspace,
   largeP95: number,
 ): void {
+  // `Math.max(…, 1)` is a divide-by-zero guard, not a smoothing factor — below ~1ms it biases the
+  // ratio toward "pass" exactly when the measurement is least trustworthy; call that out, don't hide it.
   const ratio = Math.max(smallP95, largeP95) / Math.max(Math.min(smallP95, largeP95), 1);
   console.log('');
+  console.log(
+    'Latencies below are in-process (app.inject, no HTTP/network layer) — not end-to-end ' +
+      'deployed-API figures.',
+  );
   console.log(`${small.label} (${small.commentCount} comments): p95 = ${smallP95.toFixed(2)}ms`);
   console.log(`${large.label} (${large.commentCount} comments): p95 = ${largeP95.toFixed(2)}ms`);
   console.log(`ratio (max/min) = ${ratio.toFixed(2)} (pass: <= ${MAX_RATIO})`);
