@@ -49,6 +49,9 @@
  * Usage:
  *   pnpm bench:listing
  */
+// oxlint-disable max-lines -- one benchmark: seed two workspaces of different sizes, measure both,
+// compare. The seeding, measuring and reporting halves are only meaningful together, and the file is
+// run as a script rather than imported anywhere.
 
 import { randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
@@ -186,9 +189,15 @@ async function seedWorkspaceWithHistory(
 }
 
 function percentile(samplesMs: readonly number[], p: number): number {
+  // A `?? 0` fallback here reported p95 = 0 for both workspaces, a ratio of 0, and "SC-005 holds"
+  // over zero measurements. A benchmark that could not measure has no verdict to give.
   const sorted = [...samplesMs].toSorted((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
-  return sorted[Math.max(0, index)] ?? 0;
+  const value = sorted[Math.max(0, index)];
+  if (value === undefined) {
+    throw new Error(`percentile: no sample at index ${index} of ${sorted.length}`);
+  }
+  return value;
 }
 
 /**

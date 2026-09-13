@@ -89,7 +89,12 @@ export const comments = pgTable(
 
     replyCount: integer('reply_count').notNull().default(0),
     lastActivityAt: timestamp('last_activity_at', { withTimezone: true }).notNull(),
-    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+    // `precision: 3` because this is the keyset column and `encodeCursor` writes `toISOString()`,
+    // which is millisecond-precision. A stored microsecond the cursor cannot express makes paging
+    // lossy: resuming `desc` after a row at `.123456` with a cursor reading `.123` skips every row
+    // in that millisecond, and `asc` returns the cursor row a second time. Every writer passes a JS
+    // `Date` today, so the column is what keeps that true for the next one.
+    occurredAt: timestamp('occurred_at', { withTimezone: true, precision: 3 }).notNull(),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

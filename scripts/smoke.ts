@@ -20,6 +20,9 @@
  *   SMOKE_BASE_URL=... SMOKE_API_KEY=... SMOKE_INSTAGRAM_POST_ID=... SMOKE_BLUESKY_POST_ID=... \
  *     pnpm smoke
  */
+// oxlint-disable max-lines -- one end-to-end walkthrough, whose steps run in a fixed order and
+// share the seeded state each previous step leaves behind. Splitting it across files would hide that
+// ordering, which is the script's only real structure.
 
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -142,10 +145,16 @@ async function stepInbox(env: SmokeEnv): Promise<void> {
   if (response.status !== 200) {
     throw new SmokeFailure(step, '200', String(response.status), response.body);
   }
-  const body = response.body as { items: CommentRecord[] };
-  assertDescendingOccurredAt(body.items);
+  const body = response.body as { items?: CommentRecord[] };
+  const items = body.items;
+  // An empty page satisfies `assertDescendingOccurredAt` vacuously, printing PASS over exactly the
+  // regressions this step catches. Step 3 needs a comment here anyway, so requiring one is free.
+  if (items === undefined || items.length === 0) {
+    throw new SmokeFailure(step, 'at least one comment', 'an empty page', response.body);
+  }
+  assertDescendingOccurredAt(items);
   assertInboxHasNoSyncBlock(response.body);
-  logPass(step, `${body.items.length} comments across the workspace, newest-first, no sync block`);
+  logPass(step, `${items.length} comments across the workspace, newest-first, no sync block`);
 }
 
 /** `step` is a parameter because step 6 reads a conversation too, and a line labelled "3

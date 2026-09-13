@@ -1,0 +1,1 @@
+ALTER TABLE "comments" ALTER COLUMN "occurred_at" SET DATA TYPE timestamp (3) with time zone;

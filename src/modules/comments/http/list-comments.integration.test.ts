@@ -28,7 +28,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Redis } from 'ioredis';
 import type { Queue } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -1313,6 +1313,45 @@ async function seedSyncJob(
   return id;
 }
 
+/**
+ * `occurred_at` must not hold more precision than the cursor can carry (SC-003, D27).
+ *
+ * `encodeCursor` writes `toISOString()`, which is millisecond-precision. A column storing
+ * microseconds would therefore make a cursor un-representable: resuming `desc` after a row at
+ * `.123456` with a cursor reading `.123` skips every row in `.123000`–`.123999`, and `asc` returns
+ * the cursor row again. Every current writer passes a JS `Date`, so nothing stores microseconds
+ * today — this pins the column, so the guarantee is the database's rather than a convention every
+ * future writer has to know.
+ */
+function registerOccurredAtPrecisionTest(getHarness: () => Harness): void {
+  it("stores occurred_at at millisecond precision, the cursor's own resolution", async () => {
+    const harness = getHarness();
+    const fixture = await setUpPagingFixture(harness.database);
+    const commentId = await seedComment(harness.database, {
+      workspaceId: fixture.workspaceId,
+      socialAccountId: fixture.socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(SEED_BASE_MS),
+    });
+    // Written as raw SQL because a JS `Date` cannot express sub-millisecond time at all: the point
+    // is what the column does with a value that can.
+    await harness.database.drizzle.execute(
+      sql`UPDATE comments SET occurred_at = '2026-01-05T00:00:00.123456+00'::timestamptz WHERE id = ${commentId}`,
+    );
+
+    // Read as text, not through the column mapper: node-postgres parses a timestamp into a JS
+    // `Date`, which is itself millisecond-precision, so any stored microseconds are invisible from
+    // TypeScript — and invisible is exactly the problem. The keyset comparison runs in Postgres,
+    // against the stored value, so that is the value this must assert.
+    const stored = await harness.database.drizzle.execute<{ text: string }>(
+      sql`SELECT occurred_at::text AS text FROM comments WHERE id = ${commentId}`,
+    );
+
+    expect(stored.rows[0]?.text).toBe('2026-01-05 00:00:00.123+00');
+  });
+}
+
 /** T020/V4 (R-08): `sync` is present when a post is named, other filters notwithstanding. */
 function registerSyncPresentForPostIdTest(getHarness: () => Harness): void {
   it("includes 'sync' for ?postId=…&platform=instagram", async () => {
@@ -1423,6 +1462,7 @@ describe('GET /v1/comments', () => {
     registerTimezoneOffsetTest(() => harness);
     registerIsOwnFalseHonouredTest(() => harness);
     registerNonPostedStatusesVisibleTest(() => harness);
+    registerOccurredAtPrecisionTest(() => harness);
     registerSyncPresentForPostIdTest(() => harness);
     registerActiveSyncJobTest(() => harness);
     registerSyncAbsentForNonPostIdentifiersTest(() => harness);
