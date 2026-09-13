@@ -6,7 +6,10 @@ export default defineConfig({
       {
         test: {
           name: 'unit',
-          include: ['src/**/*.test.ts'],
+          // `scripts/**` is here because the operator CLIs have testable pure parts (smoke.ts's
+          // assertions, the status-claims matcher) and a test outside the suite is a test that
+          // rots unnoticed. They need no containers, so they belong in the unit project.
+          include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
           exclude: ['src/**/*.integration.test.ts'],
         },
       },
