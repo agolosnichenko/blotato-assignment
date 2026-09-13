@@ -13,9 +13,6 @@ answer; the lines above it are what the answer is based on.
 No script prints a token, secret, or signature in full — only a fingerprint (first/last four
 characters). Full command output is still safe to paste into a report.
 
-Where each credential comes from, step by step: [CREDENTIALS.md](CREDENTIALS.md). This file says
-what the variables are; that one says how to obtain them.
-
 ## Before you run any of them
 
 ```bash
