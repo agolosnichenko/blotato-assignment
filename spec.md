@@ -691,6 +691,16 @@ Infrastructure:
     — the image `docker-compose.yml` already uses — started with the same flags and a volume at
     `/data`, with `REDIS_URL` set by hand to the service's private address. This changes deployment
     configuration only, as the Complexity Tracking table anticipated; no application code moves.
+  - **One piece of that is not declarative, and the gap is recorded rather than hidden.** Railway's
+    IaC types let a database carry only image, output, default mount path and region — not a start
+    command. Declaring the instance as a plain service *can* carry one, but Railway classifies a
+    redis image as a database anyway, so every later plan wanted to delete and recreate the running
+    instance. It is therefore declared as a database, which keeps plans clean and leaves the start
+    command untouched, and the flags live on the resource rather than in the file. An apply into a
+    fresh environment produces a Redis with the image's defaults — no AOF — so the durability claim
+    here holds only after someone sets that start command and confirms it with
+    `CONFIG GET appendonly maxmemory-policy`. `.railway/railway.ts` carries the same warning beside
+    the declaration.
   - **Why the AOF half is not optional here.** Postgres is the source of truth, and the sweepers
     re-enqueue work whose job was lost — so a Redis restart is survivable in the sense that no
     comment is lost. What it is not is *invisible*: every in-flight job would have to be rediscovered

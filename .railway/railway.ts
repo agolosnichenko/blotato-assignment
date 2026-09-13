@@ -1,4 +1,4 @@
-import { defineRailway, image, postgres, project, service, volume } from 'railway/iac';
+import { database, defineRailway, postgres, project, service, volume } from 'railway/iac';
 
 /**
  * Railway project for T111 (D24): `api` and `worker` are two services built from the same
@@ -38,11 +38,24 @@ export default defineRailway((ctx) => {
   // cannot be turned on from configuration. This is the fallback the Complexity Tracking table
   // pre-committed to, and it changes deployment configuration only.
   //
-  // The flags and the image are docker-compose.yml's, so the deployment and a local run now hold
-  // the same two guarantees §9.2 asks for: no job is evicted when memory fills, and the queue
-  // survives a restart. `appendfsync everysec` is the AOF default and bounds a crash to one second
-  // of writes — the alternative, `always`, costs an fsync per command for work Postgres already
-  // records durably.
+  // ⚠ THE START COMMAND IS NOT DECLARED HERE AND THIS FILE ALONE DOES NOT REPRODUCE IT.
+  // The running resource was created with
+  //
+  //   redis-server --maxmemory-policy noeviction --appendonly yes --appendfsync everysec
+  //
+  // — docker-compose.yml's flags, so a local run and the deployment hold the same two guarantees
+  // §9.2 asks for. `database()` takes only image/output/defaultMountPath/region (checked against
+  // the installed `railway` package's types), so the DSL cannot express it. Declaring this as a
+  // `service()` instead *can* carry a start command, but Railway classifies a redis image as a
+  // database regardless, so every subsequent plan wanted to delete and recreate the working
+  // instance — a standing invitation to destroy the queue. Declared as a database, plans are clean
+  // and the planner leaves a database's start command alone, which is what keeps the flags alive.
+  //
+  // Consequence, and it is not theoretical: an apply into a *fresh* environment creates this with
+  // the image's defaults — no AOF. Whoever does that must set the start command above on the
+  // resource by hand and confirm with `CONFIG GET appendonly maxmemory-policy` before trusting the
+  // durability claim in spec.md §9.2.
+  //
   // Named `cache`, not `redis`: Railway's IaC matches resources by name, and the managed database
   // this replaces was called `redis`. Reusing that name made the apply an in-place update of the
   // old resource rather than a create — including its leftover volume, which failed the "a service
@@ -51,11 +64,12 @@ export default defineRailway((ctx) => {
   // 500 MB is the ceiling this Railway plan allows; a larger request fails the apply with
   // "Max size of 500 MB on current plan". It is far more than an AOF of this queue needs —
   // the file holds in-flight jobs, not history, and `domain-events` is trimmed on a timer.
-  const cacheVolume = volume('cache-data', { sizeMB: 500 });
-  const cache = service('cache', {
-    source: image('redis:8.10.1-alpine'),
-    start: 'redis-server --maxmemory-policy noeviction --appendonly yes --appendfsync everysec',
-    volumeMounts: { '/data': cacheVolume },
+  // The region is stated because Railway assigns one on creation, and a volume declared without it
+  // plans as a change on every run ("sfo" -> null).
+  const cacheVolume = volume('cache-data', { sizeMB: 500, region: 'sfo' });
+  const cache = database('cache', 'redis', {
+    image: 'redis:8.10.1-alpine',
+    defaultMountPath: '/data',
   });
   // A plain service has no `.env.REDIS_URL` to reference, so the address is written out. It is the
   // private network name Railway gives the service, reachable only from inside this project's
