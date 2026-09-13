@@ -39,7 +39,7 @@
 // (T086, T087); splitting the walk from the lifecycle handling would separate two things that
 // must agree on the same `target`/`stats` to stay correct, not remove any of the logic itself.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, lt } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type {
   IngestComments,
@@ -99,6 +99,20 @@ export interface SyncPost {
 }
 
 const ZERO_STATS: SyncPostStats = { fetched: 0, inserted: 0, updated: 0, deleted: 0 };
+
+/**
+ * I1 (final-review.md): a walk's pages are fetched over several seconds, and this service's own
+ * writes — a reply this walk's own account just published, a webhook delivery landing mid-walk —
+ * can commit locally after the walk already paged past the platform's view of the thread, or
+ * before the platform's read path has indexed them (ordinary eventual consistency on the Graph
+ * API). Either way, `seen` never had a chance to include that comment, so treating its absence as
+ * evidence of deletion is wrong: the walk wasn't "complete" *with respect to that write*. Five
+ * minutes — the fastest configured cadence (Bluesky's under-24h band, `config.ts`) — bounds how
+ * long a row this recently touched is held back from deletion inference; it is not a guess at
+ * indexing lag specifically, just long enough that a write racing this walk is never mistaken for
+ * a platform-side removal. Recorded for spec.md §18 (FR-019's "complete walk" reading).
+ */
+const DELETION_INFERENCE_GRACE_MS = 5 * 60_000;
 
 /** Builds the account context a sync walk needs — the platform itself comes from `Accounts`, not
  * `SyncTargetRecord` (which carries no platform column of its own). Throws a plain `Error` (never
@@ -257,6 +271,11 @@ async function walkAndIngest(
  * FR-019, FR-030: marks every locally-`posted` comment on this post absent from `seen` `deleted`,
  * through `ingestComments.delete` — the same branch a webhook delete uses, so `text`/author are
  * nulled and `reply_count` decremented identically either way. Only reached after a complete walk.
+ *
+ * Excludes any row updated at or after `walkStartedAt - DELETION_INFERENCE_GRACE_MS` (I1,
+ * final-review.md): a row this recently touched could be a write that raced this very walk rather
+ * than evidence the platform removed it, and {@link run} is explicit that "complete" is read
+ * relative to what the walk *could* have seen.
  */
 async function inferDeletions(
   deps: SyncPostDeps,
@@ -264,7 +283,9 @@ async function inferDeletions(
   ctx: AccountContext,
   seen: ReadonlySet<string>,
   stats: MutableSyncStats,
+  walkStartedAt: Date,
 ): Promise<void> {
+  const cutoff = new Date(walkStartedAt.getTime() - DELETION_INFERENCE_GRACE_MS);
   const existing = await deps.database
     .select({ platformCommentId: comments.platformCommentId })
     .from(comments)
@@ -273,6 +294,7 @@ async function inferDeletions(
         eq(comments.socialAccountId, target.socialAccountId),
         eq(comments.platformPostId, target.platformPostId),
         eq(comments.status, 'posted'),
+        lt(comments.updatedAt, cutoff),
       ),
     );
 
@@ -298,7 +320,19 @@ async function inferDeletions(
 /** §7.3: a successful walk's schedule, recomputed from the target's own `age_anchor_at` — this is
  * also what "restores" a manually-run, previously-deactivated target's schedule (D19): nothing
  * here reads the target's prior `next_sync_at`, so a `null` before this call is no different from
- * any other value. */
+ * any other value.
+ *
+ * I2 (final-review.md, D30 §18): also clears this account's `account_health` row, if any.
+ * `run()` reaching here means `loadAccountContext` decrypted a credential and `adapter.listComments`
+ * used it successfully for the whole walk — direct evidence the account works again, and the only
+ * such evidence this module can observe on its own. `AccountHealth.clear` had no caller anywhere in
+ * the service before this, so a reconnected account stayed `disconnected` forever (D30's own text,
+ * "a projection row that flips back to `active` clears it", cannot be read from `social_accounts`
+ * alone: the publish path's own `AuthError` test records `auth_failed` while leaving
+ * `social_accounts.status` at `active` the whole time, so "projection active + a local record"
+ * describes an *ongoing* failure just as often as a resolved one — a successful call is the
+ * unambiguous signal). A no-op when there was no stale record to begin with.
+ */
 async function markSucceeded(
   deps: SyncPostDeps,
   targetId: string,
@@ -312,6 +346,7 @@ async function markSucceeded(
     now,
   );
   await deps.syncTargetRepository.markSyncSucceeded(targetId, { lastSyncedAt: now, nextSyncAt });
+  await deps.accountHealth.clear(target.socialAccountId);
 }
 
 /**
@@ -404,8 +439,11 @@ async function run(deps: SyncPostDeps, targetId: string): Promise<SyncPostResult
     const adapter = deps.getAdapter(ctx.platform);
     const ingestionSource: IngestionSource = target.lastSyncedAt === null ? 'backfill' : 'sync';
 
+    // Captured before paging starts: I1 needs the instant the walk could not yet have observed
+    // anything written after, not when it happened to finish.
+    const walkStartedAt = new Date();
     const seen = await walkAndIngest(deps, target, ctx, adapter, ingestionSource, stats);
-    await inferDeletions(deps, target, ctx, seen, stats);
+    await inferDeletions(deps, target, ctx, seen, stats, walkStartedAt);
     await markSucceeded(deps, targetId, target, ctx.platform);
 
     return { status: 'succeeded', stats: { ...stats } };

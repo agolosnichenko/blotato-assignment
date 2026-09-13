@@ -44,6 +44,7 @@ const envSchema = z.object({
   BLUESKY_THREAD_DEPTH: positiveInt().default(10),
 
   RETENTION_DAYS: positiveInt().default(45),
+  DOMAIN_EVENTS_TTL_HOURS: positiveInt().default(24),
 
   SYNC_INTERVALS_BLUESKY_UNDER_24H_MINUTES: positiveInt().default(5),
   SYNC_INTERVALS_BLUESKY_1_TO_7_DAYS_MINUTES: positiveInt().default(60),

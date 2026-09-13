@@ -9,7 +9,6 @@ import { pathToFileURL } from 'node:url';
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
-import { Queue } from 'bullmq';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
 import {
@@ -35,6 +34,7 @@ import { createSyncTargetRepository } from '#src/modules/comments/infrastructure
 import type { Database } from '#src/shared/db.ts';
 import { ApiError, toProblemDetails, type ProblemDetails } from '#src/shared/errors.ts';
 import { createLogger } from '#src/shared/logger.ts';
+import { createQueue } from '#src/shared/queue.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 
 /**
@@ -277,7 +277,7 @@ function registerWebhookRoutes(
   deps: ApiDependencies,
   logger: ReturnType<typeof createLogger>,
 ): void {
-  const webhookQueue = new Queue(QUEUE_NAMES.webhookProcess, { connection: deps.redis });
+  const webhookQueue = createQueue(QUEUE_NAMES.webhookProcess, deps.config, deps.redis);
   app.addHook('onClose', async () => {
     await webhookQueue.close();
   });

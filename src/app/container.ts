@@ -18,7 +18,7 @@
 // something that should be wired centrally is being constructed ad hoc elsewhere instead.
 
 import type { Redis } from 'ioredis';
-import { Queue } from 'bullmq';
+import type { Queue } from 'bullmq';
 import { loadConfig, type Config } from '#src/app/config.ts';
 import {
   createContactQuota,
@@ -41,7 +41,7 @@ import type {
 } from '#src/modules/platform-core/ports.ts';
 import type { KeyMaterial } from '#src/shared/crypto.ts';
 import { createDatabase, type Database } from '#src/shared/db.ts';
-import { createRedis } from '#src/shared/queue.ts';
+import { createQueue, createRedis } from '#src/shared/queue.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 
 /** The service-boundary ports (D8, D29), backed by the local projection (src/modules/platform-core/local). */
@@ -128,8 +128,8 @@ export function buildContainer(options: BuildContainerOptions = {}): Container {
   const redis = createRedis(config);
   const ports = buildPorts(database, toKeyMaterial(config), config);
   const contactQuota = createContactQuota(database.drizzle, ports.workspaces);
-  const publishQueue = new Queue(QUEUE_NAMES.commentPublish, { connection: redis });
-  const syncQueue = new Queue(QUEUE_NAMES.commentSync, { connection: redis });
+  const publishQueue = createQueue(QUEUE_NAMES.commentPublish, config, redis);
+  const syncQueue = createQueue(QUEUE_NAMES.commentSync, config, redis);
 
   return {
     config,

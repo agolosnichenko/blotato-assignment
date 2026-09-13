@@ -55,6 +55,7 @@ describe('loadConfig feature variables', () => {
       CREDENTIALS_KEY_VERSION: 1,
       META_GRAPH_API_VERSION: 'v21.0',
       RETENTION_DAYS: 45,
+      DOMAIN_EVENTS_TTL_HOURS: 24,
       SYNC_INTERVALS_BLUESKY_UNDER_24H_MINUTES: 5,
       SYNC_INTERVALS_BLUESKY_1_TO_7_DAYS_MINUTES: 60,
       SYNC_INTERVALS_BLUESKY_7_DAYS_TO_RETENTION_MINUTES: 1440,
@@ -91,5 +92,13 @@ describe('loadConfig feature variables', () => {
 
   it('rejects RETENTION_DAYS when it is not a positive integer', () => {
     expect(() => loadConfig({ ...validEnv, RETENTION_DAYS: '0' })).toThrowError(/RETENTION_DAYS/u);
+  });
+});
+
+describe('loadConfig DOMAIN_EVENTS_TTL_HOURS', () => {
+  it('rejects DOMAIN_EVENTS_TTL_HOURS when it is not a positive integer', () => {
+    expect(() => loadConfig({ ...validEnv, DOMAIN_EVENTS_TTL_HOURS: '0' })).toThrowError(
+      /DOMAIN_EVENTS_TTL_HOURS/u,
+    );
   });
 });

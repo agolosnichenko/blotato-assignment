@@ -22,6 +22,10 @@
 // oxlint-disable max-dependencies -- an HTTP integration test needs the harness (container + api),
 // the schema tables it seeds directly, and the crypto helper for a placeholder credential — the same
 // import surface `create-reply.integration.test.ts` has for the same reason.
+// oxlint-disable max-lines -- the four D19 cases now each watch the `comment-sync` queue directly
+// (a job-count delta where no job should be enqueued, the enqueued job's `targetId` where one
+// should be), per I7 (final-review.md): a case that only asserts the HTTP response shape never
+// actually observes whether the queue was touched, so this file's job is incomplete without them.
 
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
@@ -51,6 +55,7 @@ interface Harness {
   redis: Redis;
   app: Api;
   publishQueue: Queue;
+  syncQueue: Queue;
   workspaceId: string;
 }
 
@@ -63,7 +68,7 @@ async function startHarness(): Promise<Harness> {
     REDIS_URL: containers.redisUrl,
   });
   const container = buildContainer({ config });
-  const { database, redis, publishQueue } = container;
+  const { database, redis, publishQueue, syncQueue } = container;
   const app = buildApi(container);
   await app.ready();
 
@@ -75,15 +80,28 @@ async function startHarness(): Promise<Harness> {
     createdAt: new Date(),
   });
 
-  return { containers, database, redis, app, publishQueue, workspaceId };
+  return { containers, database, redis, app, publishQueue, syncQueue, workspaceId };
 }
 
 async function stopHarness(harness: Harness): Promise<void> {
   await harness.publishQueue.close();
+  await harness.syncQueue.close();
   await harness.app.close();
   await harness.database.close();
   harness.redis.disconnect();
   await harness.containers.stop();
+}
+
+/** Total jobs in the `comment-sync` queue, across every state — used as a delta, not a total. */
+async function syncJobCount(harness: Harness): Promise<number> {
+  const counts = await harness.syncQueue.getJobCounts(
+    'waiting',
+    'active',
+    'delayed',
+    'completed',
+    'failed',
+  );
+  return Object.values(counts).reduce((sum, count) => sum + count, 0);
 }
 
 async function mintApiKey(harness: Harness): Promise<string> {
@@ -225,23 +243,27 @@ describe('an active job already exists (D19)', () => {
     const post = await seedPost(harness);
     const targetId = await seedTarget(harness, post);
     const jobId = await seedJob(harness, targetId, 'queued');
+    const before = await syncJobCount(harness);
 
     const response = await requestSync(harness, post.postId);
 
     expect(response.statusCode).toBe(202);
     expect(response.body['id']).toBe(jobId);
+    expect(await syncJobCount(harness)).toBe(before);
   });
 
   it('a request while a job is running also returns 202 carrying that same job', async () => {
     const post = await seedPost(harness);
     const targetId = await seedTarget(harness, post);
     const jobId = await seedJob(harness, targetId, 'running');
+    const before = await syncJobCount(harness);
 
     const response = await requestSync(harness, post.postId);
 
     expect(response.statusCode).toBe(202);
     expect(response.body['id']).toBe(jobId);
     expect(response.body['status']).toBe('running');
+    expect(await syncJobCount(harness)).toBe(before);
   });
 });
 
@@ -270,6 +292,8 @@ describe('the 60-second manual cooldown (D19)', () => {
     const response = await requestSync(harness, post.postId);
 
     expect(response.statusCode).toBe(202);
+    const job = await harness.syncQueue.getJob(response.body['id'] as string);
+    expect(job?.data['targetId']).toBe(targetId);
   });
 });
 
@@ -284,6 +308,8 @@ describe('a deactivated target is run anyway, and its schedule is restored on su
     const response = await requestSync(harness, post.postId);
 
     expect(response.statusCode).toBe(202);
+    const job = await harness.syncQueue.getJob(response.body['id'] as string);
+    expect(job?.data['targetId']).toBe(targetId);
 
     // The schedule is restored only once the manual job this response points at succeeds — that
     // happens asynchronously, on the worker side (T089), which this HTTP-only test does not run.

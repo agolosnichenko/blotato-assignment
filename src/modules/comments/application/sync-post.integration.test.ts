@@ -106,6 +106,14 @@ const SYNC_INTERVALS_CONFIG = {
  * fails this test even though it would pass against the default. */
 const NON_DEFAULT_RETENTION_DAYS = 10;
 
+/**
+ * I1 (final-review.md): `inferDeletions` now excludes rows updated inside its grace window around
+ * `walkStartedAt`, so a case that means "this comment genuinely vanished from the platform" has to
+ * seed it old enough to fall outside that window — exactly as a comment that predates the walk by a
+ * real margin would be in production, not one seeded the same instant the walk runs.
+ */
+const OLD_ENOUGH_TO_BE_SEEN_AS_DELETED = new Date(Date.now() - 60 * 60 * 1000);
+
 function testKeyMaterial(): KeyMaterial {
   return { key: Buffer.from(TEST_CREDENTIALS_ENCRYPTION_KEY, 'base64'), keyVersion: 1 };
 }
@@ -187,11 +195,13 @@ interface SeedCommentInput {
   readonly platformCommentId: string;
   readonly parentCommentId?: string | null;
   readonly replyCount?: number;
+  /** Defaults to now; I1's race case backdates this to simulate a row the walk could have seen. */
+  readonly updatedAt?: Date;
 }
 
 async function seedPostedComment(db: NodePgDatabase, input: SeedCommentInput): Promise<string> {
   const id = generateId();
-  const now = new Date();
+  const now = input.updatedAt ?? new Date();
   await db.insert(comments).values({
     id,
     workspaceId: input.account.workspaceId,
@@ -310,6 +320,7 @@ describe('complete-walk deletion (FR-019, FR-030, T086) — identical to a webho
       platformPostId,
       platformCommentId: 'at://comment-child',
       parentCommentId: parentId,
+      updatedAt: OLD_ENOUGH_TO_BE_SEEN_AS_DELETED,
     });
     const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
     // Only the parent is still on the platform; the child is gone.
@@ -374,6 +385,54 @@ describe('interrupted walk infers zero deletions (FR-019, SC-008)', () => {
 });
 
 /**
+ * I1 (final-review.md): a walk's pages are fetched before a concurrent write — this service's own
+ * reply, or a webhook delivery — lands locally, or before the platform's own read path has
+ * indexed it. Either way `seen` never had the chance to include it, so its absence must not be
+ * read as a deletion. `recentId` stands in for that race: seeded with `updatedAt = now`, exactly
+ * as a just-written row would be, and reported by no page. `staleId` is the control: seeded with
+ * an `updatedAt` well outside the grace window, absent from the same walk, and still expected to
+ * be inferred deleted — proving the fix narrows the exclusion to recent rows, not every absence.
+ */
+async function assertRaceWithAConcurrentWriteDoesNotInferDeletion(
+  testHarness: Harness,
+): Promise<void> {
+  const { db } = testHarness;
+  const account = await seedWorkspaceAndAccount(db);
+  const platformPostId = `at://post-${generateId()}`;
+  const recentId = await seedPostedComment(db, {
+    account,
+    platformPostId,
+    platformCommentId: 'at://comment-recent-race',
+    updatedAt: new Date(),
+  });
+  const staleId = await seedPostedComment(db, {
+    account,
+    platformPostId,
+    platformCommentId: 'at://comment-stale-absent',
+    updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+  });
+  const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
+  // A complete walk — one page, no error — that simply never reports either comment back.
+  const adapter = listCommentsDouble([
+    { comments: [], deletedPlatformCommentIds: [], nextCursor: null },
+  ]);
+
+  const result = await buildSyncPost(db, adapter).run(targetId);
+
+  expect(result.status).toBe('succeeded');
+  expect(result.stats.deleted).toBe(1);
+  const recent = await loadComment(db, recentId);
+  expect(recent?.status).toBe('posted');
+  const stale = await loadComment(db, staleId);
+  expect(stale?.status).toBe('deleted');
+}
+
+describe('a row racing the walk is not inferred deleted (I1, final-review.md)', () => {
+  it('excludes a recently-updated row from deletion but still deletes a stale absent one', () =>
+    assertRaceWithAConcurrentWriteDoesNotInferDeletion(harness));
+});
+
+/**
  * The tombstoned id is reported only via `deletedPlatformCommentIds`, never in `comments` — this
  * is what proves it is routed through the shared delete branch rather than upserted as `posted`.
  * `comment-absent` is reported nowhere at all, so it must still fall to the absence-based
@@ -400,6 +459,7 @@ async function seedTombstoneScenario(
     account,
     platformPostId,
     platformCommentId: 'at://comment-absent',
+    updatedAt: OLD_ENOUGH_TO_BE_SEEN_AS_DELETED,
   });
   const stillThereId = await seedPostedComment(db, {
     account,
@@ -509,6 +569,44 @@ describe('an AuthError mid-walk is recorded in account_health, not social_accoun
     assertAuthErrorRecordedInAccountHealth(harness));
 });
 
+/**
+ * I2 (final-review.md): `AccountHealth.clear` had no production caller anywhere in the service, so
+ * a reconnected account stayed `disconnected` forever (D30 §18). A walk that completes —
+ * `loadAccountContext` decrypted the credential and `adapter.listComments` used it successfully for
+ * the whole walk — is this module's own direct evidence the account works again, so `markSucceeded`
+ * clears any stale `account_health` row for it.
+ */
+async function assertSuccessfulWalkClearsStaleAccountHealth(testHarness: Harness): Promise<void> {
+  const { db } = testHarness;
+  const account = await seedWorkspaceAndAccount(db);
+  const platformPostId = `at://post-${generateId()}`;
+  const targetId = await seedTarget(db, account, { platformPostId, lastSyncedAt: new Date() });
+  await db.insert(accountHealth).values({
+    socialAccountId: account.socialAccountId,
+    workspaceId: account.workspaceId,
+    state: 'auth_failed',
+    reason: 'a prior walk recorded this before the account was reconnected',
+    detectedAt: new Date(),
+  });
+  const adapter = listCommentsDouble([
+    { comments: [], deletedPlatformCommentIds: [], nextCursor: null },
+  ]);
+
+  const result = await buildSyncPost(db, adapter).run(targetId);
+
+  expect(result.status).toBe('succeeded');
+  const [health] = await db
+    .select()
+    .from(accountHealth)
+    .where(eq(accountHealth.socialAccountId, account.socialAccountId));
+  expect(health).toBeUndefined();
+}
+
+describe('a successful walk clears a stale account_health record (I2, final-review.md)', () => {
+  it('gives a reconnected account a working Accounts.findById again', () =>
+    assertSuccessfulWalkClearsStaleAccountHealth(harness));
+});
+
 async function findByPlatformCommentId(db: NodePgDatabase, platformCommentId: string) {
   const [row] = await db
     .select()
@@ -520,11 +618,22 @@ async function findByPlatformCommentId(db: NodePgDatabase, platformCommentId: st
 /**
  * The tagging itself lives on the `comment.received` outbox event's `ingestionSource` field
  * (contracts/domain-events.md), not on the `comments` row — `comments.source` only distinguishes
- * `api`/`webhook`/`sync`, with no `backfill` variant of its own (data-model.md §2). This case
- * therefore only asserts *that* both walks insert their comment (reachability), leaving the exact
- * `ingestionSource` value pinned to `ingest-comments.integration.test.ts`'s own event-shape
- * assertions rather than re-asserting outbox internals here.
+ * `api`/`webhook`/`sync`, with no `backfill` variant of its own (data-model.md §2). This case reads
+ * each walk's outbox row back and asserts its `payload.ingestionSource` directly: A10's whole
+ * purpose is that DM automations must not fire on a backfill, so the exact string on the wire is
+ * what matters, not merely that the comment row exists.
  */
+async function ingestionSourceOf(db: NodePgDatabase, commentId: string): Promise<unknown> {
+  const [row] = await db
+    .select()
+    .from(outboxEvents)
+    .where(and(eq(outboxEvents.aggregateId, commentId), eq(outboxEvents.type, 'comment.received')));
+  if (row === undefined) {
+    throw new Error(`no comment.received outbox row for comment ${commentId}`);
+  }
+  return (row.payload as { ingestionSource: unknown }).ingestionSource;
+}
+
 async function assertBackfillThenSyncTagging(testHarness: Harness): Promise<void> {
   const { db } = testHarness;
   const account = await seedWorkspaceAndAccount(db);
@@ -545,10 +654,14 @@ async function assertBackfillThenSyncTagging(testHarness: Harness): Promise<void
   const syncPost = buildSyncPost(db, adapter);
 
   await syncPost.run(targetId);
-  expect(await findByPlatformCommentId(db, 'at://comment-first-walk')).not.toBeNull();
+  const firstWalkComment = await findByPlatformCommentId(db, 'at://comment-first-walk');
+  expect(firstWalkComment).not.toBeNull();
+  expect(await ingestionSourceOf(db, firstWalkComment?.id ?? '')).toBe('backfill');
 
   await syncPost.run(targetId);
-  expect(await findByPlatformCommentId(db, 'at://comment-second-walk')).not.toBeNull();
+  const secondWalkComment = await findByPlatformCommentId(db, 'at://comment-second-walk');
+  expect(secondWalkComment).not.toBeNull();
+  expect(await ingestionSourceOf(db, secondWalkComment?.id ?? '')).toBe('sync');
 }
 
 describe('backfill vs. sync tagging (A10, FR-020)', () => {

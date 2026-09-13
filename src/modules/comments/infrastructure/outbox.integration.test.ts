@@ -203,6 +203,68 @@ function registerRelayTests(getHarness: () => Harness): void {
   });
 }
 
+/**
+ * A `Queue`-shaped double whose `add` rejects for one chosen job id and resolves for every other
+ * — the minimal double needed for I5 (final-review.md): no real BullMQ/Redis payload reliably
+ * reproduces "a row BullMQ can never accept", so this stands in for that row directly instead.
+ */
+function poisonedQueueDouble(poisonedEventId: string): Queue {
+  return {
+    add(_name: string, _data: unknown, opts?: { jobId?: string }) {
+      if (opts?.jobId === poisonedEventId) {
+        return Promise.reject(new Error(`job rejected for poisoned event ${poisonedEventId}`));
+      }
+      return Promise.resolve();
+    },
+  } as unknown as Queue;
+}
+
+/**
+ * I5: one row `domainEventsQueue.add` never accepts must not wedge its successors — before this
+ * fix, the batch ran inside one shared transaction, so the poisoned row's rejection rolled back
+ * the healthy row's publish too, and every later pass re-selected the same poisoned row first
+ * (oldest by `created_at`) and aborted again, forever.
+ */
+async function assertPoisonRowDoesNotBlockSuccessors(harness: Harness): Promise<void> {
+  const poisonedId = await commitCommentReceived(harness.database);
+  const healthyId = await commitCommentReceived(harness.database);
+  const queue = poisonedQueueDouble(poisonedId);
+
+  const result = await relayOutboxBatch(harness.database, queue);
+
+  expect(result.relayed).toBe(1);
+  const poisoned = await fetchOutboxRow(harness.database.drizzle, poisonedId);
+  expect(poisoned?.publishedAt).toBeNull();
+  expect(poisoned?.attempts).toBe(1);
+  const healthy = await fetchOutboxRow(harness.database.drizzle, healthyId);
+  expect(healthy?.publishedAt).not.toBeNull();
+}
+
+/** The counterpart to the poison-row case: if *every* row in the batch fails, the call still
+ * rejects — I5's isolation must not quietly turn a total outage into a silent no-op. */
+async function assertAllRowsFailingStillRejects(harness: Harness): Promise<void> {
+  const onlyId = await commitCommentReceived(harness.database);
+  const queue = poisonedQueueDouble(onlyId);
+
+  await expect(relayOutboxBatch(harness.database, queue)).rejects.toThrow();
+
+  const row = await fetchOutboxRow(harness.database.drizzle, onlyId);
+  expect(row?.publishedAt).toBeNull();
+  expect(row?.attempts).toBe(1);
+}
+
+function registerPoisonRowTests(getHarness: () => Harness): void {
+  describe('a poisoned row (I5, final-review.md)', () => {
+    it('does not block a healthy row in the same batch, and records the attempt', async () => {
+      await assertPoisonRowDoesNotBlockSuccessors(getHarness());
+    });
+
+    it('still rejects the call when every row in the batch fails', async () => {
+      await assertAllRowsFailingStillRejects(getHarness());
+    });
+  });
+}
+
 async function waitReady(connection: Redis, timeoutMs = 10_000): Promise<void> {
   if (connection.status === 'ready') {
     return;
@@ -412,6 +474,7 @@ describe('outbox under failure', () => {
 
   registerCommitVisibilityTests(() => harness);
   registerRelayTests(() => harness);
+  registerPoisonRowTests(() => harness);
   registerDroppedQueueTests(() => harness);
   registerEventPayloadTests(() => harness);
 });

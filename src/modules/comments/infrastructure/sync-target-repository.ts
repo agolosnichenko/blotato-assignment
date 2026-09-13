@@ -36,6 +36,7 @@
 import { and, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
+import { platformRegistry } from '#src/platforms/registry.ts';
 import type { Platform } from '#src/platforms/types.ts';
 
 /** The configurable §7.3 interval table, read from `src/app/config.ts`. */
@@ -128,25 +129,32 @@ interface BandMinutes {
   readonly sevenDaysToRetention: number;
 }
 
+const BANDS_BY_GROUP: Record<'meta' | 'bluesky', (config: SyncIntervalsConfig) => BandMinutes> = {
+  meta: (config) => ({
+    under24h: config.SYNC_INTERVALS_META_UNDER_24H_MINUTES,
+    oneToSevenDays: config.SYNC_INTERVALS_META_1_TO_7_DAYS_MINUTES,
+    sevenDaysToRetention: config.SYNC_INTERVALS_META_7_DAYS_TO_RETENTION_MINUTES,
+  }),
+  bluesky: (config) => ({
+    under24h: config.SYNC_INTERVALS_BLUESKY_UNDER_24H_MINUTES,
+    oneToSevenDays: config.SYNC_INTERVALS_BLUESKY_1_TO_7_DAYS_MINUTES,
+    sevenDaysToRetention: config.SYNC_INTERVALS_BLUESKY_7_DAYS_TO_RETENTION_MINUTES,
+  }),
+};
+
+/**
+ * I3 (final-review.md): reads `platformRegistry` for *which* configured band a platform uses
+ * instead of branching on `platform` itself — the one capability decision that used to bypass the
+ * registry (Principle IV). Adding comment support for a new platform is a `registry.ts` entry
+ * naming an existing `syncIntervalGroup` (or a new config group, which is a `config.ts` change,
+ * not one here) plus an adapter; this function needs no edit either way.
+ */
 function bandMinutesFor(platform: Platform, config: SyncIntervalsConfig): BandMinutes {
-  if (platform === 'bluesky') {
-    return {
-      under24h: config.SYNC_INTERVALS_BLUESKY_UNDER_24H_MINUTES,
-      oneToSevenDays: config.SYNC_INTERVALS_BLUESKY_1_TO_7_DAYS_MINUTES,
-      sevenDaysToRetention: config.SYNC_INTERVALS_BLUESKY_7_DAYS_TO_RETENTION_MINUTES,
-    };
+  const capabilities = platformRegistry[platform];
+  if (!capabilities.supportsComments) {
+    throw new Error(`computeNextSyncAt: platform '${platform}' does not support comment sync`);
   }
-  if (platform === 'instagram' || platform === 'facebook') {
-    return {
-      under24h: config.SYNC_INTERVALS_META_UNDER_24H_MINUTES,
-      oneToSevenDays: config.SYNC_INTERVALS_META_1_TO_7_DAYS_MINUTES,
-      sevenDaysToRetention: config.SYNC_INTERVALS_META_7_DAYS_TO_RETENTION_MINUTES,
-    };
-  }
-  // The capability registry limits comment sync to instagram/facebook/bluesky (CLAUDE.md
-  // "Architecture"); a caller reaching this with another platform is a bug upstream, not a case
-  // to silently default.
-  throw new Error(`computeNextSyncAt: platform '${platform}' does not support comment sync`);
+  return BANDS_BY_GROUP[capabilities.syncIntervalGroup](config);
 }
 
 /**

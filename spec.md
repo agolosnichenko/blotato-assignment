@@ -717,6 +717,38 @@ implementation.
 
 ### Recorded changes
 
+- **A complete walk excludes rows written in the last five minutes (narrows FR-019).** FR-019 lets
+  only a complete walk infer deletions from absence, and "complete" was read as "the walk finished".
+  It is not enough: a comment inserted *while* the walk was running — a reply this service just
+  published, a webhook delivery, or a comment the platform had not yet indexed — is absent from the
+  page through no fault of the platform, and absence is what marks it `deleted`. The revive guard
+  then makes that deletion permanent, so the race costs data rather than a retry. `inferDeletions`
+  now excludes rows whose last write falls inside a five-minute grace window before the walk
+  started. The cost is the honest direction: a genuinely deleted comment that was also edited in
+  that window survives until the next walk, which is a delay. The alternative cost was an
+  irreversible false deletion.
+- **D30's clear trigger is a successful platform call, not a projection read (clarifies D30).** D30
+  says a projection row flipping back to `active` clears the local `auth_failed` record, and read
+  literally that cannot be implemented: this service never writes `social_accounts.status`, so the
+  column reads `active` throughout an auth failure — "projection active plus a local record" is the
+  *normal* broken state, indistinguishable from a recovery. The implementable trigger is evidence,
+  not status: a **successful** platform call for that account proves the credential works again.
+  `AccountHealth.clear` is therefore called from a successful sync walk. Sync keeps running for an
+  account marked `auth_failed` — the calls are read-only and cost nothing when they fail — which is
+  what makes the clear reachable at all; the publish path needs no clear of its own, since it
+  resumes as soon as the effective status flips back.
+- **`domain-events` is trimmed on a schedule in this deployment (extends D9).** The outbox relay
+  publishes domain events to a BullMQ queue for consumers in other services — and in this
+  deployment there are none, so nothing ever moves a job out of `wait`. Bounded `removeOnComplete`
+  does not help a job that never completes, and D24 mandates Redis run `noeviction`, so the queue
+  grows until Redis refuses writes and takes the publish and sync paths down with it. Three options
+  were available: stop publishing (which would delete the D9 contract this service exists to
+  demonstrate), let it grow (a scheduled outage), or expire events nobody collected. The last is
+  what a real broker does. A scheduled job drops `domain-events` jobs older than
+  `DOMAIN_EVENTS_TTL_HOURS` (default 24) and logs how many, so an operator sees the count rather
+  than a silent loss. Postgres keeps the authoritative record either way: `outbox_events` rows are
+  marked published and retained under the normal purge, so a future consumer can be backfilled from
+  the table rather than from Redis — which is the D9 property that matters.
 - **An undecryptable credential is an `AuthError` (extends D26/D30).** `AccountCredentials`
   decrypts the stored token on every read, and a ciphertext that will not decrypt — a botched key
   rotation, a corrupted row — raised a bare crypto error. Nothing typed it, so nothing handled it:

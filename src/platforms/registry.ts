@@ -19,6 +19,13 @@ interface SupportedCapabilities {
   readonly textLimit: number;
   readonly textUnit: 'characters' | 'graphemes';
   readonly ingestion: 'webhook+sync' | 'sync';
+  /**
+   * Which `config.ts` `SYNC_INTERVALS_*` group this platform's refresh schedule reads — Meta's two
+   * comment-capable platforms (instagram, facebook) share one configured band, Bluesky has its own.
+   * Not the resolved minutes themselves: those still come from `SyncIntervalsConfig` at call time,
+   * so a deployment can retune them without a code change.
+   */
+  readonly syncIntervalGroup: 'meta' | 'bluesky';
 }
 
 interface UnsupportedCapabilities {
@@ -45,6 +52,7 @@ export const platformRegistry: Readonly<Record<Platform, PlatformCapabilities>> 
     textLimit: 2200,
     textUnit: 'characters',
     ingestion: 'webhook+sync',
+    syncIntervalGroup: 'meta',
   },
   facebook: {
     platform: 'facebook',
@@ -55,6 +63,7 @@ export const platformRegistry: Readonly<Record<Platform, PlatformCapabilities>> 
     textLimit: 8000,
     textUnit: 'characters',
     ingestion: 'webhook+sync',
+    syncIntervalGroup: 'meta',
   },
   bluesky: {
     platform: 'bluesky',
@@ -65,6 +74,7 @@ export const platformRegistry: Readonly<Record<Platform, PlatformCapabilities>> 
     textLimit: 300,
     textUnit: 'graphemes',
     ingestion: 'sync',
+    syncIntervalGroup: 'bluesky',
   },
   threads: { platform: 'threads', supportsComments: false, unsupportedReason: UNSUPPORTED_REASON },
   x: { platform: 'x', supportsComments: false, unsupportedReason: UNSUPPORTED_REASON },
