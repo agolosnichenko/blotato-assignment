@@ -21,8 +21,13 @@
  * `CommentRepository.list` and `CommentSelection` already exist (comment-repository.ts) — this
  * file drives the route, not the repository, per "test behaviour, not implementation" (brief).
  *
- * Filters (`postId`, `accountId`, `platforms`, …) are a later phase's tests (quickstart V3-V5);
- * this file only exercises the identifier-free form: `limit`/`cursor`/`order`.
+ * Filter semantics (T020, US2, quickstart.md V3-V4, per D31) are below the identifier-free US1
+ * cases: `platforms` union/validation, `topLevelOnly`+`parentCommentId` and `postId`+
+ * `parentCommentId` intersections, `since`/`until` inversion, `isOwn=false`, status visibility and
+ * the `sync` block's presence rule (R-08). `listCommentsQuerySchema` accepts none of these query
+ * keys yet and `selectionPredicate` ignores every key of `CommentSelection` it is given
+ * (comment-repository.ts), so every filter-dependent assertion below fails today, seeing the
+ * *unfiltered* workspace listing instead of the narrowed one.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -33,7 +38,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApi, type Api, type ApiDependencies } from '#src/app/api.ts';
 import { loadConfig } from '#src/app/config.ts';
 import { buildContainer } from '#src/app/container.ts';
-import { comments } from '#src/modules/comments/infrastructure/schema.ts';
+import { comments, commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
@@ -635,6 +640,378 @@ function registerPagingValidationTests(getHarness: () => Harness): void {
   });
 }
 
+interface DetailedSeedInput {
+  readonly workspaceId: WorkspaceId;
+  readonly socialAccountId: string;
+  readonly platform: string;
+  readonly postId?: string | null;
+  readonly platformPostId: string;
+  readonly occurredAt: Date;
+  readonly parentCommentId?: string | null;
+  readonly rootCommentId?: string | null;
+  readonly depth?: number;
+  readonly isOwn?: boolean;
+  readonly status?: 'queued' | 'processing' | 'posted' | 'failed' | 'deleted';
+}
+
+/** Like {@link seedComment}, with the extra columns T020's filter-semantics cases need to vary. */
+async function seedCommentDetailed(database: Database, input: DetailedSeedInput): Promise<string> {
+  const id = generateId();
+  await database.drizzle.insert(comments).values({
+    id,
+    workspaceId: input.workspaceId,
+    socialAccountId: input.socialAccountId,
+    platform: input.platform,
+    postId: input.postId ?? null,
+    platformPostId: input.platformPostId,
+    parentCommentId: input.parentCommentId ?? null,
+    rootCommentId: input.rootCommentId ?? null,
+    depth: input.depth ?? 0,
+    platformCommentId: `${input.platform}-comment-${id}`,
+    isOwn: input.isOwn ?? false,
+    source: 'sync',
+    authorPlatformId: `author-${id}`,
+    authorUsername: `author-${id}`,
+    authorDisplayName: null,
+    text: `comment ${id}`,
+    status: input.status ?? 'posted',
+    replyCount: 0,
+    lastActivityAt: input.occurredAt,
+    occurredAt: input.occurredAt,
+    createdAt: input.occurredAt,
+    updatedAt: input.occurredAt,
+  });
+  return id;
+}
+
+/** T020/V3: `platform=instagram&platform=bluesky` returns the union, excluding a third platform. */
+function registerPlatformUnionTest(getHarness: () => Harness): void {
+  it('returns the union for repeated platform params, excluding an unlisted platform', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const igAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const blueskyAccountId = await seedSocialAccount(harness.database, workspaceId, 'bluesky');
+    const fbAccountId = await seedSocialAccount(harness.database, workspaceId, 'facebook');
+    const now = new Date();
+    const igId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId: igAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: now,
+    });
+    const blueskyId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId: blueskyAccountId,
+      platform: 'bluesky',
+      platformPostId: `bluesky-external-${generateId()}`,
+      occurredAt: now,
+    });
+    const fbId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId: fbAccountId,
+      platform: 'facebook',
+      platformPostId: `facebook-external-${generateId()}`,
+      occurredAt: now,
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const search = new URLSearchParams();
+    search.append('platform', 'instagram');
+    search.append('platform', 'bluesky');
+    const raw = await harness.app.inject({
+      method: 'GET',
+      url: `/v1/comments?${search.toString()}`,
+      headers: { 'blotato-api-key': apiKey },
+    });
+
+    expect(raw.statusCode).toBe(200);
+    const body = raw.json() as CommentsPage;
+    const ids = body.items.map((item) => item.id);
+    expect(ids).toContain(igId);
+    expect(ids).toContain(blueskyId);
+    expect(ids).not.toContain(fbId);
+  });
+}
+
+/** T020/V3: `platform=tiktok` is accepted (a known, comment-less platform) and answers an empty page. */
+function registerKnownCommentlessPlatformTest(getHarness: () => Harness): void {
+  it('accepts platform=tiktok and returns an empty page', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const igAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId: igAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, { platform: 'tiktok' });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.body as unknown as CommentsPage).items).toEqual([]);
+  });
+}
+
+/** T020/V3: `platform=nonsense` — not one of the nine registry keys — is `400 VALIDATION_ERROR`. */
+function registerUnknownPlatformRejectedTest(getHarness: () => Harness): void {
+  it('rejects platform=nonsense with 400 VALIDATION_ERROR', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, { platform: 'nonsense' });
+
+    assertProblem(response, 400, 'VALIDATION_ERROR');
+  });
+}
+
+/**
+ * T020/V3 (clarification 2026-09-14): `topLevelOnly=true` together with `parentCommentId` is an
+ * empty `200`, not `400` — the two predicates (`parent_comment_id IS NULL` and `parent_comment_id
+ * = :id`) simply intersect to nothing, which is a valid question with an empty answer.
+ */
+function registerTopLevelOnlyWithParentIntersectionTest(getHarness: () => Harness): void {
+  it('answers 200 with an empty page for topLevelOnly=true combined with parentCommentId', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const parentId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, {
+      topLevelOnly: 'true',
+      parentCommentId: parentId,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.body as unknown as CommentsPage).items).toEqual([]);
+  });
+}
+
+/**
+ * T020/V3: a `postId` combined with a `parentCommentId` whose parent lives on a *different* post is
+ * an empty `200` — no reply row can carry both `postId: A` and `parentCommentId: <a parent stored
+ * under B>`, since a reply's own `postId` follows its parent's post.
+ */
+function registerPostIdWithMismatchedParentPostTest(getHarness: () => Harness): void {
+  it('answers 200 with an empty page for a postId and a parentCommentId from a different post', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const postA = await seedPostRow(harness.database, workspaceId, socialAccountId, 'instagram');
+    const postB = await seedPostRow(harness.database, workspaceId, socialAccountId, 'instagram');
+    await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      postId: postA.postId,
+      platformPostId: postA.platformPostId,
+      occurredAt: new Date(),
+    });
+    const parentOnB = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      postId: postB.postId,
+      platformPostId: postB.platformPostId,
+      occurredAt: new Date(),
+    });
+    await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      postId: postB.postId,
+      platformPostId: postB.platformPostId,
+      parentCommentId: parentOnB,
+      rootCommentId: parentOnB,
+      depth: 1,
+      occurredAt: new Date(),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, {
+      postId: postA.postId,
+      parentCommentId: parentOnB,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.body as unknown as CommentsPage).items).toEqual([]);
+  });
+}
+
+/** T020/V3: `since` later than `until` is an empty `200`, not `400` — an unsatisfiable window is
+ * still a well-formed question. */
+function registerSinceAfterUntilTest(getHarness: () => Harness): void {
+  it('answers 200 with an empty page when since is later than until', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date('2026-04-01T00:00:00.000Z'),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, {
+      since: '2026-04-02T00:00:00.000Z',
+      until: '2026-04-01T00:00:00.000Z',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.body as unknown as CommentsPage).items).toEqual([]);
+  });
+}
+
+/** T020: `isOwn=false` is honoured as `false`, not coerced to `true` — the negative case both an
+ * absent filter and a broken coercion would pass. */
+function registerIsOwnFalseHonouredTest(getHarness: () => Harness): void {
+  it('honours isOwn=false, excluding the workspace own comment', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const audienceId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(),
+      isOwn: false,
+    });
+    const ownId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(),
+      isOwn: true,
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, { isOwn: 'false' });
+
+    expect(response.statusCode).toBe(200);
+    const ids = (response.body as unknown as CommentsPage).items.map((item) => item.id);
+    expect(ids).toContain(audienceId);
+    expect(ids).not.toContain(ownId);
+  });
+}
+
+/** T020: there is no status filter — a caller's own queued/processing/failed comments appear
+ * alongside posted ones, governed only by the existing visibility rule. */
+function registerNonPostedStatusesVisibleTest(getHarness: () => Harness): void {
+  it('lists queued, processing and failed comments alongside posted ones', async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const now = new Date();
+    const statuses = ['queued', 'processing', 'posted', 'failed'] as const;
+    const idsByStatus = new Map<string, string>();
+    for (const status of statuses) {
+      // Distinct statuses inserted sequentially so a later `occurredAt` reliably distinguishes
+      // them if the assertion ever needs order — the seed itself has no ordering requirement.
+      // oxlint-disable-next-line no-await-in-loop
+      const id = await seedCommentDetailed(harness.database, {
+        workspaceId,
+        socialAccountId,
+        platform: 'instagram',
+        platformPostId: `instagram-external-${generateId()}`,
+        occurredAt: now,
+        status,
+      });
+      idsByStatus.set(status, id);
+    }
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, { limit: '20' });
+
+    expect(response.statusCode).toBe(200);
+    const ids = (response.body as unknown as CommentsPage).items.map((item) => item.id);
+    for (const status of statuses) {
+      expect(ids, `status ${status} should be visible`).toContain(idsByStatus.get(status));
+    }
+  });
+}
+
+/** T020/V4 (R-08): `sync` is present when a post is named, other filters notwithstanding. */
+function registerSyncPresentForPostIdTest(getHarness: () => Harness): void {
+  it("includes 'sync' for ?postId=…&platform=instagram", async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const seededPost = await seedPostRow(
+      harness.database,
+      workspaceId,
+      socialAccountId,
+      'instagram',
+    );
+    const lastSyncedAt = new Date('2026-04-03T00:00:00.000Z');
+    await harness.database.drizzle.insert(commentSyncTargets).values({
+      id: generateId(),
+      workspaceId,
+      socialAccountId,
+      postId: seededPost.postId,
+      platformPostId: seededPost.platformPostId,
+      lastSyncedAt,
+      nextSyncAt: new Date(Date.now() + 60_000),
+      lastError: null,
+      manualCooldownUntil: null,
+      ageAnchorAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const response = await fetchComments(harness, apiKey, {
+      postId: seededPost.postId,
+      platform: 'instagram',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect('sync' in response.body).toBe(true);
+  });
+}
+
+/**
+ * T020/V4: `'sync' in body === false` for a selection that names an identifier *other than a post*
+ * — asserted for both `accountId` and `parentCommentId` (not only the identifier-free case), since
+ * a condition written as "an identifier filter is present" instead of "a post is named" would pass
+ * the identifier-free assertion and still violate the contract.
+ */
+function registerSyncAbsentForNonPostIdentifiersTest(getHarness: () => Harness): void {
+  it("omits 'sync' for ?accountId=… and for ?parentCommentId=…", async () => {
+    const harness = getHarness();
+    const workspaceId = await seedWorkspace(harness.database);
+    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
+    const parentId = await seedCommentDetailed(harness.database, {
+      workspaceId,
+      socialAccountId,
+      platform: 'instagram',
+      platformPostId: `instagram-external-${generateId()}`,
+      occurredAt: new Date(),
+    });
+    const apiKey = await mintApiKey(harness.database, workspaceId);
+
+    const byAccount = await fetchComments(harness, apiKey, { accountId: socialAccountId });
+    expect(byAccount.statusCode).toBe(200);
+    expect('sync' in byAccount.body).toBe(false);
+
+    const byParent = await fetchComments(harness, apiKey, { parentCommentId: parentId });
+    expect(byParent.statusCode).toBe(200);
+    expect('sync' in byParent.body).toBe(false);
+  });
+}
+
 describe('GET /v1/comments', () => {
   let harness: Harness;
 
@@ -652,4 +1029,17 @@ describe('GET /v1/comments', () => {
   registerNoSyncKeyTest(() => harness);
   registerExactPagingUnderConcurrentInsertsTest(() => harness);
   registerPagingValidationTests(() => harness);
+
+  describe('filter semantics (T020, quickstart.md V3-V4)', () => {
+    registerPlatformUnionTest(() => harness);
+    registerKnownCommentlessPlatformTest(() => harness);
+    registerUnknownPlatformRejectedTest(() => harness);
+    registerTopLevelOnlyWithParentIntersectionTest(() => harness);
+    registerPostIdWithMismatchedParentPostTest(() => harness);
+    registerSinceAfterUntilTest(() => harness);
+    registerIsOwnFalseHonouredTest(() => harness);
+    registerNonPostedStatusesVisibleTest(() => harness);
+    registerSyncPresentForPostIdTest(() => harness);
+    registerSyncAbsentForNonPostIdentifiersTest(() => harness);
+  });
 });

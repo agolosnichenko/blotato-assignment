@@ -22,6 +22,15 @@
  * `/docs*`, the Meta webhook) authenticate themselves a different way (or are public by D25) and
  * are out of scope for both sweeps.
  *
+ * T021 (US2, quickstart.md V5, per D31): the three nested reads `GET /v1/posts/:postId/comments`,
+ * `GET /v1/comments/:commentId/replies` and `GET /v1/accounts/:accountId/comments` are dropped from
+ * `TENANCY_ENDPOINTS` here — the collection replaces them — and one case per identifier-shaped
+ * filter (`postId`, `accountId`, `parentCommentId`) is added below instead, each asserting `404
+ * NOT_FOUND` for a foreign workspace's resource. `selectionPredicate` (comment-repository.ts)
+ * ignores every `CommentSelection` key it is given today, so `GET /v1/comments` never resolves
+ * tenancy for these filters yet — every case below sees a `200` (the unfiltered listing) instead of
+ * the `404` it asserts.
+ *
  * The credential section pins that "no header", "unrecognized prefix" and "revoked key" are truly
  * the same failure as far as a caller can tell (`auth.ts`'s single `unauthorized()` call site).
  *
@@ -293,31 +302,10 @@ interface TenancyEndpoint {
 
 const TENANCY_ENDPOINTS: readonly TenancyEndpoint[] = [
   {
-    label: 'GET /v1/posts/:postId/comments',
-    method: 'GET',
-    path: (id) => `/v1/posts/${id}/comments`,
-    resourceId: (seeded) => seeded.postId,
-    successStatus: 200,
-  },
-  {
-    label: 'GET /v1/comments/:commentId/replies',
-    method: 'GET',
-    path: (id) => `/v1/comments/${id}/replies`,
-    resourceId: (seeded) => seeded.topLevelCommentId,
-    successStatus: 200,
-  },
-  {
     label: 'GET /v1/comments/:commentId',
     method: 'GET',
     path: (id) => `/v1/comments/${id}`,
     resourceId: (seeded) => seeded.topLevelCommentId,
-    successStatus: 200,
-  },
-  {
-    label: 'GET /v1/accounts/:accountId/comments',
-    method: 'GET',
-    path: (id) => `/v1/accounts/${id}/comments`,
-    resourceId: (seeded) => seeded.socialAccountId,
     successStatus: 200,
   },
   {
@@ -399,6 +387,51 @@ function registerTenancySweep(getHarness: () => Harness, getWorkspaces: () => Wo
       assertNotFoundIndistinguishable(crossWorkspace, missing);
     });
   });
+}
+
+/** One case per identifier-shaped `GET /v1/comments` filter (T021, V5, R-07). */
+interface CollectionFilterTenancyCase {
+  readonly label: string;
+  readonly query: (foreign: SeededWorkspace) => string;
+}
+
+const COLLECTION_FILTER_TENANCY_CASES: readonly CollectionFilterTenancyCase[] = [
+  { label: 'postId', query: (foreign) => `postId=${foreign.postId}` },
+  { label: 'accountId', query: (foreign) => `accountId=${foreign.socialAccountId}` },
+  { label: 'parentCommentId', query: (foreign) => `parentCommentId=${foreign.topLevelCommentId}` },
+];
+
+/**
+ * T021/V5: calling `GET /v1/comments` with another workspace's `postId`/`accountId`/
+ * `parentCommentId` is `404 NOT_FOUND` — never `403`, and never an empty `200`, since an empty
+ * success would confirm the identifier is well-formed and merely empty (R-07).
+ */
+function registerCollectionFilterTenancyTests(
+  getHarness: () => Harness,
+  getWorkspaces: () => WorkspacePair,
+): void {
+  describe.each(COLLECTION_FILTER_TENANCY_CASES)(
+    'GET /v1/comments?$label (foreign workspace)',
+    (testCase) => {
+      it('is 404, never 403 — indistinguishable from a missing resource', async () => {
+        const harness = getHarness();
+        const [own, other] = getWorkspaces();
+
+        const ownKey = await mintApiKey(harness.database, own.workspaceId);
+        const crossWorkspace = await request(
+          harness,
+          'GET',
+          `/v1/comments?${testCase.query(other)}`,
+          ownKey,
+        );
+
+        expect(crossWorkspace.statusCode).toBe(404);
+        expect(crossWorkspace.statusCode).not.toBe(403);
+        expect(crossWorkspace.headers['content-type']).toContain('application/problem+json');
+        expect(crossWorkspace.body['code']).toBe('NOT_FOUND');
+      });
+    },
+  );
 }
 
 const PLATFORMS_PATH = '/v1/platforms';
@@ -562,6 +595,10 @@ describe('tenancy and credential sweep (T102)', () => {
   });
 
   registerTenancySweep(
+    () => harness,
+    () => [ownWorkspace, otherWorkspace],
+  );
+  registerCollectionFilterTenancyTests(
     () => harness,
     () => [ownWorkspace, otherWorkspace],
   );

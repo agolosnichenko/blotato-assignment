@@ -6,10 +6,17 @@
 // thread on top of the full harness; see the same justification on post-comments.integration.test.ts.
 
 /**
- * Contract tests for `GET /v1/comments/:commentId/replies` (T041, V1).
+ * Contract tests for the direct-replies-of-a-comment read, driven through the flat collection
+ * (T019/T041, US2, quickstart.md V3, per D31): `GET /v1/comments?parentCommentId=:id&order=asc`
+ * replaces `GET /v1/comments/:commentId/replies`. `order=asc` is explicit — the collection's own
+ * default is `desc` for every selection (D31, research.md R-06), unlike the removed route.
  *
- * Like `post-comments.integration.test.ts`, this fails today because no route is registered at
- * this path yet — a 404 from Fastify's own not-found handler, not from the assertions below.
+ * `GET /v1/comments` is registered and answers `200` unfiltered today, but `parentCommentId` is
+ * not accepted by `listCommentsQuerySchema` yet and `selectionPredicate` ignores every key of
+ * `CommentSelection` it is given — every scenario below that relies on the filter actually
+ * narrowing the result set fails today, seeing the *unfiltered* workspace listing (in `desc` order
+ * unless `order=asc` is itself honoured) instead of just the parent's replies. The old address's
+ * `404` assertion also fails today: the nested route is still registered and still answers `200`.
  *
  * The placeholder rule (FR-005, A4) is a privacy control, not a display convenience: FR-030 nulls
  * a deleted comment's text and author, and a deleted comment is kept visible only while it still
@@ -192,13 +199,18 @@ interface CommentBody {
   replyCount: number;
 }
 
+/**
+ * Drives `GET /v1/comments?parentCommentId=:id&order=asc` (V3) — the collection selection that
+ * replaces `GET /v1/comments/:commentId/replies`. `order=asc` is explicit (D31, research.md R-06):
+ * the collection's own default is `desc` for every selection, unlike the removed route.
+ */
 async function fetchReplies(
   harness: Harness,
   commentId: string,
 ): Promise<{ statusCode: number; body: RepliesPage }> {
   const response = await harness.app.inject({
     method: 'GET',
-    url: `/v1/comments/${commentId}/replies`,
+    url: `/v1/comments?parentCommentId=${commentId}&order=asc`,
     headers: { 'blotato-api-key': harness.apiKey },
   });
   return { statusCode: response.statusCode, body: response.json() as RepliesPage };
@@ -328,7 +340,74 @@ function registerDeletedChildlessOmittedTest(getHarness: () => Harness): void {
   });
 }
 
-describe('GET /v1/comments/:commentId/replies', () => {
+/**
+ * T019/V3's negative-data half: `parentCommentId` must exclude a reply that belongs to a *sibling*
+ * thread's parent — a selection that silently ignores the filter would return both parents' replies
+ * and pass a positive-only fixture.
+ */
+function registerFilterExclusionTest(getHarness: () => Harness): void {
+  it('excludes a reply belonging to a different parent', async () => {
+    const harness = getHarness();
+    const base = Date.parse('2026-01-04T00:00:00.000Z');
+    const parentId = await seedComment(harness, {
+      parentCommentId: null,
+      rootCommentId: null,
+      depth: 0,
+      occurredAt: new Date(base),
+    });
+    const ownReplyId = await seedComment(harness, {
+      parentCommentId: parentId,
+      rootCommentId: parentId,
+      depth: 1,
+      occurredAt: new Date(base + 10),
+    });
+    const siblingParentId = await seedComment(harness, {
+      parentCommentId: null,
+      rootCommentId: null,
+      depth: 0,
+      occurredAt: new Date(base + 20),
+    });
+    const siblingReplyId = await seedComment(harness, {
+      parentCommentId: siblingParentId,
+      rootCommentId: siblingParentId,
+      depth: 1,
+      occurredAt: new Date(base + 30),
+    });
+
+    const { statusCode, body } = await fetchReplies(harness, parentId);
+
+    expect(statusCode).toBe(200);
+    const ids = body.items.map((item) => item.id);
+    expect(ids).toContain(ownReplyId);
+    expect(ids).not.toContain(siblingReplyId);
+    expect(ids).not.toContain(siblingParentId);
+  });
+}
+
+/** T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009). */
+function registerOldAddressGoneTest(getHarness: () => Harness): void {
+  it('answers 404 NOT_FOUND at the old GET /v1/comments/:commentId/replies address', async () => {
+    const harness = getHarness();
+    const parentId = await seedComment(harness, {
+      parentCommentId: null,
+      rootCommentId: null,
+      depth: 0,
+      occurredAt: new Date(),
+    });
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/v1/comments/${parentId}/replies`,
+      headers: { 'blotato-api-key': harness.apiKey },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.headers['content-type']).toContain('application/problem+json');
+    expect((response.json() as { code: string }).code).toBe('NOT_FOUND');
+  });
+}
+
+describe('GET /v1/comments?parentCommentId&order=asc (was GET /v1/comments/:commentId/replies)', () => {
   let harness: Harness;
 
   beforeAll(async () => {
@@ -342,4 +421,6 @@ describe('GET /v1/comments/:commentId/replies', () => {
   registerOrderAndReplyCountTest(() => harness);
   registerDeletedWithLiveRepliesTest(() => harness);
   registerDeletedChildlessOmittedTest(() => harness);
+  registerFilterExclusionTest(() => harness);
+  registerOldAddressGoneTest(() => harness);
 });

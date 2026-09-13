@@ -8,12 +8,18 @@
 // disable on post-comments.integration.test.ts and create-reply.integration.test.ts.
 
 /**
- * Contract tests for `GET /v1/accounts/:accountId/comments` (T091, V8).
+ * Contract tests for the account-inbox read, driven through the flat collection (T019/T091, US2,
+ * quickstart.md V3, per D31): `GET /v1/comments?accountId=:id` replaces
+ * `GET /v1/accounts/:accountId/comments`.
  *
- * Nothing under `src/modules/comments/{application,infrastructure,http}` exposes this route yet:
- * the repository method (T092), the use case (T093) and the route (T094) do not exist, so every
- * request here 404s through Fastify's own not-found handler today, not through the assertions
- * below — the same relationship `post-comments.integration.test.ts` has to T040/T045.
+ * `GET /v1/comments` is registered and answers `200` unfiltered today, but `accountId` is not
+ * accepted by `listCommentsQuerySchema` yet and `selectionPredicate` ignores every key of
+ * `CommentSelection` it is given (comment-repository.ts) — every scenario below that relies on the
+ * filter actually narrowing the result set fails today, seeing the *unfiltered* workspace listing
+ * instead of just this account's comments; `since`/`until`/`isOwn` are likewise not yet accepted by
+ * this schema. The old address's `404` assertion also fails today: the nested route is still
+ * registered and still answers `200` — the same relationship `post-comments.integration.test.ts`
+ * and `replies.integration.test.ts` have to their own removed routes.
  *
  * D13 is why this endpoint exists at all: a comment on a post never published through this
  * platform has `post_id: null` (data-model.md §2) because there is no `posts` row to reference,
@@ -206,16 +212,22 @@ interface JsonResponse<TBody> {
   body: TBody;
 }
 
+/**
+ * Drives `GET /v1/comments?accountId=:id` (V3) — the collection selection that replaces
+ * `GET /v1/accounts/:accountId/comments`. `accountId` merges with whatever `query` the caller
+ * supplies (`since`/`until`/`isOwn`/pagination), so every existing case keeps driving those params
+ * exactly as before.
+ */
 async function fetchInbox(
   harness: Harness,
   accountId: string,
   apiKey: string,
   query: Record<string, string>,
 ): Promise<JsonResponse<InboxPage>> {
-  const search = new URLSearchParams(query).toString();
+  const search = new URLSearchParams({ accountId, ...query }).toString();
   const response = await harness.app.inject({
     method: 'GET',
-    url: `/v1/accounts/${accountId}/comments${search === '' ? '' : `?${search}`}`,
+    url: `/v1/comments?${search}`,
     headers: { 'blotato-api-key': apiKey },
   });
   return {
@@ -502,7 +514,62 @@ function registerStaleProjectionSplitTest(getHarness: () => Harness): void {
   });
 }
 
-describe('GET /v1/accounts/:accountId/comments', () => {
+/**
+ * T019/V3's negative-data half: `accountId` must exclude a comment belonging to a *different*
+ * social account in the same workspace — a selection that silently ignores the filter would return
+ * both accounts' comments and pass a positive-only fixture.
+ */
+function registerFilterExclusionTest(getHarness: () => Harness): void {
+  it('excludes a comment belonging to a different social account', async () => {
+    const harness = getHarness();
+    const socialAccountId = await seedSocialAccount(harness, 'instagram');
+    const otherAccountId = await seedSocialAccount(harness, 'bluesky');
+    const base = Date.parse('2026-03-04T00:00:00.000Z');
+    const ownId = await seedComment(harness, {
+      socialAccountId,
+      platform: 'instagram',
+      postId: null,
+      platformPostId: `instagram-external-post-${generateId()}`,
+      occurredAt: new Date(base),
+    });
+    const otherId = await seedComment(harness, {
+      socialAccountId: otherAccountId,
+      platform: 'bluesky',
+      postId: null,
+      platformPostId: `bluesky-external-post-${generateId()}`,
+      occurredAt: new Date(base + 1000),
+    });
+
+    const apiKey = await mintApiKey(harness.database, harness.workspaceId);
+    const { statusCode, body } = await fetchInbox(harness, socialAccountId, apiKey, {});
+
+    expect(statusCode).toBe(200);
+    const ids = body.items.map((item) => item.id);
+    expect(ids).toContain(ownId);
+    expect(ids).not.toContain(otherId);
+  });
+}
+
+/** T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009). */
+function registerOldAddressGoneTest(getHarness: () => Harness): void {
+  it('answers 404 NOT_FOUND at the old GET /v1/accounts/:accountId/comments address', async () => {
+    const harness = getHarness();
+    const socialAccountId = await seedSocialAccount(harness, 'instagram');
+    const apiKey = await mintApiKey(harness.database, harness.workspaceId);
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/v1/accounts/${socialAccountId}/comments`,
+      headers: { 'blotato-api-key': apiKey },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.headers['content-type']).toContain('application/problem+json');
+    expect((response.json() as { code: string }).code).toBe('NOT_FOUND');
+  });
+}
+
+describe('GET /v1/comments?accountId (was GET /v1/accounts/:accountId/comments)', () => {
   let harness: Harness;
 
   beforeAll(async () => {
@@ -519,4 +586,6 @@ describe('GET /v1/accounts/:accountId/comments', () => {
   registerReplyToExternalPostCommentTest(() => harness);
   registerCreateTopLevelUnknownPostTest(() => harness);
   registerStaleProjectionSplitTest(() => harness);
+  registerFilterExclusionTest(() => harness);
+  registerOldAddressGoneTest(() => harness);
 });
