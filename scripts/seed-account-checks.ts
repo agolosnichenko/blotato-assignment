@@ -7,6 +7,8 @@
  * `seed-account.ts` stays well under the project's 300-line-per-file limit.
  */
 
+import { createHash } from 'node:crypto';
+
 /** One overridable value, and whether it came from the environment or the default. */
 export interface ResolvedValue {
   readonly value: string;
@@ -55,6 +57,50 @@ export interface AccountEnvKeys {
   readonly defaultPlatformPostId: string;
   readonly tokenEnvVar: string;
   readonly placeholderToken: string;
+  /** Unset for a platform that has no variant (bluesky), which therefore cannot be overridden. */
+  readonly authVariantEnvVar?: string;
+}
+
+export type AuthVariant = 'facebook_login' | 'instagram_login' | null;
+
+const AUTH_VARIANTS = new Set(['facebook_login', 'instagram_login', 'null']);
+
+/**
+ * Resolves an account's Meta auth variant (D28), which decides the Graph host and the kind of token
+ * the adapter sends — seeding the wrong one fails at runtime as an `AuthError`, long after this
+ * script reports success, so an unrecognised value is refused here rather than defaulted.
+ *
+ * Args:
+ *   env: Environment to read.
+ *   keys: The account's override wiring; an absent `authVariantEnvVar` means not overridable.
+ *   defaultVariant: The variant compiled into the account definition.
+ *
+ * Returns:
+ *   The resolved variant, `null` when the variable holds the literal `null`.
+ *
+ * Raises:
+ *   Error: If the variable holds anything other than the accepted values.
+ */
+export function resolveAuthVariant(
+  env: NodeJS.ProcessEnv,
+  keys: AccountEnvKeys,
+  defaultVariant: AuthVariant,
+): AuthVariant {
+  const varName = keys.authVariantEnvVar;
+  if (varName === undefined) {
+    return defaultVariant;
+  }
+  const raw = env[varName];
+  if (raw === undefined || raw.length === 0) {
+    return defaultVariant;
+  }
+  if (!AUTH_VARIANTS.has(raw)) {
+    throw new Error(
+      `${varName}="${raw}" is not a known auth variant. ` +
+        `Accepted: facebook_login, instagram_login, null.`,
+    );
+  }
+  return raw === 'null' ? null : (raw as AuthVariant);
 }
 
 /** What this run resolved for one demo account, before any database access. */
@@ -63,19 +109,40 @@ export interface ResolvedAccountValues {
   readonly username: ResolvedValue;
   readonly platformPostId: ResolvedValue;
   readonly token: ResolvedValue;
+  readonly authVariant: AuthVariant;
 }
 
 /** Resolves every overridable field for one demo account in one place. */
 export function resolveAccountValues(
   env: NodeJS.ProcessEnv,
   keys: AccountEnvKeys,
+  defaultVariant: AuthVariant,
 ): ResolvedAccountValues {
   return {
     platformAccountId: resolveOverride(env, keys.accountIdEnvVar, keys.defaultAccountId),
     username: resolveOverride(env, keys.usernameEnvVar, keys.defaultUsername),
     platformPostId: resolveOverride(env, keys.platformPostIdEnvVar, keys.defaultPlatformPostId),
     token: resolveOverride(env, keys.tokenEnvVar, keys.placeholderToken),
+    authVariant: resolveAuthVariant(env, keys, defaultVariant),
   };
+}
+
+/**
+ * A credential's identity, safe to print: the first 8 hex characters of its sha256.
+ *
+ * Conflict detection cannot compare stored ciphertext against new ciphertext — AES-256-GCM uses a
+ * fresh IV per encryption, so the same token encrypts to different bytes every time. It compares
+ * decrypted plaintext instead, and reports the difference through this fingerprint so a refusal
+ * never prints a token or any part of one.
+ *
+ * Args:
+ *   token: The credential's plaintext bytes.
+ *
+ * Returns:
+ *   An 8-character hex prefix of the sha256 digest.
+ */
+export function credentialFingerprint(token: Buffer): string {
+  return createHash('sha256').update(token).digest('hex').slice(0, 8);
 }
 
 /** One field that differs between a stored row and what this run would seed. */

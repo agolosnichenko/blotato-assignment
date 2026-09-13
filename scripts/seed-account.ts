@@ -72,6 +72,7 @@ const DEMO_ACCOUNTS: readonly DemoAccount[] = [
     id: '22222222-2222-4222-8222-222222222221',
     platform: 'instagram',
     authVariant: 'instagram_login',
+    authVariantEnvVar: 'SEED_INSTAGRAM_AUTH_VARIANT',
     accountIdEnvVar: 'SEED_INSTAGRAM_ACCOUNT_ID',
     defaultAccountId: 'demo-instagram-account',
     usernameEnvVar: 'SEED_INSTAGRAM_USERNAME',
@@ -86,6 +87,7 @@ const DEMO_ACCOUNTS: readonly DemoAccount[] = [
     id: '22222222-2222-4222-8222-222222222222',
     platform: 'facebook',
     authVariant: 'facebook_login',
+    authVariantEnvVar: 'SEED_FACEBOOK_AUTH_VARIANT',
     accountIdEnvVar: 'SEED_FACEBOOK_ACCOUNT_ID',
     defaultAccountId: 'demo-facebook-account',
     usernameEnvVar: 'SEED_FACEBOOK_USERNAME',
@@ -118,7 +120,10 @@ const DEMO_ACCOUNTS: readonly DemoAccount[] = [
  */
 function resolveAllAccounts(): ReadonlyMap<string, ReturnType<typeof resolveAccountValues>> {
   return new Map(
-    DEMO_ACCOUNTS.map((account) => [account.id, resolveAccountValues(process.env, account)]),
+    DEMO_ACCOUNTS.map((account) => [
+      account.id,
+      resolveAccountValues(process.env, account, account.authVariant),
+    ]),
   );
 }
 

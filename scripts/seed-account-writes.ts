@@ -11,12 +11,16 @@
 import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { encryptCredentials } from '#src/modules/platform-core/local/account-credentials.ts';
+import {
+  createLocalAccountCredentials,
+  encryptCredentials,
+} from '#src/modules/platform-core/local/account-credentials.ts';
 import type { createLocalPostPublished } from '#src/modules/platform-core/local/post-published.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
-import { hashSecret } from '#src/shared/crypto.ts';
+import { hashSecret, type KeyMaterial } from '#src/shared/crypto.ts';
 import { generateId } from '#src/shared/ids.ts';
 import {
+  credentialFingerprint,
   detectConflicts,
   formatConflictMessage,
   type DemoAccount,
@@ -52,23 +56,63 @@ export async function seedWorkspace(db: Db, workspaceId: string): Promise<void> 
  * what `resolved` is about to seed — see `seed-account.ts`'s module docstring for why an in-place
  * update is not an option here.
  */
+async function storedCredentialFingerprint(
+  db: Db,
+  socialAccountId: string,
+  keyMaterial: KeyMaterial,
+): Promise<string> {
+  try {
+    const found = await createLocalAccountCredentials(db, keyMaterial).findBySocialAccountId(
+      socialAccountId,
+    );
+    return found.found ? credentialFingerprint(found.value.token) : 'absent';
+  } catch {
+    // An undecryptable row (a different key, a botched rotation) is reported as a conflict rather
+    // than crashing the seed: the operator's next step is the same either way — clear the row.
+    return 'undecryptable';
+  }
+}
+
 async function checkAccountForConflicts(
   db: Db,
   account: DemoAccount,
   resolved: ResolvedAccountValues,
+  keyMaterial: KeyMaterial,
 ): Promise<void> {
   const [existing] = await db
     .select({
       platformAccountId: socialAccounts.platformAccountId,
       username: socialAccounts.username,
+      authVariant: socialAccounts.authVariant,
     })
     .from(socialAccounts)
     .where(eq(socialAccounts.id, account.id));
 
-  const conflicts = detectConflicts(existing, {
-    platformAccountId: resolved.platformAccountId.value,
-    username: resolved.username.value,
-  });
+  // Compared as fingerprints of the *decrypted* values, never as ciphertext: AES-256-GCM uses a
+  // fresh IV per encryption, so identical tokens never produce identical bytes. Without this, a
+  // re-run carrying a newly issued token would report success and leave the old one in place —
+  // the exact silent divergence the rest of this check exists to prevent.
+  const storedFingerprint =
+    existing === undefined
+      ? undefined
+      : await storedCredentialFingerprint(db, account.id, keyMaterial);
+
+  const conflicts = detectConflicts(
+    existing === undefined
+      ? undefined
+      : {
+          platformAccountId: existing.platformAccountId,
+          username: existing.username,
+          authVariant: String(existing.authVariant),
+          credential: storedFingerprint ?? 'absent',
+        },
+    {
+      platformAccountId: resolved.platformAccountId.value,
+      username: resolved.username.value,
+      authVariant: String(resolved.authVariant),
+      credential: credentialFingerprint(Buffer.from(resolved.token.value, 'utf8')),
+    },
+  );
   if (conflicts.length > 0) {
     throw new Error(
       formatConflictMessage(`Social account ${account.id} (${account.platform})`, conflicts),
@@ -81,9 +125,9 @@ export async function seedAccount(
   workspaceId: string,
   account: DemoAccount,
   resolved: ResolvedAccountValues,
-  keyMaterial: Parameters<typeof encryptCredentials>[1],
+  keyMaterial: KeyMaterial,
 ): Promise<void> {
-  await checkAccountForConflicts(db, account, resolved);
+  await checkAccountForConflicts(db, account, resolved, keyMaterial);
 
   const credentialsCiphertext = encryptCredentials(
     Buffer.from(resolved.token.value, 'utf8'),
@@ -98,7 +142,7 @@ export async function seedAccount(
       platform: account.platform,
       platformAccountId: resolved.platformAccountId.value,
       username: resolved.username.value,
-      authVariant: account.authVariant,
+      authVariant: resolved.authVariant,
       credentialsCiphertext,
       credentialsKeyVersion: keyMaterial.keyVersion,
       status: 'active',
