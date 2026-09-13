@@ -62,7 +62,22 @@ import { TEST_CREDENTIALS_ENCRYPTION_KEY, TEST_ENV } from '#src/shared/testing/t
 
 const PLATFORM: Platform = 'bluesky';
 const TOTAL_COMMENTS = 100_000;
-const POST_COUNT = 500;
+/**
+ * The distribution across workspaces/accounts/posts (T017 fix round 2, research.md R-04/R-05): a
+ * single workspace and a single social account owning the whole table made `workspace_id` and
+ * `social_account_id` both match 100% of rows, so once their pathkeys agreed with the indexes
+ * (fix round 1), the planner's choice between `comments_workspace_idx` and
+ * `comments_social_account_idx` for the account read was an arbitrary tie at equal cost. Five
+ * workspaces of five accounts each makes `workspace_id` a 1-in-5 filter and `social_account_id` a
+ * 1-in-25 filter — selective the way they would be in a real deployment, where a workspace holds
+ * several accounts and the whole table holds many workspaces. `POSTS_PER_ACCOUNT` keeps
+ * `COMMENTS_PER_POST` identical to before this change, so the pre-existing top-level assertion's
+ * own selectivity is unaffected.
+ */
+const WORKSPACE_COUNT = 5;
+const ACCOUNTS_PER_WORKSPACE = 5;
+const POSTS_PER_ACCOUNT = 20;
+const POST_COUNT = WORKSPACE_COUNT * ACCOUNTS_PER_WORKSPACE * POSTS_PER_ACCOUNT;
 const COMMENTS_PER_POST = TOTAL_COMMENTS / POST_COUNT;
 const SEED_CHUNK_SIZE = 1000;
 const READ_BUDGET_MS = 300;
@@ -100,22 +115,134 @@ async function mintApiKey(database: Database, workspaceId: WorkspaceId): Promise
   return `blt_${prefix}_${secret}`;
 }
 
-/** One social account with real, decryptable credentials — the write benchmark publishes through it. */
-async function seedSocialAccount(database: Database, workspaceId: WorkspaceId): Promise<string> {
+/**
+ * One social account with real, decryptable credentials. Every seeded account gets real
+ * credentials, not just the primary one the write benchmark publishes through — the accounts this
+ * file adds purely to give `social_account_id` genuine selectivity (T017 fix round 2) are cheap
+ * enough (25 total) that a second, credential-less code path would only be more code to keep in
+ * sync with this one.
+ */
+async function seedSocialAccount(
+  database: Database,
+  workspaceId: WorkspaceId,
+  label: string,
+): Promise<string> {
   const socialAccountId = generateId();
   const credentialsCiphertext = encryptCredentials(Buffer.from('app-password'), keyMaterial());
   await database.drizzle.insert(socialAccounts).values({
     id: socialAccountId,
     workspaceId,
     platform: PLATFORM,
-    platformAccountId: 'bsky-benchmark-account',
-    username: 'benchmark',
+    platformAccountId: `bsky-account-${label}`,
+    username: label,
     credentialsCiphertext,
     credentialsKeyVersion: 1,
     status: 'active',
     createdAt: new Date(),
   });
   return socialAccountId;
+}
+
+async function seedWorkspace(database: Database, name: string): Promise<WorkspaceId> {
+  const workspaceId = asWorkspaceId(generateId());
+  await database.drizzle.insert(workspaces).values({
+    id: workspaceId,
+    name,
+    contactLimitMonthly: 1_000_000,
+    createdAt: new Date(),
+  });
+  return workspaceId;
+}
+
+/** The `workspaceIndex`th workspace — index 0 is the caller's already-seeded primary workspace. */
+function resolveWorkspace(
+  database: Database,
+  primaryWorkspaceId: WorkspaceId,
+  workspaceIndex: number,
+): Promise<WorkspaceId> {
+  if (workspaceIndex === 0) {
+    return Promise.resolve(primaryWorkspaceId);
+  }
+  return seedWorkspace(database, `Benchmark workspace ${workspaceIndex}`);
+}
+
+/**
+ * The `accountIndex`th account of `workspaceId` — workspace 0's account 0 is the caller's
+ * already-seeded, already-credentialed primary account, the one the write benchmark publishes
+ * through and the read benchmark/top-level `EXPLAIN` assertion reads through.
+ */
+function resolveSocialAccount(
+  database: Database,
+  workspaceId: WorkspaceId,
+  primarySocialAccountId: string,
+  workspaceIndex: number,
+  accountIndex: number,
+): Promise<string> {
+  if (workspaceIndex === 0 && accountIndex === 0) {
+    return Promise.resolve(primarySocialAccountId);
+  }
+  return seedSocialAccount(database, workspaceId, `${workspaceIndex}-${accountIndex}`);
+}
+
+/**
+ * Buffers comment rows and flushes them in `SEED_CHUNK_SIZE` multi-row inserts — one round trip
+ * per row would make a 100,000-row seed too slow for anyone to actually run this file. Pulled out
+ * of `seedDistributedComments` so pushing a row doesn't add another level of nesting there.
+ */
+interface CommentBuffer {
+  push(row: CommentInsert): Promise<void>;
+  flush(): Promise<void>;
+}
+
+function createCommentBuffer(database: Database): CommentBuffer {
+  let pending: CommentInsert[] = [];
+  return {
+    async push(row) {
+      pending.push(row);
+      if (pending.length >= SEED_CHUNK_SIZE) {
+        await database.drizzle.insert(comments).values(pending);
+        pending = [];
+      }
+    },
+    async flush() {
+      if (pending.length > 0) {
+        await database.drizzle.insert(comments).values(pending);
+        pending = [];
+      }
+    },
+  };
+}
+
+/**
+ * Seeds `POSTS_PER_ACCOUNT` posts for one account, starting the post-numbering (used only for
+ * `platformPostId` uniqueness and spacing `occurredAt`) at `startPostIndex`, pushing every comment
+ * into `buffer` rather than returning them — keeps `seedDistributedComments`'s own nesting within
+ * the project's depth limit. Returns the account's first post's id, so the caller can note it as
+ * the `benchmarkPostId` when this is workspace 0's account 0.
+ */
+async function seedAccountPostsAndComments(
+  database: Database,
+  workspaceId: WorkspaceId,
+  socialAccountId: string,
+  startPostIndex: number,
+  base: number,
+  buffer: CommentBuffer,
+): Promise<string> {
+  let firstPostId = '';
+  for (let postSlot = 0; postSlot < POSTS_PER_ACCOUNT; postSlot += 1) {
+    const postIndex = startPostIndex + postSlot;
+    // oxlint-disable-next-line no-await-in-loop
+    const postId = await seedPost(database, workspaceId, socialAccountId, postIndex);
+    if (postSlot === 0) {
+      firstPostId = postId;
+    }
+    for (let commentIndex = 0; commentIndex < COMMENTS_PER_POST; commentIndex += 1) {
+      const occurredAt = new Date(base + postIndex * COMMENTS_PER_POST + commentIndex);
+      // oxlint-disable-next-line no-await-in-loop
+      await buffer.push(buildComment(workspaceId, socialAccountId, postId, occurredAt));
+    }
+  }
+  return firstPostId;
 }
 
 async function seedPost(
@@ -172,49 +299,67 @@ function buildComment(
   };
 }
 
-/**
- * Bulk-seeds `POST_COUNT` posts and `TOTAL_COMMENTS` comments spread evenly across them, in
- * chunked multi-row inserts rather than one round trip per row — a 100,000-row seed that took
- * minutes would protect nothing, because nobody would run the file. Returns the id of one post to
- * run the read benchmark against.
- */
-async function seedManyPostsAndComments(
-  database: Database,
-  workspaceId: WorkspaceId,
-  socialAccountId: string,
-): Promise<string> {
-  const base = Date.parse('2026-01-01T00:00:00.000Z');
-  let benchmarkPostId = '';
-  let pending: CommentInsert[] = [];
+interface DistributionResult {
+  readonly benchmarkPostId: string;
+}
 
-  for (let postIndex = 0; postIndex < POST_COUNT; postIndex += 1) {
-    // Posts are few enough (500) to insert one at a time without a second bulk path; the bulk
-    // seed this function exists for is the 100,000-row comments table.
+/**
+ * Bulk-seeds `WORKSPACE_COUNT` workspaces, `ACCOUNTS_PER_WORKSPACE` accounts each,
+ * `POSTS_PER_ACCOUNT` posts per account and `TOTAL_COMMENTS` comments spread evenly across every
+ * post, in chunked multi-row inserts rather than one round trip per row — a 100,000-row seed that
+ * took minutes would protect nothing, because nobody would run the file. `primaryWorkspaceId`/
+ * `primarySocialAccountId` are workspace 0's account 0 (T017 fix round 2) — already seeded by the
+ * caller with real credentials, and reused here rather than re-created, so the harness's read/write
+ * benchmarks and the `EXPLAIN` assertions all run against the same slice. Returns the id of that
+ * account's first post, to run the read benchmark and the top-level `EXPLAIN` assertion against.
+ */
+async function seedDistributedComments(
+  database: Database,
+  primaryWorkspaceId: WorkspaceId,
+  primarySocialAccountId: string,
+): Promise<DistributionResult> {
+  const base = Date.parse('2026-01-01T00:00:00.000Z');
+  const buffer = createCommentBuffer(database);
+  let benchmarkPostId = '';
+  let globalPostIndex = 0;
+
+  for (let workspaceIndex = 0; workspaceIndex < WORKSPACE_COUNT; workspaceIndex += 1) {
     // oxlint-disable-next-line no-await-in-loop
-    const postId = await seedPost(database, workspaceId, socialAccountId, postIndex);
-    if (postIndex === 0) {
-      benchmarkPostId = postId;
-    }
-    for (let commentIndex = 0; commentIndex < COMMENTS_PER_POST; commentIndex += 1) {
-      const occurredAt = new Date(base + postIndex * COMMENTS_PER_POST + commentIndex);
-      pending.push(buildComment(workspaceId, socialAccountId, postId, occurredAt));
-      if (pending.length >= SEED_CHUNK_SIZE) {
-        // oxlint-disable-next-line no-await-in-loop
-        await database.drizzle.insert(comments).values(pending);
-        pending = [];
+    const workspaceId = await resolveWorkspace(database, primaryWorkspaceId, workspaceIndex);
+
+    for (let accountIndex = 0; accountIndex < ACCOUNTS_PER_WORKSPACE; accountIndex += 1) {
+      // oxlint-disable-next-line no-await-in-loop
+      const socialAccountId = await resolveSocialAccount(
+        database,
+        workspaceId,
+        primarySocialAccountId,
+        workspaceIndex,
+        accountIndex,
+      );
+      // oxlint-disable-next-line no-await-in-loop
+      const firstPostId = await seedAccountPostsAndComments(
+        database,
+        workspaceId,
+        socialAccountId,
+        globalPostIndex,
+        base,
+        buffer,
+      );
+      globalPostIndex += POSTS_PER_ACCOUNT;
+      if (workspaceIndex === 0 && accountIndex === 0) {
+        benchmarkPostId = firstPostId;
       }
     }
   }
-  if (pending.length > 0) {
-    await database.drizzle.insert(comments).values(pending);
-  }
+
+  await buffer.flush();
 
   // Without this, the planner works off the empty-table defaults autovacuum has not yet
   // replaced with real statistics, and picks bitmap/sort plans no production table this size
   // would run — a seed artifact, not a claim about the indexes themselves (T017).
   await database.drizzle.execute(sql`ANALYZE ${comments}`);
 
-  return benchmarkPostId;
+  return { benchmarkPostId };
 }
 
 async function startHarness(): Promise<Harness> {
@@ -235,15 +380,9 @@ async function startHarness(): Promise<Harness> {
   const app = buildApi(container);
   await app.ready();
 
-  const workspaceId = asWorkspaceId(generateId());
-  await database.drizzle.insert(workspaces).values({
-    id: workspaceId,
-    name: 'Benchmark workspace',
-    contactLimitMonthly: 1_000_000,
-    createdAt: new Date(),
-  });
-  const socialAccountId = await seedSocialAccount(database, workspaceId);
-  const benchmarkPostId = await seedManyPostsAndComments(database, workspaceId, socialAccountId);
+  const workspaceId = await seedWorkspace(database, 'Benchmark workspace');
+  const socialAccountId = await seedSocialAccount(database, workspaceId, 'benchmark');
+  const { benchmarkPostId } = await seedDistributedComments(database, workspaceId, socialAccountId);
 
   return { containers, container, database, app, workspaceId, socialAccountId, benchmarkPostId };
 }
