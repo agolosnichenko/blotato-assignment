@@ -43,8 +43,13 @@ export default defineRailway((ctx) => {
   // survives a restart. `appendfsync everysec` is the AOF default and bounds a crash to one second
   // of writes — the alternative, `always`, costs an fsync per command for work Postgres already
   // records durably.
-  const cacheVolume = volume('redis-data', { sizeMB: 1024 });
-  const cache = service('redis', {
+  // Named `cache`, not `redis`: Railway's IaC matches resources by name, and the managed database
+  // this replaces was called `redis`. Reusing that name made the apply an in-place update of the
+  // old resource rather than a create — including its leftover volume, which failed the "a service
+  // can only have one volume" invariant even after the database itself was deleted. A distinct name
+  // makes this unambiguously a new resource.
+  const cacheVolume = volume('cache-data', { sizeMB: 1024 });
+  const cache = service('cache', {
     source: image('redis:8.10.1-alpine'),
     start: 'redis-server --maxmemory-policy noeviction --appendonly yes --appendfsync everysec',
     volumeMounts: { '/data': cacheVolume },
@@ -52,7 +57,7 @@ export default defineRailway((ctx) => {
   // A plain service has no `.env.REDIS_URL` to reference, so the address is written out. It is the
   // private network name Railway gives the service, reachable only from inside this project's
   // environment — the same reason docker-compose's Redis publishes no password locally.
-  const redisUrl = 'redis://redis.railway.internal:6379';
+  const redisUrl = 'redis://cache.railway.internal:6379';
 
   // Neither service declares a `source`. A `github()` source would make Railway watch `main` and
   // deploy both services itself, in parallel, the moment a commit lands — which contradicts D24's
