@@ -683,7 +683,11 @@ Infrastructure:
     `CONFIG GET maxmemory-policy appendonly` returned `noeviction` and `appendonly no`. The
     eviction half holds by default, as Railway's own guide says; the persistence half does not, and
     the `redis()` helper exposes no way to pass server flags, so it cannot be turned on from
-    configuration. The pre-committed fallback therefore applies: Redis runs from `redis:8.10.1-alpine`
+    configuration. Its start command, read back from the live graph, is
+    `redis-server --requirepass $REDIS_PASSWORD --save 60 1 --dir $RAILWAY_VOLUME_MOUNT_PATH` — so
+    that database is not unpersisted, it is RDB-snapshotted at most once a minute. The gap is
+    therefore bounded rather than total: a crash loses up to a minute of queue state, which the
+    sweepers would have to rediscover and which `domain-events` has no second copy of. The pre-committed fallback therefore applies: Redis runs from `redis:8.10.1-alpine`
     — the image `docker-compose.yml` already uses — started with the same flags and a volume at
     `/data`, with `REDIS_URL` set by hand to the service's private address. This changes deployment
     configuration only, as the Complexity Tracking table anticipated; no application code moves.
