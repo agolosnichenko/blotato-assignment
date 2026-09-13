@@ -414,6 +414,11 @@ const COLLECTION_FILTER_TENANCY_CASES: readonly CollectionFilterTenancyCase[] = 
  * applies to the path-parameter routes) — a status-code-only check would let a body that leaks
  * which foreign id it belongs to (a different `detail`, an extra field) pass while still
  * defeating the reason D20 chose `404` over `403`.
+ *
+ * Each case also asserts the positive half, which `registerTenancySweep` gets from its own
+ * `successStatus` expectation: without it, a route answering `404` to *every* value of this filter —
+ * one that resolved the identifier against no workspace at all, or failed the lookup outright —
+ * would satisfy the negative case and read as airtight tenancy.
  */
 function registerCollectionFilterTenancyTests(
   getHarness: () => Harness,
@@ -444,11 +449,34 @@ function registerCollectionFilterTenancyTests(
 
         assertNotFoundIndistinguishable(crossWorkspace, missing);
       });
+
+      it("answers 200 for the same filter naming the caller's own resource", async () => {
+        const harness = getHarness();
+        const [own] = getWorkspaces();
+
+        const ownKey = await mintApiKey(harness.database, own.workspaceId);
+        const response = await request(
+          harness,
+          'GET',
+          `/v1/comments?${testCase.key}=${testCase.foreignId(own)}`,
+          ownKey,
+        );
+
+        expect(response.statusCode).toBe(200);
+      });
     },
   );
 }
 
 const PLATFORMS_PATH = '/v1/platforms';
+
+/**
+ * The paths the credential cases run against. `/v1/platforms` is the endpoint with no
+ * workspace-scoped parameter, so a rejection there can only be the key; `/v1/comments` is the one
+ * read collection every client goes through (D31), and the auth hook keys on the path, so "the
+ * collection is guarded" is a claim about a different path than "the registry is guarded".
+ */
+const GUARDED_PATHS = [PLATFORMS_PATH, '/v1/comments'] as const;
 
 /** A well-formed but unseeded key — the "unrecognized prefix" half of the credential sweep. */
 function buildBogusKey(): string {
@@ -460,31 +488,33 @@ function registerCredentialTests(
   getOwnWorkspaceId: () => WorkspaceId,
 ): void {
   describe('credential rejection (D20, FR-026)', () => {
-    it('rejects a request with no API key header as 401 UNAUTHORIZED', async () => {
-      const harness = getHarness();
-      const response = await request(harness, 'GET', PLATFORMS_PATH);
-      expect(response.statusCode).toBe(401);
-      expect(response.headers['content-type']).toContain('application/problem+json');
-      expect(response.body['code']).toBe('UNAUTHORIZED');
-    });
-
-    it('rejects an unrecognized key prefix as 401 UNAUTHORIZED', async () => {
-      const harness = getHarness();
-      const bogusKey = buildBogusKey();
-      const response = await request(harness, 'GET', PLATFORMS_PATH, bogusKey);
-      expect(response.statusCode).toBe(401);
-      expect(response.body['code']).toBe('UNAUTHORIZED');
-    });
-
-    it('rejects a revoked key as 401 UNAUTHORIZED', async () => {
-      const harness = getHarness();
-      const revokedKey = await mintApiKey(harness.database, getOwnWorkspaceId(), {
-        revokedAt: new Date(),
+    for (const guardedPath of GUARDED_PATHS) {
+      it(`rejects a request to ${guardedPath} with no API key header as 401 UNAUTHORIZED`, async () => {
+        const harness = getHarness();
+        const response = await request(harness, 'GET', guardedPath);
+        expect(response.statusCode).toBe(401);
+        expect(response.headers['content-type']).toContain('application/problem+json');
+        expect(response.body['code']).toBe('UNAUTHORIZED');
       });
-      const response = await request(harness, 'GET', PLATFORMS_PATH, revokedKey);
-      expect(response.statusCode).toBe(401);
-      expect(response.body['code']).toBe('UNAUTHORIZED');
-    });
+
+      it(`rejects an unrecognized key prefix on ${guardedPath} as 401 UNAUTHORIZED`, async () => {
+        const harness = getHarness();
+        const bogusKey = buildBogusKey();
+        const response = await request(harness, 'GET', guardedPath, bogusKey);
+        expect(response.statusCode).toBe(401);
+        expect(response.body['code']).toBe('UNAUTHORIZED');
+      });
+
+      it(`rejects a revoked key on ${guardedPath} as 401 UNAUTHORIZED`, async () => {
+        const harness = getHarness();
+        const revokedKey = await mintApiKey(harness.database, getOwnWorkspaceId(), {
+          revokedAt: new Date(),
+        });
+        const response = await request(harness, 'GET', guardedPath, revokedKey);
+        expect(response.statusCode).toBe(401);
+        expect(response.body['code']).toBe('UNAUTHORIZED');
+      });
+    }
 
     it('answers all three rejection paths with exactly the same body', async () => {
       const harness = getHarness();

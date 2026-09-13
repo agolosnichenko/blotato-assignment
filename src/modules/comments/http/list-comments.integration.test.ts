@@ -35,7 +35,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApi, type Api, type ApiDependencies } from '#src/app/api.ts';
 import { loadConfig } from '#src/app/config.ts';
 import { buildContainer } from '#src/app/container.ts';
-import { comments, commentSyncTargets } from '#src/modules/comments/infrastructure/schema.ts';
+import {
+  comments,
+  commentSyncJobs,
+  commentSyncTargets,
+} from '#src/modules/comments/infrastructure/schema.ts';
 import { apiKeys, posts, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
@@ -768,6 +772,111 @@ function registerQueryRejectionTests(getHarness: () => Harness): void {
   });
 }
 
+/**
+ * The two keyset boundaries a walk can get wrong without any test noticing (SC-003, D27).
+ *
+ * Ties: with several rows sharing one `occurred_at`, the page boundary falls *inside* the group, and
+ * only the row comparison `(occurred_at, id) < (cursor)` resumes correctly there. The decomposed
+ * form `occurred_at < c OR (occurred_at = c AND id < c)` is easy to write subtly wrong, and every
+ * distinct-timestamp fixture agrees with it. Seeding a tie is what separates them.
+ *
+ * Exact multiples: `listByPredicate` asks for `limit + 1` rows and reports more pages when it gets
+ * them. With exactly `limit` rows visible there is no extra row, so the page must be the last one.
+ * A `>=` in place of that `>` yields one extra empty page — which `walkAllPages` still terminates on
+ * and every "exactly once" assertion still passes, since an empty page contributes no ids.
+ */
+function registerKeysetBoundaryTests(getHarness: () => Harness): void {
+  describe('keyset boundaries (SC-003, D27)', () => {
+    const orders: readonly ('asc' | 'desc')[] = ['asc', 'desc'];
+
+    for (const order of orders) {
+      it(`walks tied occurred_at values exactly once in ${order} order`, async () => {
+        const harness = getHarness();
+        const fixture = await setUpPagingFixture(harness.database);
+        // Twelve rows in four groups of three identical timestamps: with limit=5 the first page
+        // ends in the middle of the second group and the second page in the middle of the third,
+        // so two different page boundaries fall inside a tie.
+        const ids = await seedComments(
+          harness.database,
+          fixture,
+          [0, 0, 0, 1000, 1000, 1000, 2000, 2000, 2000, 3000, 3000, 3000],
+        );
+
+        const walked = await walkAllPages(harness, fixture.apiKey, order);
+
+        expect(walked).toHaveLength(ids.length);
+        expect(new Set(walked).size).toBe(ids.length);
+        expect(walked.toSorted()).toEqual(ids.toSorted());
+      });
+    }
+
+    it('reports no further page when the last one is exactly full', async () => {
+      const harness = getHarness();
+      const fixture = await setUpPagingFixture(harness.database);
+      // Exactly the page size, so `limit + 1` returns no extra row.
+      await seedComments(harness.database, fixture, [0, 1000, 2000, 3000, 4000]);
+
+      const page = await fetchOnePage(harness, fixture.apiKey, 'desc');
+
+      expect(page.items).toHaveLength(5);
+      expect(page.nextCursor).toBeNull();
+    });
+  });
+}
+
+/**
+ * `?postId=` alone selects every level of that post, and `topLevelOnly=true` is what narrows it to
+ * the top (FR-002).
+ *
+ * Filters intersect and none is implied: an implementation that folded `parent_comment_id IS NULL`
+ * into the `postId` condition — the shape the removed `GET /v1/posts/:postId/comments` route had,
+ * where the two were one address — passes every other `postId` case in this suite, because every
+ * one of them also sends `topLevelOnly=true`.
+ */
+function registerPostIdWithoutTopLevelOnlyTest(getHarness: () => Harness): void {
+  it("returns a post's replies too when topLevelOnly is absent (FR-002)", async () => {
+    const harness = getHarness();
+    const fixture = await setUpPagingFixture(harness.database);
+    const post = await seedPostRow(
+      harness.database,
+      fixture.workspaceId,
+      fixture.socialAccountId,
+      'instagram',
+    );
+    const seed = {
+      workspaceId: fixture.workspaceId,
+      socialAccountId: fixture.socialAccountId,
+      platform: 'instagram',
+      postId: post.postId,
+      platformPostId: post.platformPostId,
+    };
+    const parentId = await seedCommentDetailed(harness.database, {
+      ...seed,
+      occurredAt: new Date(SEED_BASE_MS),
+    });
+    const replyId = await seedCommentDetailed(harness.database, {
+      ...seed,
+      occurredAt: new Date(SEED_BASE_MS + 1000),
+      parentCommentId: parentId,
+      rootCommentId: parentId,
+      depth: 1,
+    });
+
+    const unnarrowed = await fetchComments(harness, fixture.apiKey, { postId: post.postId });
+    const narrowed = await fetchComments(harness, fixture.apiKey, {
+      postId: post.postId,
+      topLevelOnly: 'true',
+    });
+
+    expect(unnarrowed.statusCode).toBe(200);
+    const unnarrowedIds = (unnarrowed.body as unknown as CommentsPage).items.map((item) => item.id);
+    expect(unnarrowedIds.toSorted()).toEqual([parentId, replyId].toSorted());
+    expect(narrowed.statusCode).toBe(200);
+    const narrowedIds = (narrowed.body as unknown as CommentsPage).items.map((item) => item.id);
+    expect(narrowedIds).toEqual([parentId]);
+  });
+}
+
 interface DetailedSeedInput {
   readonly workspaceId: WorkspaceId;
   readonly socialAccountId: string;
@@ -1154,40 +1263,99 @@ function registerNonPostedStatusesVisibleTest(getHarness: () => Harness): void {
   });
 }
 
+interface SeededSyncTarget {
+  readonly workspaceId: WorkspaceId;
+  readonly targetId: string;
+  readonly postId: string;
+  readonly apiKey: string;
+}
+
+/** A workspace with one Instagram account, a post and that post's `comment_sync_targets` row. */
+async function seedSyncTarget(
+  database: Database,
+  lastSyncedAt: Date | null,
+): Promise<SeededSyncTarget> {
+  const workspaceId = await seedWorkspace(database);
+  const socialAccountId = await seedSocialAccount(database, workspaceId, 'instagram');
+  const seededPost = await seedPostRow(database, workspaceId, socialAccountId, 'instagram');
+  const targetId = generateId();
+  await database.drizzle.insert(commentSyncTargets).values({
+    id: targetId,
+    workspaceId,
+    socialAccountId,
+    postId: seededPost.postId,
+    platformPostId: seededPost.platformPostId,
+    lastSyncedAt,
+    nextSyncAt: new Date(Date.now() + 60_000),
+    lastError: null,
+    manualCooldownUntil: null,
+    ageAnchorAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+  });
+  const apiKey = await mintApiKey(database, workspaceId);
+  return { workspaceId, targetId, postId: seededPost.postId, apiKey };
+}
+
+/** Inserts one `comment_sync_jobs` row for `target`, and returns its id. */
+async function seedSyncJob(
+  database: Database,
+  target: SeededSyncTarget,
+  status: string,
+): Promise<string> {
+  const id = generateId();
+  await database.drizzle.insert(commentSyncJobs).values({
+    id,
+    workspaceId: target.workspaceId,
+    targetId: target.targetId,
+    trigger: 'manual',
+    status,
+    finishedAt: status === 'succeeded' ? new Date() : null,
+  });
+  return id;
+}
+
 /** T020/V4 (R-08): `sync` is present when a post is named, other filters notwithstanding. */
 function registerSyncPresentForPostIdTest(getHarness: () => Harness): void {
   it("includes 'sync' for ?postId=…&platform=instagram", async () => {
     const harness = getHarness();
-    const workspaceId = await seedWorkspace(harness.database);
-    const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
-    const seededPost = await seedPostRow(
-      harness.database,
-      workspaceId,
-      socialAccountId,
-      'instagram',
-    );
     const lastSyncedAt = new Date('2026-04-03T00:00:00.000Z');
-    await harness.database.drizzle.insert(commentSyncTargets).values({
-      id: generateId(),
-      workspaceId,
-      socialAccountId,
-      postId: seededPost.postId,
-      platformPostId: seededPost.platformPostId,
-      lastSyncedAt,
-      nextSyncAt: new Date(Date.now() + 60_000),
-      lastError: null,
-      manualCooldownUntil: null,
-      ageAnchorAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
-    });
-    const apiKey = await mintApiKey(harness.database, workspaceId);
+    const target = await seedSyncTarget(harness.database, lastSyncedAt);
 
-    const response = await fetchComments(harness, apiKey, {
-      postId: seededPost.postId,
+    const response = await fetchComments(harness, target.apiKey, {
+      postId: target.postId,
       platform: 'instagram',
     });
 
     expect(response.statusCode).toBe(200);
     expect('sync' in response.body).toBe(true);
+    // The block's contents, not only its presence: `getSyncStatus` returning a constant
+    // `{ lastSyncedAt: null, activeJobId: null }` satisfies `'sync' in body` for every case here.
+    expect(response.body['sync']).toEqual({
+      lastSyncedAt: lastSyncedAt.toISOString(),
+      activeJobId: null,
+    });
+  });
+}
+
+/**
+ * `activeJobId` names the running job, which is the half of FR-006 that answers "is a refresh
+ * happening right now" (acceptance 2.1). Only a `queued` or `running` job counts: a finished one
+ * must read back `null`, or a client would poll a job that is already over.
+ */
+function registerActiveSyncJobTest(getHarness: () => Harness): void {
+  it('reports a queued sync job as the active one, and a finished one as none', async () => {
+    const harness = getHarness();
+    const target = await seedSyncTarget(harness.database, null);
+    await seedSyncJob(harness.database, target, 'succeeded');
+
+    const finished = await fetchComments(harness, target.apiKey, { postId: target.postId });
+    expect(finished.statusCode).toBe(200);
+    expect(finished.body['sync']).toEqual({ lastSyncedAt: null, activeJobId: null });
+
+    const queuedJobId = await seedSyncJob(harness.database, target, 'queued');
+
+    const active = await fetchComments(harness, target.apiKey, { postId: target.postId });
+    expect(active.statusCode).toBe(200);
+    expect(active.body['sync']).toEqual({ lastSyncedAt: null, activeJobId: queuedJobId });
   });
 }
 
@@ -1241,6 +1409,8 @@ describe('GET /v1/comments', () => {
   registerExactPagingUnderConcurrentInsertsTest(() => harness);
   registerPagingValidationTests(() => harness);
   registerQueryRejectionTests(() => harness);
+  registerKeysetBoundaryTests(() => harness);
+  registerPostIdWithoutTopLevelOnlyTest(() => harness);
 
   describe('filter semantics (T020, quickstart.md V3-V4)', () => {
     registerPlatformUnionTest(() => harness);
@@ -1254,6 +1424,7 @@ describe('GET /v1/comments', () => {
     registerIsOwnFalseHonouredTest(() => harness);
     registerNonPostedStatusesVisibleTest(() => harness);
     registerSyncPresentForPostIdTest(() => harness);
+    registerActiveSyncJobTest(() => harness);
     registerSyncAbsentForNonPostIdentifiersTest(() => harness);
   });
 });
