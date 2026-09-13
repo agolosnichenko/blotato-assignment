@@ -11,12 +11,13 @@
  * (T019/T040, US2, quickstart.md V3, per D31): `GET /v1/comments?postId=:id&topLevelOnly=true`
  * replaces `GET /v1/posts/:postId/comments`.
  *
- * `GET /v1/comments` is registered and answers `200` unfiltered today, but `postId`/`topLevelOnly`
- * are not accepted by `listCommentsQuerySchema` yet (schemas.ts) and `selectionPredicate` ignores
- * every key of `CommentSelection` it is given (comment-repository.ts) — every scenario below that
- * relies on the filter actually narrowing the result set fails today, seeing the *unfiltered*
- * workspace listing instead. The old address's `404` assertion also fails today: the nested route
- * is still registered and still answers `200`, removal is a later task.
+ * `GET /v1/comments` is registered and answers `200` unfiltered today, but
+ * `postId`/`topLevelOnly` are not accepted by `listCommentsQuerySchema` yet (schemas.ts) and
+ * `selectionPredicate` ignores every key of `CommentSelection` it is given
+ * (comment-repository.ts) — every scenario below that relies on the filter actually narrowing
+ * the result set fails today, seeing the *unfiltered* workspace listing instead. The old
+ * address's `404` assertion also fails today: the nested route is still registered and still
+ * answers `200`, removal is a later task.
  *
  * The load-bearing scenario is SC-002: keyset pagination must not repeat or skip a pre-existing
  * comment when rows are inserted between two page requests, in either `order` direction — the
@@ -188,7 +189,9 @@ async function seedTopLevelComments(
   return rows.map((row) => row.id as string);
 }
 
-/** Builds (without inserting) a reply row under `parentId` — `topLevelOnly=true`'s negative case. */
+/**
+ * Builds (without inserting) a reply row under `parentId` — `topLevelOnly=true`'s negative case.
+ */
 function buildReplyComment(
   harness: Harness,
   seeded: SeededPost,
@@ -437,7 +440,9 @@ function registerFilterExclusionTest(getHarness: () => Harness): void {
   });
 }
 
-/** T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009). */
+/**
+ * T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009).
+ */
 function registerOldAddressGoneTest(getHarness: () => Harness): void {
   it('answers 404 NOT_FOUND at the old GET /v1/posts/:postId/comments address', async () => {
     const harness = getHarness();

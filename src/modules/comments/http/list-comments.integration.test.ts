@@ -734,7 +734,10 @@ function registerPlatformUnionTest(getHarness: () => Harness): void {
   });
 }
 
-/** T020/V3: `platform=tiktok` is accepted (a known, comment-less platform) and answers an empty page. */
+/**
+ * T020/V3: `platform=tiktok` is accepted (a known, comment-less platform) and answers an empty
+ * page.
+ */
 function registerKnownCommentlessPlatformTest(getHarness: () => Harness): void {
   it('accepts platform=tiktok and returns an empty page', async () => {
     const harness = getHarness();
@@ -756,7 +759,9 @@ function registerKnownCommentlessPlatformTest(getHarness: () => Harness): void {
   });
 }
 
-/** T020/V3: `platform=nonsense` — not one of the nine registry keys — is `400 VALIDATION_ERROR`. */
+/**
+ * T020/V3: `platform=nonsense` — not one of the nine registry keys — is `400 VALIDATION_ERROR`.
+ */
 function registerUnknownPlatformRejectedTest(getHarness: () => Harness): void {
   it('rejects platform=nonsense with 400 VALIDATION_ERROR', async () => {
     const harness = getHarness();
@@ -775,7 +780,7 @@ function registerUnknownPlatformRejectedTest(getHarness: () => Harness): void {
  * = :id`) simply intersect to nothing, which is a valid question with an empty answer.
  */
 function registerTopLevelOnlyWithParentIntersectionTest(getHarness: () => Harness): void {
-  it('answers 200 with an empty page for topLevelOnly=true combined with parentCommentId', async () => {
+  it('answers 200 with an empty page for topLevelOnly=true plus parentCommentId', async () => {
     const harness = getHarness();
     const workspaceId = await seedWorkspace(harness.database);
     const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
@@ -804,7 +809,7 @@ function registerTopLevelOnlyWithParentIntersectionTest(getHarness: () => Harnes
  * under B>`, since a reply's own `postId` follows its parent's post.
  */
 function registerPostIdWithMismatchedParentPostTest(getHarness: () => Harness): void {
-  it('answers 200 with an empty page for a postId and a parentCommentId from a different post', async () => {
+  it('answers 200 for a postId with a parentCommentId from a different post', async () => {
     const harness = getHarness();
     const workspaceId = await seedWorkspace(harness.database);
     const socialAccountId = await seedSocialAccount(harness.database, workspaceId, 'instagram');
@@ -983,10 +988,10 @@ function registerSyncPresentForPostIdTest(getHarness: () => Harness): void {
 }
 
 /**
- * T020/V4: `'sync' in body === false` for a selection that names an identifier *other than a post*
- * — asserted for both `accountId` and `parentCommentId` (not only the identifier-free case), since
- * a condition written as "an identifier filter is present" instead of "a post is named" would pass
- * the identifier-free assertion and still violate the contract.
+ * T020/V4: `'sync' in body === false` for a selection that names an identifier *other than a
+ * post* — asserted for both `accountId` and `parentCommentId` (not only the identifier-free
+ * case), since a condition written as "an identifier filter is present" instead of "a post is
+ * named" would pass the identifier-free assertion and still violate the contract.
  */
 function registerSyncAbsentForNonPostIdentifiersTest(getHarness: () => Harness): void {
   it("omits 'sync' for ?accountId=… and for ?parentCommentId=…", async () => {

@@ -23,13 +23,13 @@
  * are out of scope for both sweeps.
  *
  * T021 (US2, quickstart.md V5, per D31): the three nested reads `GET /v1/posts/:postId/comments`,
- * `GET /v1/comments/:commentId/replies` and `GET /v1/accounts/:accountId/comments` are dropped from
- * `TENANCY_ENDPOINTS` here — the collection replaces them — and one case per identifier-shaped
- * filter (`postId`, `accountId`, `parentCommentId`) is added below instead, each asserting `404
- * NOT_FOUND` for a foreign workspace's resource. `selectionPredicate` (comment-repository.ts)
- * ignores every `CommentSelection` key it is given today, so `GET /v1/comments` never resolves
- * tenancy for these filters yet — every case below sees a `200` (the unfiltered listing) instead of
- * the `404` it asserts.
+ * `GET /v1/comments/:commentId/replies` and `GET /v1/accounts/:accountId/comments` are dropped
+ * from `TENANCY_ENDPOINTS` here — the collection replaces them — and one case per
+ * identifier-shaped filter (`postId`, `accountId`, `parentCommentId`) is added below instead,
+ * each asserting `404 NOT_FOUND` for a foreign workspace's resource. `selectionPredicate`
+ * (comment-repository.ts) ignores every `CommentSelection` key it is given today, so
+ * `GET /v1/comments` never resolves tenancy for these filters yet — every case below sees a
+ * `200` (the unfiltered listing) instead of the `404` it asserts.
  *
  * The credential section pins that "no header", "unrecognized prefix" and "revoked key" are truly
  * the same failure as far as a caller can tell (`auth.ts`'s single `unauthorized()` call site).
@@ -392,19 +392,29 @@ function registerTenancySweep(getHarness: () => Harness, getWorkspaces: () => Wo
 /** One case per identifier-shaped `GET /v1/comments` filter (T021, V5, R-07). */
 interface CollectionFilterTenancyCase {
   readonly label: string;
-  readonly query: (foreign: SeededWorkspace) => string;
+  readonly key: string;
+  readonly foreignId: (foreign: SeededWorkspace) => string;
 }
 
 const COLLECTION_FILTER_TENANCY_CASES: readonly CollectionFilterTenancyCase[] = [
-  { label: 'postId', query: (foreign) => `postId=${foreign.postId}` },
-  { label: 'accountId', query: (foreign) => `accountId=${foreign.socialAccountId}` },
-  { label: 'parentCommentId', query: (foreign) => `parentCommentId=${foreign.topLevelCommentId}` },
+  { label: 'postId', key: 'postId', foreignId: (foreign) => foreign.postId },
+  { label: 'accountId', key: 'accountId', foreignId: (foreign) => foreign.socialAccountId },
+  {
+    label: 'parentCommentId',
+    key: 'parentCommentId',
+    foreignId: (foreign) => foreign.topLevelCommentId,
+  },
 ];
 
 /**
  * T021/V5: calling `GET /v1/comments` with another workspace's `postId`/`accountId`/
  * `parentCommentId` is `404 NOT_FOUND` — never `403`, and never an empty `200`, since an empty
- * success would confirm the identifier is well-formed and merely empty (R-07).
+ * success would confirm the identifier is well-formed and merely empty (R-07). The body itself
+ * must be indistinguishable from a request for an id that was never seeded at all
+ * (`assertNotFoundIndistinguishable`, the same shape-parity check `registerTenancySweep` already
+ * applies to the path-parameter routes) — a status-code-only check would let a body that leaks
+ * which foreign id it belongs to (a different `detail`, an extra field) pass while still
+ * defeating the reason D20 chose `404` over `403`.
  */
 function registerCollectionFilterTenancyTests(
   getHarness: () => Harness,
@@ -421,14 +431,19 @@ function registerCollectionFilterTenancyTests(
         const crossWorkspace = await request(
           harness,
           'GET',
-          `/v1/comments?${testCase.query(other)}`,
+          `/v1/comments?${testCase.key}=${testCase.foreignId(other)}`,
           ownKey,
         );
 
-        expect(crossWorkspace.statusCode).toBe(404);
-        expect(crossWorkspace.statusCode).not.toBe(403);
-        expect(crossWorkspace.headers['content-type']).toContain('application/problem+json');
-        expect(crossWorkspace.body['code']).toBe('NOT_FOUND');
+        const missingKey = await mintApiKey(harness.database, own.workspaceId);
+        const missing = await request(
+          harness,
+          'GET',
+          `/v1/comments?${testCase.key}=${generateId()}`,
+          missingKey,
+        );
+
+        assertNotFoundIndistinguishable(crossWorkspace, missing);
       });
     },
   );

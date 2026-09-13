@@ -14,12 +14,13 @@
  *
  * `GET /v1/comments` is registered and answers `200` unfiltered today, but `accountId` is not
  * accepted by `listCommentsQuerySchema` yet and `selectionPredicate` ignores every key of
- * `CommentSelection` it is given (comment-repository.ts) — every scenario below that relies on the
- * filter actually narrowing the result set fails today, seeing the *unfiltered* workspace listing
- * instead of just this account's comments; `since`/`until`/`isOwn` are likewise not yet accepted by
- * this schema. The old address's `404` assertion also fails today: the nested route is still
- * registered and still answers `200` — the same relationship `post-comments.integration.test.ts`
- * and `replies.integration.test.ts` have to their own removed routes.
+ * `CommentSelection` it is given (comment-repository.ts) — every scenario below that relies on
+ * the filter actually narrowing the result set fails today, seeing the *unfiltered* workspace
+ * listing instead of just this account's comments; `since`/`until`/`isOwn` are likewise not yet
+ * accepted by this schema. The old address's `404` assertion also fails today: the nested route
+ * is still registered and still answers `200` — the same relationship
+ * `post-comments.integration.test.ts` and `replies.integration.test.ts` have to their own
+ * removed routes.
  *
  * D13 is why this endpoint exists at all: a comment on a post never published through this
  * platform has `post_id: null` (data-model.md §2) because there is no `posts` row to reference,
@@ -215,8 +216,8 @@ interface JsonResponse<TBody> {
 /**
  * Drives `GET /v1/comments?accountId=:id` (V3) — the collection selection that replaces
  * `GET /v1/accounts/:accountId/comments`. `accountId` merges with whatever `query` the caller
- * supplies (`since`/`until`/`isOwn`/pagination), so every existing case keeps driving those params
- * exactly as before.
+ * supplies (`since`/`until`/`isOwn`/pagination), so every existing case keeps driving those
+ * params exactly as before.
  */
 async function fetchInbox(
   harness: Harness,
@@ -516,8 +517,8 @@ function registerStaleProjectionSplitTest(getHarness: () => Harness): void {
 
 /**
  * T019/V3's negative-data half: `accountId` must exclude a comment belonging to a *different*
- * social account in the same workspace — a selection that silently ignores the filter would return
- * both accounts' comments and pass a positive-only fixture.
+ * social account in the same workspace — a selection that silently ignores the filter would
+ * return both accounts' comments and pass a positive-only fixture.
  */
 function registerFilterExclusionTest(getHarness: () => Harness): void {
   it('excludes a comment belonging to a different social account', async () => {
@@ -550,7 +551,9 @@ function registerFilterExclusionTest(getHarness: () => Harness): void {
   });
 }
 
-/** T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009). */
+/**
+ * T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009).
+ */
 function registerOldAddressGoneTest(getHarness: () => Harness): void {
   it('answers 404 NOT_FOUND at the old GET /v1/accounts/:accountId/comments address', async () => {
     const harness = getHarness();

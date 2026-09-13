@@ -14,9 +14,10 @@
  * `GET /v1/comments` is registered and answers `200` unfiltered today, but `parentCommentId` is
  * not accepted by `listCommentsQuerySchema` yet and `selectionPredicate` ignores every key of
  * `CommentSelection` it is given — every scenario below that relies on the filter actually
- * narrowing the result set fails today, seeing the *unfiltered* workspace listing (in `desc` order
- * unless `order=asc` is itself honoured) instead of just the parent's replies. The old address's
- * `404` assertion also fails today: the nested route is still registered and still answers `200`.
+ * narrowing the result set fails today, seeing the *unfiltered* workspace listing (in `desc`
+ * order unless `order=asc` is itself honoured) instead of just the parent's replies. The old
+ * address's `404` assertion also fails today: the nested route is still registered and still
+ * answers `200`.
  *
  * The placeholder rule (FR-005, A4) is a privacy control, not a display convenience: FR-030 nulls
  * a deleted comment's text and author, and a deleted comment is kept visible only while it still
@@ -201,8 +202,8 @@ interface CommentBody {
 
 /**
  * Drives `GET /v1/comments?parentCommentId=:id&order=asc` (V3) — the collection selection that
- * replaces `GET /v1/comments/:commentId/replies`. `order=asc` is explicit (D31, research.md R-06):
- * the collection's own default is `desc` for every selection, unlike the removed route.
+ * replaces `GET /v1/comments/:commentId/replies`. `order=asc` is explicit (D31, research.md
+ * R-06): the collection's own default is `desc` for every selection, unlike the removed route.
  */
 async function fetchReplies(
   harness: Harness,
@@ -341,9 +342,9 @@ function registerDeletedChildlessOmittedTest(getHarness: () => Harness): void {
 }
 
 /**
- * T019/V3's negative-data half: `parentCommentId` must exclude a reply that belongs to a *sibling*
- * thread's parent — a selection that silently ignores the filter would return both parents' replies
- * and pass a positive-only fixture.
+ * T019/V3's negative-data half: `parentCommentId` must exclude a reply that belongs to a
+ * *sibling* thread's parent — a selection that silently ignores the filter would return both
+ * parents' replies and pass a positive-only fixture.
  */
 function registerFilterExclusionTest(getHarness: () => Harness): void {
   it('excludes a reply belonging to a different parent', async () => {
@@ -384,7 +385,9 @@ function registerFilterExclusionTest(getHarness: () => Harness): void {
   });
 }
 
-/** T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009). */
+/**
+ * T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009).
+ */
 function registerOldAddressGoneTest(getHarness: () => Harness): void {
   it('answers 404 NOT_FOUND at the old GET /v1/comments/:commentId/replies address', async () => {
     const harness = getHarness();
@@ -407,7 +410,7 @@ function registerOldAddressGoneTest(getHarness: () => Harness): void {
   });
 }
 
-describe('GET /v1/comments?parentCommentId&order=asc (was GET /v1/comments/:commentId/replies)', () => {
+describe('GET /v1/comments?parentCommentId&order=asc (was /v1/comments/:commentId/replies)', () => {
   let harness: Harness;
 
   beforeAll(async () => {
