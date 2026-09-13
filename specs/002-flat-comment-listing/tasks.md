@@ -202,59 +202,59 @@ that exactly the matching comments come back — and that the previously nested 
 
 ### Implementation for User Story 2
 
-- [ ] T022 [US2] Extend `listCommentsQuerySchema` in `src/modules/comments/http/schemas.ts` with
+- [X] T022 [US2] Extend `listCommentsQuerySchema` in `src/modules/comments/http/schemas.ts` with
       every filter, all optional: `postId` `z.uuid()`, `parentCommentId` `z.uuid()`, `accountId`
       `z.uuid()`, `since`/`until` `z.iso.datetime()` (inclusive bounds on `occurredAt`),
       `topLevelOnly` and `isOwn` as `z.enum(['true','false']).transform(v => v === 'true')` — **not**
       `z.coerce.boolean()`, which reads the literal `'false'` as `true` (R-03).
-- [ ] T023 [US2] Add the repeatable `platform` parameter to the same schema: normalize
+- [X] T023 [US2] Add the repeatable `platform` parameter to the same schema: normalize
       `string | string[]` to an array before validation (Fastify's `node:querystring` parser yields
       one or the other), then validate each value against **the keys of
       `src/platforms/registry.ts`**, never a hand-written literal union — an unknown platform is
       `400`, a known but comment-less platform (`tiktok`) is accepted and matches nothing (R-02,
       Principle IV).
-- [ ] T024 [US2] **Verify, do not assume** (plan.md "Unresolved"): run `pnpm generate-openapi` and
+- [X] T024 [US2] **Verify, do not assume** (plan.md "Unresolved"): run `pnpm generate-openapi` and
       inspect how `fastify-type-provider-zod@7` renders T023's normalization. If the parameter is
       published by its *input* type rather than as an array, apply the named fallback — an explicit
       `.meta({ type: 'array', style: 'form', explode: true })` override on that one field, leaving
       the Zod runtime behaviour unchanged (R-02). Record which branch was taken in `DESIGN.md`.
-- [ ] T025 [US2] Extend `selectionPredicate` in
+- [X] T025 [US2] Extend `selectionPredicate` in
       `src/modules/comments/infrastructure/comment-repository.ts` with one `AND`ed condition per
       present key: `eq(postId)`, `eq(parentCommentId)`, `eq(socialAccountId)`,
       `inArray(platform, platforms)`, `isNull(parentCommentId)` for `topLevelOnly === true`,
       `eq(isOwn)`, `gte(occurredAt, since)`, `lte(occurredAt, until)`. Filters intersect: no
       condition overrides, disables or special-cases another, and an unsatisfiable combination
       returns an empty page rather than an error (FR-002, R-03).
-- [ ] T026 [US2] Add identifier resolution to
+- [X] T026 [US2] Add identifier resolution to
       `src/modules/comments/application/list-comments.ts`, **before** the query runs and only for
       the filters actually present: `postId` through the `Posts` port, `accountId` through the
       `Accounts` port, `parentCommentId` through `repository.getById`. Anything outside the caller's
       workspace throws `404 NOT_FOUND` — never `403`, never an empty success (R-07, FR-004, D20).
       A port call is never a join (Principle II, D29).
-- [ ] T027 [US2] Add the conditional `sync` block to the same use case: call
+- [X] T027 [US2] Add the conditional `sync` block to the same use case: call
       `repository.getSyncStatus(workspaceId, postId)` **if and only if the selection names a post**,
       whichever other filters accompany it, and build the response object with a conditional spread
       so `{}` — not `{ sync: undefined }` — is produced when no post is named (FR-006, R-08).
-- [ ] T028 [US2] Wire the filters through `GET /v1/comments` in
+- [X] T028 [US2] Wire the filters through `GET /v1/comments` in
       `src/modules/comments/http/routes.ts`: map the validated query to `CommentSelection`, omitting
       each absent key rather than passing `undefined`, and convert `since`/`until` to `Date`.
-- [ ] T029 [US2] Remove the three nested read route registrations from
+- [X] T029 [US2] Remove the three nested read route registrations from
       `src/modules/comments/http/routes.ts` — `registerPostCommentsRoute`, `registerRepliesRoute`,
       `registerAccountCommentsRoute` — with no alias, no redirect and no compatibility shim
       (FR-009, R-11). `POST /v1/posts/:postId/comments` and `POST /v1/comments/:commentId/replies`
       keep their addresses; the collisions are method-level only. Also drop the now-unused
       `postCommentsQuerySchema` / `repliesQuerySchema` locals.
-- [ ] T030 [US2] Delete `src/modules/comments/application/list-post-comments.ts`,
+- [X] T030 [US2] Delete `src/modules/comments/application/list-post-comments.ts`,
       `list-replies.ts` and `list-account-comments.ts`, and remove their imports from `routes.ts`.
       No re-export, no thin wrapper, no `@deprecated` marker (R-11, constitution: replace, don't
       deprecate).
-- [ ] T031 [US2] Delete `listTopLevelByPost`, `listRepliesByParent` and `listByAccount` — interface
+- [X] T031 [US2] Delete `listTopLevelByPost`, `listRepliesByParent` and `listByAccount` — interface
       declarations and implementations — plus the `accountCommentsQuerySchema` and
       `postCommentsPageSchema` exports in `src/modules/comments/http/schemas.ts`, once T029 and T030
       leave them with no caller. Update the repository's file-header doc comment, which currently
       names the three methods and their indexes, to describe the one `list` and the planner-chosen
       access path (R-04).
-- [ ] T032 [P] [US2] Update `specs/001-multi-platform-comments/contracts/rest-api.md`: remove the
+- [X] T032 [P] [US2] Update `specs/001-multi-platform-comments/contracts/rest-api.md`: remove the
       three read routes it still documents and correct its rate-limiting claim — limits are keyed by
       read/write bucket and resolved API key id (`src/app/api.ts`, `keyGenerator`), not by internal
       post identifier (spec Assumptions, R-11).

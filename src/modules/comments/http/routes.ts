@@ -1,10 +1,10 @@
 /**
- * Read routes (T016, T049, T094): `GET /v1/comments`, `GET /v1/posts/:postId/comments`,
- * `GET /v1/comments/:commentId/replies`, `GET /v1/comments/:commentId`,
- * `GET /v1/accounts/:accountId/comments`. Write routes (T069):
- * `POST /v1/posts/:postId/comments`, `POST /v1/comments/:commentId/replies`. Capability registry
- * route (T098): `GET /v1/platforms`. Sync routes (T090, D19): `POST /v1/posts/:postId/comments/sync`,
- * `GET /v1/comment-sync-jobs/:jobId`.
+ * Read routes (T016, T028, D31): `GET /v1/comments` (the flat, filtered collection — filters
+ * replace `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
+ * `GET /v1/accounts/:accountId/comments`, which are gone, R-11) and `GET /v1/comments/:commentId`.
+ * Write routes (T069): `POST /v1/posts/:postId/comments`, `POST /v1/comments/:commentId/replies`.
+ * Capability registry route (T098): `GET /v1/platforms`. Sync routes (T090, D19):
+ * `POST /v1/posts/:postId/comments/sync`, `GET /v1/comment-sync-jobs/:jobId`.
  *
  * Registered from `src/app/api.ts` as `app.register(registerCommentReadRoutes(deps))` /
  * `app.register(registerCommentWriteRoutes(deps))` / `app.register(registerPlatformRoutes())` —
@@ -15,38 +15,35 @@
  * routes in the write rate-limit bucket (`isReadRequest` keys on HTTP method, not a route list).
  */
 
-// oxlint-disable max-dependencies -- this file registers all nine comment/platform HTTP routes
-// (four read, two write, two sync, one capability listing), so it imports every use case, port and
+// oxlint-disable max-dependencies -- this file registers all six comment/platform HTTP routes (two
+// read, two write, two sync, one capability listing), so it imports every use case, port and
 // schema those routes call; splitting it would not reduce that fan-in, only hide it behind
 // re-exports — the same trade `create-reply.ts` and `create-top-level-comment.ts` make for the
 // same reason.
-// oxlint-disable max-lines -- nine routes, each already factored into its own named
+// oxlint-disable max-lines -- six routes, each already factored into its own named
 // `registerXRoute` function with its own docstring, is the file's actual scope, not padding.
 
 import type { Queue } from 'bullmq';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import type { Logger } from 'pino';
+import type { z } from 'zod';
 import { createReply } from '#src/modules/comments/application/create-reply.ts';
 import { createTopLevelComment } from '#src/modules/comments/application/create-top-level-comment.ts';
 import { getComment } from '#src/modules/comments/application/get-comment.ts';
-import { listAccountComments } from '#src/modules/comments/application/list-account-comments.ts';
 import { listComments } from '#src/modules/comments/application/list-comments.ts';
-import { listPostComments } from '#src/modules/comments/application/list-post-comments.ts';
-import { listReplies } from '#src/modules/comments/application/list-replies.ts';
 import type { RequestSync } from '#src/modules/comments/application/request-sync.ts';
-import type { CommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import type {
+  CommentRepository,
+  CommentSelection,
+} from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { ContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import {
-  accountCommentsQuerySchema,
-  accountIdParamsSchema,
   commentIdParamsSchema,
   commentSchema,
   commentsPageSchema,
   createCommentBodySchema,
   listCommentsQuerySchema,
-  paginationQuerySchema,
   platformsPageSchema,
-  postCommentsPageSchema,
   postIdParamsSchema,
   syncJobIdParamsSchema,
   syncJobSchema,
@@ -85,9 +82,6 @@ export interface SyncRoutesDeps {
   readonly requestSync: RequestSync;
 }
 
-const postCommentsQuerySchema = paginationQuerySchema('desc');
-const repliesQuerySchema = paginationQuerySchema('asc');
-
 /**
  * Decodes a request's `cursor` query param, throwing the `400 VALIDATION_ERROR` (contracts/
  * rest-api.md) the shared pagination codec reports for a malformed or order-mismatched cursor.
@@ -108,14 +102,36 @@ function parseCursor(raw: string | undefined, order: SortOrder): KeysetCursor | 
 }
 
 /**
- * Builds the `GET /v1/comments` route registered by {@link registerCommentReadRoutes} (T016, D31,
- * research.md R-01) — the flat, filter-free collection. Fastify's radix router treats this static
- * path and the parametric `GET /v1/comments/:commentId` child as distinct nodes, so the two do not
- * collide regardless of registration order.
- *
- * `selection` is `{}` for now: filters arrive in a later phase, and `sync` is omitted from every
- * response this route builds — an identifier-free page has no one post to report freshness for
- * (T014).
+ * Maps one validated `GET /v1/comments` query to a {@link CommentSelection} (T028), omitting each
+ * absent key rather than setting it `undefined` — `exactOptionalPropertyTypes` treats `{ x:
+ * undefined }` and `{}` as different types, and `selectionPredicate` relies on that to decide
+ * which conditions to `AND` in (comment-repository.ts). `since`/`until` convert from the
+ * schema's ISO 8601 strings to `Date`, and `platform` (the wire name) becomes `platforms` (the
+ * domain field), matching what `list-comments.ts` and `selectionPredicate` expect.
+ */
+type ListCommentsFilters = Omit<
+  z.infer<typeof listCommentsQuerySchema>,
+  'limit' | 'cursor' | 'order'
+>;
+
+function toSelection(query: ListCommentsFilters): CommentSelection {
+  return {
+    ...(query.postId !== undefined && { postId: query.postId }),
+    ...(query.parentCommentId !== undefined && { parentCommentId: query.parentCommentId }),
+    ...(query.accountId !== undefined && { accountId: query.accountId }),
+    ...(query.platform !== undefined && { platforms: query.platform }),
+    ...(query.topLevelOnly !== undefined && { topLevelOnly: query.topLevelOnly }),
+    ...(query.isOwn !== undefined && { isOwn: query.isOwn }),
+    ...(query.since !== undefined && { since: new Date(query.since) }),
+    ...(query.until !== undefined && { until: new Date(query.until) }),
+  };
+}
+
+/**
+ * Builds the `GET /v1/comments` route registered by {@link registerCommentReadRoutes} (T016, T028,
+ * D31, research.md R-01) — the flat, filtered collection. Fastify's radix router treats this
+ * static path and the parametric `GET /v1/comments/:commentId` child as distinct nodes, so the two
+ * do not collide regardless of registration order.
  */
 function registerListCommentsRoute(
   app: Parameters<FastifyPluginAsyncZod>[0],
@@ -130,76 +146,13 @@ function registerListCommentsRoute(
       },
     },
     async (request) => {
-      const { limit, cursor: rawCursor, order } = request.query;
+      const { limit, cursor: rawCursor, order, ...filters } = request.query;
       const cursor = parseCursor(rawCursor, order);
       const result = await listComments(
-        { repository: deps.repository },
-        { workspaceId: request.workspaceId, selection: {}, limit, cursor, order },
-      );
-      return {
-        items: result.items.map(toCommentResponse),
-        nextCursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
-      };
-    },
-  );
-}
-
-/** Builds the `GET /v1/posts/:postId/comments` route registered by {@link registerCommentReadRoutes}. */
-function registerPostCommentsRoute(
-  app: Parameters<FastifyPluginAsyncZod>[0],
-  deps: CommentReadRoutesDeps,
-): void {
-  app.get(
-    '/v1/posts/:postId/comments',
-    {
-      schema: {
-        params: postIdParamsSchema,
-        querystring: postCommentsQuerySchema,
-        response: { 200: postCommentsPageSchema },
-      },
-    },
-    async (request) => {
-      const { limit, cursor: rawCursor, order } = request.query;
-      const cursor = parseCursor(rawCursor, order);
-      const result = await listPostComments(
-        { repository: deps.repository, posts: deps.posts },
-        { workspaceId: request.workspaceId, postId: request.params.postId, limit, cursor, order },
-      );
-      return {
-        items: result.items.map(toCommentResponse),
-        nextCursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
-        sync: {
-          lastSyncedAt:
-            result.sync.lastSyncedAt === null ? null : result.sync.lastSyncedAt.toISOString(),
-          activeJobId: result.sync.activeJobId,
-        },
-      };
-    },
-  );
-}
-
-/** Builds the `GET /v1/comments/:commentId/replies` route registered by {@link registerCommentReadRoutes}. */
-function registerRepliesRoute(
-  app: Parameters<FastifyPluginAsyncZod>[0],
-  deps: CommentReadRoutesDeps,
-): void {
-  app.get(
-    '/v1/comments/:commentId/replies',
-    {
-      schema: {
-        params: commentIdParamsSchema,
-        querystring: repliesQuerySchema,
-        response: { 200: commentsPageSchema },
-      },
-    },
-    async (request) => {
-      const { limit, cursor: rawCursor, order } = request.query;
-      const cursor = parseCursor(rawCursor, order);
-      const result = await listReplies(
-        { repository: deps.repository },
+        { repository: deps.repository, posts: deps.posts, accounts: deps.accounts },
         {
           workspaceId: request.workspaceId,
-          parentCommentId: request.params.commentId,
+          selection: toSelection(filters),
           limit,
           cursor,
           order,
@@ -208,6 +161,13 @@ function registerRepliesRoute(
       return {
         items: result.items.map(toCommentResponse),
         nextCursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
+        ...(result.sync !== undefined && {
+          sync: {
+            lastSyncedAt:
+              result.sync.lastSyncedAt === null ? null : result.sync.lastSyncedAt.toISOString(),
+            activeJobId: result.sync.activeJobId,
+          },
+        }),
       };
     },
   );
@@ -227,44 +187,6 @@ function registerGetCommentRoute(
         { workspaceId: request.workspaceId, commentId: request.params.commentId },
       );
       return toCommentResponse(comment);
-    },
-  );
-}
-
-/** Builds the `GET /v1/accounts/:accountId/comments` route registered by {@link registerCommentReadRoutes}. */
-function registerAccountCommentsRoute(
-  app: Parameters<FastifyPluginAsyncZod>[0],
-  deps: CommentReadRoutesDeps,
-): void {
-  app.get(
-    '/v1/accounts/:accountId/comments',
-    {
-      schema: {
-        params: accountIdParamsSchema,
-        querystring: accountCommentsQuerySchema,
-        response: { 200: commentsPageSchema },
-      },
-    },
-    async (request) => {
-      const { limit, cursor: rawCursor, order, since, until, isOwn } = request.query;
-      const cursor = parseCursor(rawCursor, order);
-      const result = await listAccountComments(
-        { repository: deps.repository, accounts: deps.accounts },
-        {
-          workspaceId: request.workspaceId,
-          accountId: request.params.accountId,
-          limit,
-          cursor,
-          order,
-          since: since === undefined ? null : new Date(since),
-          until: until === undefined ? null : new Date(until),
-          isOwn: isOwn ?? null,
-        },
-      );
-      return {
-        items: result.items.map(toCommentResponse),
-        nextCursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
-      };
     },
   );
 }
@@ -454,11 +376,11 @@ export function registerPlatformRoutes(): FastifyPluginAsyncZod {
 }
 
 /**
- * Builds the plugin `src/app/api.ts` registers for the five read routes.
+ * Builds the plugin `src/app/api.ts` registers for the two read routes.
  *
  * Args:
- *   deps: The read repository, the `Posts` port `listPostComments` resolves tenancy through, and
- *     the `Accounts` port `listAccountComments` resolves tenancy through.
+ *   deps: The read repository, and the `Posts`/`Accounts` ports `GET /v1/comments` resolves
+ *     tenancy through for `postId`/`accountId` filters.
  *
  * Returns:
  *   A Fastify plugin, meant to be passed to `app.register(...)`.
@@ -466,10 +388,7 @@ export function registerPlatformRoutes(): FastifyPluginAsyncZod {
 export function registerCommentReadRoutes(deps: CommentReadRoutesDeps): FastifyPluginAsyncZod {
   return (app) => {
     registerListCommentsRoute(app, deps);
-    registerPostCommentsRoute(app, deps);
-    registerRepliesRoute(app, deps);
     registerGetCommentRoute(app, deps);
-    registerAccountCommentsRoute(app, deps);
     return Promise.resolve();
   };
 }

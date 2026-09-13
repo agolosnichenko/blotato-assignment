@@ -52,13 +52,13 @@ curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
 (D27), each with its `replyCount`:
 
 ```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/posts/$IG_POST/comments"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?postId=$IG_POST&topLevelOnly=true"
 ```
 
 Take an `id` from `items[]` — call it `$COMMENT` — and read its replies (ascending, D27):
 
 ```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/$COMMENT/replies"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?parentCommentId=$COMMENT&order=asc"
 ```
 
 **3 — reply to it.** The write is asynchronous: `202`, not `201`, because the row exists but the
@@ -103,9 +103,9 @@ curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comment-sync-jobs/<jobId>"
 cannot use the status code to learn whether a resource exists (D20):
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' "$BASE/v1/posts/$IG_POST/comments"
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE/v1/comments?postId=$IG_POST"
 curl -s -o /dev/null -w '%{http_code}\n' -H "blotato-api-key: $API_KEY" \
-  "$BASE/v1/posts/00000000-0000-0000-0000-000000000000/comments"
+  "$BASE/v1/comments?postId=00000000-0000-0000-0000-000000000000"
 # 401
 # 404
 ```
@@ -182,7 +182,7 @@ curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
 **2. Read a post's top-level comments:**
 
 ```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/posts/$POST_ID/comments"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?postId=$POST_ID&topLevelOnly=true"
 ```
 
 ```json

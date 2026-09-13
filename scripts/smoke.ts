@@ -137,7 +137,7 @@ async function stepPlatforms(env: SmokeEnv): Promise<void> {
  * reviewer's evidence — a line labelled "2 conversation" while step 5 is running misreports which
  * check passed. */
 async function stepConversation(env: SmokeEnv, step: string, postId: string): Promise<string> {
-  const response = await callApi(env, 'GET', `/v1/posts/${postId}/comments`);
+  const response = await callApi(env, 'GET', `/v1/comments?postId=${postId}&topLevelOnly=true`);
   if (response.status !== 200) {
     throw new SmokeFailure(step, '200', String(response.status), response.body);
   }
@@ -192,7 +192,11 @@ async function pollComment(env: SmokeEnv, step: string, commentId: string): Prom
 async function stepInstagramDepthExceeded(env: SmokeEnv): Promise<void> {
   const step = '5 instagram depth';
   const topLevelId = await stepConversation(env, step, env.SMOKE_INSTAGRAM_POST_ID);
-  const repliesResponse = await callApi(env, 'GET', `/v1/comments/${topLevelId}/replies`);
+  const repliesResponse = await callApi(
+    env,
+    'GET',
+    `/v1/comments?parentCommentId=${topLevelId}&order=asc`,
+  );
   // Status first: `parseBody` deliberately hands back a raw string for a non-JSON response (a
   // proxy's HTML 502), and reaching into `.items[0]` on that threw a TypeError *before* this
   // check ran — losing the status and body that are the whole point of a smoke failure.

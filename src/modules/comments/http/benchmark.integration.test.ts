@@ -15,8 +15,9 @@
  * the index cannot serve, and a post's comment page goes from an index scan over ~200 rows to a
  * sequential scan over the whole 100,000-row table. A wall-clock number on a shared CI machine is
  * the flakiest kind of assertion, so the read benchmark makes the real claim twice: once
- * structurally, via `EXPLAIN` on the exact predicate `listTopLevelByPost` runs (proving an index
- * scan is actually chosen), and once as a secondary, time-boxed signal (p95 under budget) for the
+ * structurally, via `EXPLAIN` on the exact predicate `selectionPredicate` builds for
+ * `?postId=…&topLevelOnly=true` (proving an index scan is actually chosen), and once as a
+ * secondary, time-boxed signal (p95 under budget) for the
  * regression an `EXPLAIN` check alone could still miss — a chosen index that is itself bloated or
  * unusably large, say.
  *
@@ -416,7 +417,7 @@ async function measureReadLatencies(
     // oxlint-disable-next-line no-await-in-loop
     const response = await harness.app.inject({
       method: 'GET',
-      url: `/v1/posts/${harness.benchmarkPostId}/comments?limit=20`,
+      url: `/v1/comments?postId=${harness.benchmarkPostId}&topLevelOnly=true&limit=20`,
       headers: { 'blotato-api-key': apiKey },
     });
     samplesMs.push(performance.now() - startedAt);
@@ -428,7 +429,8 @@ async function measureReadLatencies(
 /** The `visibleInList` placeholder filter (`comment-repository.ts`), spelled out as raw SQL. */
 const VISIBLE_IN_LIST_SQL = sql`(status <> 'deleted' OR reply_count > 0)`;
 
-/** The predicate `listTopLevelByPost` runs — workspace + post + top-level, plus the placeholder filter. */
+/** The predicate `selectionPredicate` builds for `{ postId, topLevelOnly: true }` — workspace +
+ * post + top-level, plus the placeholder filter. */
 function topLevelPredicate(workspaceId: WorkspaceId, postId: string): SQL {
   return sql`workspace_id = ${workspaceId}
     AND post_id = ${postId}
@@ -436,7 +438,8 @@ function topLevelPredicate(workspaceId: WorkspaceId, postId: string): SQL {
     AND ${VISIBLE_IN_LIST_SQL}`;
 }
 
-/** The predicate `listRepliesByParent` runs — workspace + parent, plus the placeholder filter. */
+/** The predicate `selectionPredicate` builds for `{ parentCommentId }` — workspace + parent, plus
+ * the placeholder filter. */
 function repliesPredicate(workspaceId: WorkspaceId, parentCommentId: string): SQL {
   return sql`workspace_id = ${workspaceId}
     AND parent_comment_id = ${parentCommentId}
@@ -444,8 +447,8 @@ function repliesPredicate(workspaceId: WorkspaceId, parentCommentId: string): SQ
 }
 
 /**
- * The predicate `listByAccount` runs with its own optional `since`/`until`/`isOwn` filters absent —
- * workspace + account, plus the placeholder filter.
+ * The predicate `selectionPredicate` builds for `{ accountId }` alone — workspace + account, plus
+ * the placeholder filter.
  */
 function accountPredicate(workspaceId: WorkspaceId, socialAccountId: string): SQL {
   return sql`workspace_id = ${workspaceId}
@@ -699,9 +702,9 @@ function registerWriteBenchmarkTest(getHarness: () => Harness): void {
 }
 
 /**
- * T017 (FR-013, research.md R-04, quickstart.md V7): the three EXPLAIN assertions the preserved
- * reads gained once `comments_workspace_idx` became a candidate for them too — each pinned to the
- * narrower index it had before the flat listing's index was added, not just to "some" index.
+ * T017 (FR-013, research.md R-04, quickstart.md V7): the two EXPLAIN assertions for filters that
+ * gained `comments_workspace_idx` as a candidate once the flat listing's index was added — each
+ * pinned to the narrower index it had before, not just to "some" index.
  */
 function registerPreservedReadPlanTests(getHarness: () => Harness): void {
   it('lists replies via an index scan on comments_replies_idx', async () => {

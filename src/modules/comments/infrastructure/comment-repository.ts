@@ -1,18 +1,20 @@
 /**
- * Comments repository — read side (T043, T044, T050) and write side (T056).
+ * Comments repository — read side (T043, T044, T050, D31) and write side (T056).
  *
  * Every method takes `workspaceId` as a required parameter and puts it in the predicate — a row
  * belonging to another workspace is simply not found, never a `403` (D20, FR-026).
  *
- * `listTopLevelByPost`, `listRepliesByParent` and `listByAccount` share one keyset-paging
- * implementation ({@link listByPredicate}) driving `comments_post_top_level_idx`,
- * `comments_replies_idx` and `comments_social_account_idx` respectively (data-model.md §2): the
- * `ORDER BY` matches each index's column order exactly, in both directions, so Postgres can scan
- * either index backwards instead of sorting. The keyset comparison is a genuine Postgres row
- * comparison, `(occurred_at, id) < (cursor)`, not the `occurred_at < cursor OR (occurred_at =
- * cursor AND id < cursor)` form that is easy to get subtly wrong (R-02).
+ * `list` is the one read path for the flat `GET /v1/comments` collection (D31), driving one keyset
+ * paging implementation ({@link listByPredicate}) over `selectionPredicate`'s `AND`-of-present-
+ * filters. No code here picks an index: the `ORDER BY` matches every `occurred_at`/`id` index's
+ * column order exactly, in both directions, so Postgres's planner is free to scan whichever of
+ * `comments_workspace_idx`, `comments_post_top_level_idx`, `comments_replies_idx` or
+ * `comments_social_account_idx` the resulting predicate makes selective, backwards or forwards
+ * instead of sorting. The keyset comparison is a genuine Postgres row comparison, `(occurred_at,
+ * id) < (cursor)`, not the `occurred_at < cursor OR (occurred_at = cursor AND id < cursor)` form
+ * that is easy to get subtly wrong (R-02).
  *
- * The placeholder rule (FR-005, A4) is applied once, here, for all three list methods: a `deleted`
+ * The placeholder rule (FR-005, A4) is applied once, here, in {@link listByPredicate}: a `deleted`
  * comment is included only while `reply_count > 0` (it still has live replies hanging off it) —
  * `getById` is a direct lookup by id, not a list, and applies no such filter (T050).
  *
@@ -83,18 +85,6 @@ export interface ListResult {
 }
 
 /**
- * Predicates for the account inbox (T092, FR-008), on top of the `workspaceId`/`socialAccountId`
- * scope every call carries regardless — `since`/`until` are both inclusive bounds on `occurredAt`
- * and `isOwn` is an exact match, all optional so the first page of an unfiltered inbox is just the
- * scope alone.
- */
-export interface ListByAccountFilters {
-  readonly since?: Date;
-  readonly until?: Date;
-  readonly isOwn?: boolean;
-}
-
-/**
  * Filters for the flat `GET /v1/comments` listing (D31), on top of the `workspaceId` scope every
  * `list` call carries regardless. Every key is optional and, when the filter is absent, omitted
  * rather than set to `undefined` — `exactOptionalPropertyTypes` treats `{ x: undefined }` and `{}`
@@ -157,35 +147,12 @@ export interface MarkQueuedForRetryInput {
 }
 
 export interface CommentRepository {
-  listTopLevelByPost(
-    workspaceId: WorkspaceId,
-    postId: string,
-    pagination: ListPagination,
-  ): Promise<ListResult>;
-  listRepliesByParent(
-    workspaceId: WorkspaceId,
-    parentCommentId: string,
-    pagination: ListPagination,
-  ): Promise<ListResult>;
-  /**
-   * The account inbox, driving `comments_social_account_idx` (`social_account_id, occurred_at
-   * DESC, id DESC`) — no join to the `posts` projection and no filter on a post resolving (A10a,
-   * D8, D29): a comment is this service's own row, never dependent on the projection to be
-   * listed. Spans every post on the account, internal and external alike (D13) — including
-   * replies, since the index carries no `parent_comment_id` predicate the way
-   * `comments_post_top_level_idx` does.
-   */
-  listByAccount(
-    workspaceId: WorkspaceId,
-    socialAccountId: string,
-    filters: ListByAccountFilters,
-    pagination: ListPagination,
-  ): Promise<ListResult>;
   /**
    * The flat `GET /v1/comments` listing (D31), driving `comments_workspace_idx` (`workspace_id,
-   * occurred_at DESC, id DESC`) via {@link selectionPredicate}. Replaces `listTopLevelByPost`,
-   * `listRepliesByParent` and `listByAccount` for callers migrated to the flat route; those three
-   * stay in place until every caller has moved.
+   * occurred_at DESC, id DESC`) — or whichever other comment index `selectionPredicate`'s
+   * resulting filter set makes more selective — via {@link selectionPredicate}. The one read path
+   * for the collection; the three per-identifier reads it replaced (`listTopLevelByPost`,
+   * `listRepliesByParent`, `listByAccount`) are gone (D31, R-11).
    */
   list(
     workspaceId: WorkspaceId,
@@ -381,53 +348,43 @@ async function listByPredicate(
 
 const ACTIVE_SYNC_JOB_STATUSES = ['queued', 'running'] as const;
 
-function listTopLevelByPost(
-  db: NodePgDatabase,
-  workspaceId: WorkspaceId,
-  postId: string,
-  pagination: ListPagination,
-): Promise<ListResult> {
-  return listByPredicate(
-    db,
-    and(
-      eq(comments.workspaceId, workspaceId),
-      eq(comments.postId, postId),
-      isNull(comments.parentCommentId),
-    ) as SQL,
-    pagination,
-  );
-}
-
-function listRepliesByParent(
-  db: NodePgDatabase,
-  workspaceId: WorkspaceId,
-  parentCommentId: string,
-  pagination: ListPagination,
-): Promise<ListResult> {
-  return listByPredicate(
-    db,
-    and(
-      eq(comments.workspaceId, workspaceId),
-      eq(comments.parentCommentId, parentCommentId),
-    ) as SQL,
-    pagination,
-  );
-}
-
 /**
- * The `AND`-of-present-conditions predicate for the flat `GET /v1/comments` listing (D31). Starts
- * from the workspace scope every repository call carries (D20) and adds one condition per present
- * `selection` key — this phase wires the workspace scope only; a later task extends the `if`
- * ladder below with the remaining eight `CommentSelection` keys, each its own addition here rather
- * than a rewrite of this function.
+ * The `AND`-of-present-conditions predicate for the flat `GET /v1/comments` listing (D31, T025).
+ * Starts from the workspace scope every repository call carries (D20) and adds one condition per
+ * present `selection` key — filters intersect, so no condition here overrides, disables or
+ * special-cases another; an unsatisfiable combination falls out as an empty page for free rather
+ * than needing its own branch.
  *
  * No branch here picks an index or a query shape — Postgres's planner does that from the resulting
  * predicate against `comments_workspace_idx` and the other four comment indexes.
  */
 function selectionPredicate(workspaceId: WorkspaceId, selection: CommentSelection): SQL {
   const conditions: SQL[] = [eq(comments.workspaceId, workspaceId)];
-  // Unused until the follow-up task adds the remaining eight conditions.
-  void selection;
+
+  if (selection.postId !== undefined) {
+    conditions.push(eq(comments.postId, selection.postId));
+  }
+  if (selection.parentCommentId !== undefined) {
+    conditions.push(eq(comments.parentCommentId, selection.parentCommentId));
+  }
+  if (selection.accountId !== undefined) {
+    conditions.push(eq(comments.socialAccountId, selection.accountId));
+  }
+  if (selection.platforms !== undefined) {
+    conditions.push(inArray(comments.platform, selection.platforms));
+  }
+  if (selection.topLevelOnly === true) {
+    conditions.push(isNull(comments.parentCommentId));
+  }
+  if (selection.isOwn !== undefined) {
+    conditions.push(eq(comments.isOwn, selection.isOwn));
+  }
+  if (selection.since !== undefined) {
+    conditions.push(gte(comments.occurredAt, selection.since));
+  }
+  if (selection.until !== undefined) {
+    conditions.push(lte(comments.occurredAt, selection.until));
+  }
 
   return and(...conditions) as SQL;
 }
@@ -439,29 +396,6 @@ function list(
   pagination: ListPagination,
 ): Promise<ListResult> {
   return listByPredicate(db, selectionPredicate(workspaceId, selection), pagination);
-}
-
-function listByAccount(
-  db: NodePgDatabase,
-  workspaceId: WorkspaceId,
-  socialAccountId: string,
-  filters: ListByAccountFilters,
-  pagination: ListPagination,
-): Promise<ListResult> {
-  const conditions: SQL[] = [
-    eq(comments.workspaceId, workspaceId),
-    eq(comments.socialAccountId, socialAccountId),
-  ];
-  if (filters.since !== undefined) {
-    conditions.push(gte(comments.occurredAt, filters.since));
-  }
-  if (filters.until !== undefined) {
-    conditions.push(lte(comments.occurredAt, filters.until));
-  }
-  if (filters.isOwn !== undefined) {
-    conditions.push(eq(comments.isOwn, filters.isOwn));
-  }
-  return listByPredicate(db, and(...conditions) as SQL, pagination);
 }
 
 async function getById(
@@ -782,12 +716,6 @@ function clearReconcileGuard(
 /** Backs {@link CommentRepository}; construct once per database handle (T043). */
 export function createCommentRepository(db: NodePgDatabase): CommentRepository {
   return {
-    listTopLevelByPost: (workspaceId, postId, pagination) =>
-      listTopLevelByPost(db, workspaceId, postId, pagination),
-    listRepliesByParent: (workspaceId, parentCommentId, pagination) =>
-      listRepliesByParent(db, workspaceId, parentCommentId, pagination),
-    listByAccount: (workspaceId, socialAccountId, filters, pagination) =>
-      listByAccount(db, workspaceId, socialAccountId, filters, pagination),
     list: (workspaceId, selection, pagination) => list(db, workspaceId, selection, pagination),
     getById: (workspaceId, commentId) => getById(db, workspaceId, commentId),
     getSyncStatus: (workspaceId, postId) => getSyncStatus(db, workspaceId, postId),

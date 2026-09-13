@@ -218,10 +218,8 @@ name Blotato's existing public API uses, so API clients reuse settings). Errors 
 
 | Method & path | Purpose |
 |---|---|
-| `GET /v1/posts/:postId/comments` | A post's top-level comments, paginated |
-| `GET /v1/comments/:commentId/replies` | Direct replies to one comment |
+| `GET /v1/comments` | The workspace's comments, filtered by `postId`, `parentCommentId`, `accountId`, `platform` (repeatable), `topLevelOnly`, `isOwn`, `since`/`until` — filters intersect (D31) |
 | `GET /v1/comments/:commentId` | Poll a single comment (the async-write polling target) |
-| `GET /v1/accounts/:accountId/comments` | The account inbox — including comments on posts not published through this platform (D13) |
 | `POST /v1/posts/:postId/comments` | Start a top-level thread — `202`, not `201` |
 | `POST /v1/comments/:commentId/replies` | Reply to a comment — `202`, not `201` |
 | `POST /v1/posts/:postId/comments/sync` | Request an out-of-band refresh |
@@ -230,6 +228,21 @@ name Blotato's existing public API uses, so API clients reuse settings). Errors 
 | `GET`/`POST /webhooks/meta` | Meta event intake — handshake and signed delivery (§5.2) |
 | `GET /healthz`, `GET /readyz` | Liveness / readiness |
 | `GET /docs`, `GET /openapi.json` | Swagger UI and the generated document |
+
+`GET /v1/comments` (D31, `specs/002-flat-comment-listing`) replaces three former nested reads —
+`GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
+`GET /v1/accounts/:accountId/comments` — each reproduced as a filter on the one collection; the
+three addresses now answer `404`. `sync: { lastSyncedAt, activeJobId }` is present in the response
+iff `postId` is named.
+
+The repeatable `platform` query parameter is validated against the keys of
+`src/platforms/registry.ts`, never a hand-written literal union (Principle IV) — normalized to an
+array before validation, since Fastify's default query parser yields a `string` for one occurrence
+and a `string[]` for several. Verified during implementation (T024): `fastify-type-provider-zod@7`
+renders this `z.preprocess` step's **output** type into `openapi.json` — `{ type: "array", items:
+{ type: "string", enum: [...9 platforms] } }` — not the single-string input type the normalization
+starts from, so the published shape is one Swagger UI and a client's OpenAPI generator can actually
+exercise. No `.meta({ type: 'array', style: 'form', explode: true })` fallback was needed.
 
 Full request/response shapes, query parameters and the error-code catalogue are in
 [`specs/001-multi-platform-comments/contracts/rest-api.md`](./specs/001-multi-platform-comments/contracts/rest-api.md)

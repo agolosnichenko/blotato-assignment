@@ -14,14 +14,13 @@
 import { z } from 'zod';
 import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { SyncJobRecord } from '#src/modules/comments/application/request-sync.ts';
-import type { PlatformCapabilities } from '#src/platforms/registry.ts';
+import { platformRegistry, type PlatformCapabilities } from '#src/platforms/registry.ts';
 import type { SortOrder } from '#src/shared/pagination.ts';
 import { COMMENT_STATUSES } from '#src/modules/comments/domain/status.ts';
 
 export const postIdParamsSchema = z.object({ postId: z.uuid() });
 export const commentIdParamsSchema = z.object({ commentId: z.uuid() });
 export const syncJobIdParamsSchema = z.object({ jobId: z.uuid() });
-export const accountIdParamsSchema = z.object({ accountId: z.uuid() });
 
 const DEFAULT_LIMIT = 20;
 const MIN_LIMIT = 1;
@@ -36,29 +35,49 @@ export function paginationQuerySchema(defaultOrder: SortOrder) {
   });
 }
 
-/**
- * The account inbox's query schema (T094, FR-008, rest-api.md): the shared pagination params plus
- * `since`/`until` (inclusive ISO 8601 bounds on `occurredAt`) and `isOwn`. `isOwn` is the one
- * boolean query param in this API — `'true'`/`'false'` strings, not `z.coerce.boolean()`, since
- * coercion treats every non-empty string (including the literal `'false'`) as `true`.
- */
-export const accountCommentsQuerySchema = paginationQuerySchema('desc').extend({
-  since: z.iso.datetime().optional(),
-  until: z.iso.datetime().optional(),
-  isOwn: z
-    .enum(['true', 'false'])
-    .transform((value) => value === 'true')
-    .optional(),
-});
+/** The registry's own platform keys (`Object.keys`, not a hand-written literal union) — adding a
+ * platform must not require editing this schema (Principle IV, research.md R-02). */
+const PLATFORM_KEYS = Object.keys(platformRegistry) as [string, ...string[]];
 
 /**
- * The flat `GET /v1/comments` listing's query schema (T013, D31, research.md R-06). Built on the
- * shared pagination schema with `order` defaulting to `desc` for every selection — unlike the
- * removed replies route, this collection has one address and so one default, not one that varies
- * by which filter is present. Filters (`postId`, `accountId`, `platforms`, …) arrive in a later
- * phase; this schema is `limit`/`cursor`/`order` alone until then.
+ * Normalizes the repeatable `platform` query parameter to an array before validation (T023,
+ * research.md R-02): Fastify's default query parser (`node:querystring.parse`) yields a `string`
+ * for one occurrence and a `string[]` for several, so a single value and a repeated value must
+ * take the same path through the schema rather than diverging into two different result types.
  */
-export const listCommentsQuerySchema = paginationQuerySchema('desc');
+function toPlatformArray(value: unknown): unknown {
+  return value === undefined || Array.isArray(value) ? value : [value];
+}
+
+/**
+ * The `'true'`/`'false'` string-enum boolean query param this API uses everywhere, transformed to
+ * a real boolean — never `z.coerce.boolean()`, which treats every non-empty string (including the
+ * literal `'false'`) as `true`. Absent means "no filter", not `false`.
+ */
+function booleanQueryParam() {
+  return z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional();
+}
+
+/**
+ * The flat `GET /v1/comments` listing's query schema (T013, T022, T023, D31, research.md R-02,
+ * R-03). Built on the shared pagination schema with `order` defaulting to `desc` for every
+ * selection — unlike the removed replies route, this collection has one address and so one
+ * default, not one that varies by which filter is present. Every filter key is optional; absence
+ * means "no filter", never an implicit default.
+ */
+export const listCommentsQuerySchema = paginationQuerySchema('desc').extend({
+  postId: z.uuid().optional(),
+  parentCommentId: z.uuid().optional(),
+  accountId: z.uuid().optional(),
+  platform: z.preprocess(toPlatformArray, z.array(z.enum(PLATFORM_KEYS))).optional(),
+  since: z.iso.datetime().optional(),
+  until: z.iso.datetime().optional(),
+  topLevelOnly: booleanQueryParam(),
+  isOwn: booleanQueryParam(),
+});
 
 const commentAuthorSchema = z
   .object({
@@ -114,13 +133,6 @@ export const commentsPageSchema = z.object({
       activeJobId: z.uuid().nullable(),
     })
     .optional(),
-});
-
-export const postCommentsPageSchema = commentsPageSchema.extend({
-  sync: z.object({
-    lastSyncedAt: z.iso.datetime().nullable(),
-    activeJobId: z.uuid().nullable(),
-  }),
 });
 
 /** Request body shared by both write routes (contracts/rest-api.md `POST .../comments`, `.../replies`). */
