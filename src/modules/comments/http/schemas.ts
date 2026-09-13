@@ -11,6 +11,11 @@
  * (`comment-repository.ts`'s `visibleInList`), not this file's.
  */
 
+// oxlint-disable max-lines -- the module's wire contract: every request and response schema for the
+// seven comment/platform routes, plus the three pure row-to-wire mappers. Splitting it along the
+// obvious seam (queries vs. responses) would put an operation's request and its response in
+// different files, which is the one pairing a reader of this file always needs together.
+
 import { z } from 'zod';
 import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { SyncJobRecord } from '#src/modules/comments/application/request-sync.ts';
@@ -65,19 +70,26 @@ function booleanQueryParam() {
  * selection — unlike the removed replies route, this collection has one address and so one
  * default, not one that varies by which filter is present. Every filter key is optional; absence
  * means "no filter", never an implicit default.
+ *
+ * `strict()` because a Zod object otherwise *strips* an unrecognized key, and here that is a filter
+ * silently not applied: `?post_id=…` would answer `200` with the whole workspace's history, which no
+ * client can tell from a correct narrowed page. An unsatisfiable combination of *recognized* filters
+ * stays a deliberate empty page (contracts/rest-api.md).
  */
-export const listCommentsQuerySchema = paginationQuerySchema('desc').extend({
-  postId: z.uuid().optional(),
-  parentCommentId: z.uuid().optional(),
-  accountId: z.uuid().optional(),
-  platform: z.preprocess(toPlatformArray, z.array(z.enum(PLATFORM_KEYS))).optional(),
-  // `offset: true` accepts a numeric timezone offset (`+02:00`), not only `Z` — plain ISO 8601,
-  // as contracts/rest-api.md promises for `since`/`until` (M-4); the default rejected an offset.
-  since: z.iso.datetime({ offset: true }).optional(),
-  until: z.iso.datetime({ offset: true }).optional(),
-  topLevelOnly: booleanQueryParam(),
-  isOwn: booleanQueryParam(),
-});
+export const listCommentsQuerySchema = paginationQuerySchema('desc')
+  .extend({
+    postId: z.uuid().optional(),
+    parentCommentId: z.uuid().optional(),
+    accountId: z.uuid().optional(),
+    platform: z.preprocess(toPlatformArray, z.array(z.enum(PLATFORM_KEYS))).optional(),
+    // `offset: true` accepts a numeric timezone offset (`+02:00`), not only `Z` — plain ISO 8601,
+    // as contracts/rest-api.md promises for `since`/`until` (M-4); the default rejected an offset.
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional(),
+    topLevelOnly: booleanQueryParam(),
+    isOwn: booleanQueryParam(),
+  })
+  .strict();
 
 const commentAuthorSchema = z
   .object({

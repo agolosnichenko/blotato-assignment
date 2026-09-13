@@ -716,6 +716,58 @@ function registerPagingValidationTests(getHarness: () => Harness): void {
       });
       assertProblem(response, 400, 'VALIDATION_ERROR');
     });
+
+    it('accepts the limit bounds themselves', async () => {
+      const harness = getHarness();
+      const fixture = await setUpPagingFixture(harness.database);
+      for (const limit of ['1', '100']) {
+        // oxlint-disable-next-line no-await-in-loop -- one shared fixture, two sequential reads.
+        const response = await fetchComments(harness, fixture.apiKey, { limit });
+        expect(response.statusCode, `limit=${limit} must be accepted`).toBe(200);
+      }
+    });
+  });
+}
+
+/**
+ * A value the schema cannot parse, and a key the schema does not define, are both
+ * `400 VALIDATION_ERROR` (contracts/rest-api.md's failure table).
+ *
+ * The unknown-key half is the load-bearing one: Zod objects strip unrecognized keys by default, so
+ * before `listCommentsQuerySchema` was made strict a request the client believed was narrowed to
+ * one post (`?post_id=…`, snake_case, or `?platform[]=…`, the bracket-array convention) answered
+ * `200` with the *entire* workspace's history. A filter silently not applied is the one failure
+ * mode of this endpoint a client cannot detect from the response.
+ */
+function registerQueryRejectionTests(getHarness: () => Harness): void {
+  describe('query parameter rejection', () => {
+    const malformedValues: Readonly<Record<string, Record<string, string>>> = {
+      'postId that is not a uuid': { postId: 'not-a-uuid' },
+      'parentCommentId that is not a uuid': { parentCommentId: 'not-a-uuid' },
+      'accountId that is not a uuid': { accountId: 'not-a-uuid' },
+      'since that is not a timestamp': { since: 'not-a-date' },
+      'until that is not a timestamp': { until: 'yesterday' },
+      'order that is neither asc nor desc': { order: 'sideways' },
+      'limit that is not a number': { limit: 'abc' },
+      'topLevelOnly that is not a boolean': { topLevelOnly: 'yes' },
+      'isOwn that is not a boolean': { isOwn: '1' },
+    };
+
+    const unknownKeys: Readonly<Record<string, Record<string, string>>> = {
+      'a snake_case spelling of postId': { post_id: '01a09c8e-1fe0-7af5-b5c9-c4a1a2955376' },
+      'a misspelled postId': { postid: '01a09c8e-1fe0-7af5-b5c9-c4a1a2955376' },
+      'a bracket-array spelling of platform': { 'platform[]': 'bluesky' },
+      'a key the schema does not define at all': { unsupported: 'whatever' },
+    };
+
+    for (const [name, query] of Object.entries({ ...malformedValues, ...unknownKeys })) {
+      it(`rejects ${name}`, async () => {
+        const harness = getHarness();
+        const fixture = await setUpPagingFixture(harness.database);
+        const response = await fetchComments(harness, fixture.apiKey, query);
+        assertProblem(response, 400, 'VALIDATION_ERROR');
+      });
+    }
   });
 }
 
@@ -1191,6 +1243,7 @@ describe('GET /v1/comments', () => {
   registerNoSyncKeyTest(() => harness);
   registerExactPagingUnderConcurrentInsertsTest(() => harness);
   registerPagingValidationTests(() => harness);
+  registerQueryRejectionTests(() => harness);
 
   describe('filter semantics (T020, quickstart.md V3-V4)', () => {
     registerPlatformUnionTest(() => harness);

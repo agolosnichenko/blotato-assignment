@@ -89,13 +89,18 @@ under concurrent inserts (SC-003, D27).
 
 | HTTP | `code` | When |
 |------|--------|------|
-| `400` | `VALIDATION_ERROR` | malformed or truncated cursor; cursor minted under the other `order`; `limit` outside 1–100; a `platform` value that is not a key of the capability registry; a malformed uuid or timestamp |
+| `400` | `VALIDATION_ERROR` | malformed or truncated cursor; cursor minted under the other `order`; `limit` outside 1–100; a `platform` value that is not a key of the capability registry; a malformed uuid or timestamp; **a query parameter not in the table above** |
 | `401` | `UNAUTHORIZED` | missing, unrecognized or revoked key |
 | `404` | `NOT_FOUND` | `postId`, `accountId` or `parentCommentId` that does not exist **or belongs to another workspace** — never `403`, never an empty `200` (D20, FR-004) |
 | `429` | `RATE_LIMITED` | the per-key read budget |
 
 Values that are individually valid never produce a `400`, however they combine. A `since` later than
 `until` is an empty `200`.
+
+**An unrecognized parameter name is rejected, not ignored.** The query schema is strict, so
+`?post_id=…` or `?platform[]=…` — plausible spellings a client may reach for — are a `400`, not a
+`200` silently answered from the unfiltered collection. On a read where every parameter narrows the
+result, a dropped filter is indistinguishable from a wrong answer.
 
 ### Behaviour worth stating because it is testable
 
