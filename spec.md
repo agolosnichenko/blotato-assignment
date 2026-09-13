@@ -701,6 +701,10 @@ Infrastructure:
     here holds only after someone sets that start command and confirms it with
     `CONFIG GET appendonly maxmemory-policy`. `.railway/railway.ts` carries the same warning beside
     the declaration.
+  - **Confirmed on the deployment (2026-09-13).** `CONFIG GET appendonly maxmemory-policy` against
+    the `cache` instance returns `noeviction` and `yes`, and `/readyz` reports Redis reachable from
+    `api` — which is itself evidence the services moved to the new instance, since the address they
+    now hold carries no password and the managed database would have refused the connection.
   - **Why the AOF half is not optional here.** Postgres is the source of truth, and the sweepers
     re-enqueue work whose job was lost — so a Redis restart is survivable in the sense that no
     comment is lost. What it is not is *invisible*: every in-flight job would have to be rediscovered

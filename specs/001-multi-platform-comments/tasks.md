@@ -719,7 +719,7 @@ reason the registry gives.
 
 ### Remaining spikes
 
-- [ ] T105 [P] Run spike S3 — whether Railway's managed Redis accepts `maxmemory-policy noeviction`
+- [X] T105 [P] Run spike S3 — whether Railway's managed Redis accepts `maxmemory-policy noeviction`
       with AOF persistence — and record the outcome in `spec.md` §17. If it does not, provision Redis
       from a Docker image with a volume instead; this changes deployment configuration only, not code
       (FR-033, §9.2)
@@ -731,7 +731,7 @@ reason the registry gives.
 
 - [X] T107 Create `scripts/generate-openapi.ts` writing `openapi.json` from the registered Zod route
       schemas, and commit the generated `openapi.json` at the repository root (D18, R-03)
-- [ ] T108 [P] Create `scripts/smoke.ts` running the SC-012 reviewer walkthrough against the
+- [X] T108 [P] Create `scripts/smoke.ts` running the SC-012 reviewer walkthrough against the
       deployment: list platforms → read a post's comments → post a reply → poll to `posted` → hit
       `422 REPLY_DEPTH_EXCEEDED` on Instagram and succeed on Bluesky → request a refresh and read the
       job counts
