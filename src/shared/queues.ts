@@ -18,9 +18,8 @@ export const QUEUE_NAMES = {
   /** Refreshing one sync target (§7.3). Per-account token bucket. */
   commentSync: 'comment-sync',
   /**
-   * Repeatable jobs: the sync scheduler, the stuck-work sweeper, the outbox relay, the retention
-   * purge. The webhook-delivery sweeper of §7.2 step 5 would join this queue too, but it is
-   * unbuilt behind the Meta spike gate (§ Meta constraints) and has no job registered here yet.
+   * Repeatable jobs: the sync scheduler, the stuck-work sweeper, the webhook-delivery sweeper
+   * (§7.2 step 5), the outbox relay, the retention purge.
    */
   scheduler: 'scheduler',
   /** Domain events for external consumers; not consumed inside this service (D9). */
@@ -28,3 +27,15 @@ export const QUEUE_NAMES = {
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
+
+/**
+ * Job names, for the one queue where more than one producer/consumer pair needs to agree on a
+ * spelling. `POST /webhooks/meta` (`webhook-routes.ts`) adds this job to `QUEUE_NAMES.webhookProcess`
+ * on every accepted delivery; the webhook-delivery sweeper (`sweepers.ts`) re-adds it under the same
+ * name for a delivery it re-enqueues. A literal would have the same vacuous-green failure mode the
+ * module docstring describes for a queue name — a worker listening for one spelling never sees a
+ * job added under another.
+ */
+export const JOB_NAMES = {
+  processDelivery: 'process-delivery',
+} as const;

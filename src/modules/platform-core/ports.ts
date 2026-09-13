@@ -68,6 +68,22 @@ export interface SocialAccountRecord {
 
 export interface Accounts {
   findById(socialAccountId: string): Promise<Found<SocialAccountRecord>>;
+  /**
+   * Resolves a platform's own account id (a Meta Page id or IG user id) to every matching local
+   * record (T081, §7.2 step 2, spec.md §18 "`Accounts.listByPlatformAccount`") — the one lookup a
+   * Meta webhook delivery can use, since the payload carries only the platform-side id. Returns a
+   * **list**, not a `Found<T>`: `social_accounts` carries no uniqueness on
+   * `(platform, platform_account_id)`, and none can be assumed — two workspaces may legitimately
+   * connect the same Page, and a delivery concerns both. An empty list is the expected,
+   * non-retryable "unknown account" outcome (e.g. a dashboard test event), not an error; a caller
+   * ingests once per returned record, since `UNIQUE (social_account_id, platform_comment_id)`
+   * keeps the rows apart without further guarding. Composes the same effective status as
+   * {@link Accounts.findById}.
+   */
+  listByPlatformAccount(
+    platform: Platform,
+    platformAccountId: string,
+  ): Promise<readonly SocialAccountRecord[]>;
 }
 
 export interface PostRecord {

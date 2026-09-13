@@ -1,14 +1,14 @@
 // oxlint-disable max-dependencies -- this is the worker role's composition point for every
-// `scheduler`-queue job (the stuck-work sweeper, the sync scheduler, the retention purge, the
-// outbox relay) plus the `comment-publish`/`comment-sync` workers; each job's own constructor is a
-// separate import by design (§4.2), so the count rises whenever a job is added here rather than
-// indicating the file itself has grown unfocused. There is only one sweeper today — the
-// webhook-delivery sweeper of §7.2 step 5 is unbuilt behind the Meta spike gate (§ Meta
-// constraints) and has no entry here.
+// `scheduler`-queue job (the stuck-work sweeper, the webhook-delivery sweeper, the sync scheduler,
+// the retention purge, the outbox relay) plus the `comment-publish`/`comment-sync`/
+// `webhook-process` workers; each job's own constructor is a separate import by design (§4.2), so
+// the count rises whenever a job is added here rather than indicating the file itself has grown
+// unfocused.
 
 import { pathToFileURL } from 'node:url';
 import { Queue, Worker } from 'bullmq';
 import { buildContainer, type Container } from '#src/app/container.ts';
+import { createIngestComments } from '#src/modules/comments/application/ingest-comments.ts';
 import { createPurgeRetention } from '#src/modules/comments/application/purge-retention.ts';
 import { relayOutboxBatch } from '#src/modules/comments/infrastructure/outbox-relay.ts';
 import { createPublishWorker } from '#src/modules/comments/infrastructure/publish-worker.ts';
@@ -18,13 +18,21 @@ import {
   type SyncScheduler,
 } from '#src/modules/comments/infrastructure/sync-scheduler.ts';
 import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
-import { createStuckWorkSweeper } from '#src/modules/comments/infrastructure/sweepers.ts';
+import {
+  createStuckWorkSweeper,
+  createWebhookDeliverySweeper,
+} from '#src/modules/comments/infrastructure/sweepers.ts';
+import { createWebhookWorker } from '#src/modules/comments/infrastructure/webhook-worker.ts';
+import { createMetaWebhookNormalizer } from '#src/platforms/meta/webhook-normalizer.ts';
 import { createLogger } from '#src/shared/logger.ts';
 import type { Logger } from 'pino';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 
 const SWEEP_STUCK_WORK_JOB = 'sweep-stuck-work';
 const SWEEP_INTERVAL_MS = 60_000;
+/** §7.2 step 5: the threshold itself (5 minutes) lives in `sweepers.ts`; this tick only decides
+ * how often to check for it, same cadence as the stuck-work sweeper. */
+const SWEEP_WEBHOOK_DELIVERIES_JOB = 'sweep-webhook-deliveries';
 const SYNC_SCHEDULER_TICK_JOB = 'sync-due-targets';
 const SYNC_SCHEDULER_TICK_INTERVAL_MS = 60_000;
 const PURGE_RETENTION_JOB = 'purge-retention';
@@ -41,31 +49,33 @@ const OUTBOX_RELAY_INTERVAL_MS = 10_000;
 
 /**
  * Dispatches one `scheduler` queue job by name. Every job this queue carries (the stuck-work
- * sweeper, the sync scheduler tick, the retention purge, the outbox relay) is added here rather
- * than as a separate `Worker`, because **`scheduler` runs at concurrency 1** — a second `Worker` instance on
- * the same queue would defeat that regardless of its own concurrency setting. `FOR UPDATE SKIP
- * LOCKED` (the outbox relay, the sync scheduler tick) and `jobId = comment.id` (the stuck-work
- * sweeper) stop a second runner from corrupting data, but not from doubling work a first runner
- * already selected and has not yet stamped — concurrency 1 is what actually keeps "published
- * once", "swept once" and "relayed once" true (D14, §9.2, outbox-relay.ts's own docstring).
+ * sweeper, the webhook-delivery sweeper, the sync scheduler tick, the retention purge, the outbox
+ * relay) is added here rather than as a separate `Worker`, because **`scheduler` runs at
+ * concurrency 1** — a second `Worker` instance on the same queue would defeat that regardless of
+ * its own concurrency setting. `FOR UPDATE SKIP LOCKED` (the outbox relay, the sync scheduler
+ * tick) and `jobId = comment.id` / `jobId = delivery.id` (the two sweepers) stop a second runner
+ * from corrupting data, but not from doubling work a first runner already selected and has not yet
+ * stamped — concurrency 1 is what actually keeps "published once", "swept once" and "relayed once"
+ * true (D14, §9.2, outbox-relay.ts's own docstring).
  */
 async function processSchedulerJob(
   jobName: string | undefined,
-  sweeper: ReturnType<typeof createStuckWorkSweeper>,
-  syncScheduler: SyncScheduler,
-  purgeRetention: ReturnType<typeof createPurgeRetention>,
+  jobDeps: SchedulerJobDeps,
   database: Container['database'],
   domainEventsQueue: Queue,
 ): Promise<void> {
   switch (jobName) {
     case SWEEP_STUCK_WORK_JOB:
-      await sweeper.sweep();
+      await jobDeps.sweeper.sweep();
+      return;
+    case SWEEP_WEBHOOK_DELIVERIES_JOB:
+      await jobDeps.webhookDeliverySweeper.sweep();
       return;
     case SYNC_SCHEDULER_TICK_JOB:
-      await syncScheduler.tick();
+      await jobDeps.syncScheduler.tick();
       return;
     case PURGE_RETENTION_JOB:
-      await purgeRetention.run();
+      await jobDeps.purgeRetention.run();
       return;
     case OUTBOX_RELAY_JOB:
       await relayOutboxBatch(database, domainEventsQueue);
@@ -78,34 +88,71 @@ async function processSchedulerJob(
 interface Runtime {
   readonly publishWorker: Worker;
   readonly syncWorker: Worker;
+  readonly webhookWorker: Worker;
   readonly schedulerWorker: Worker;
   readonly publishQueue: Queue;
   readonly syncQueue: Queue;
+  readonly webhookQueue: Queue;
   readonly schedulerQueue: Queue;
   readonly domainEventsQueue: Queue;
 }
 
 interface SchedulerJobDeps {
   readonly sweeper: ReturnType<typeof createStuckWorkSweeper>;
+  readonly webhookDeliverySweeper: ReturnType<typeof createWebhookDeliverySweeper>;
   readonly syncScheduler: SyncScheduler;
   readonly purgeRetention: ReturnType<typeof createPurgeRetention>;
 }
 
-/** Builds the four jobs `schedulerWorker` dispatches between — see `processSchedulerJob`. */
-function buildSchedulerJobDeps(container: Container, syncQueue: Queue): SchedulerJobDeps {
+/** Builds the five jobs `schedulerWorker` dispatches between — see `processSchedulerJob`. */
+function buildSchedulerJobDeps(
+  container: Container,
+  syncQueue: Queue,
+  webhookQueue: Queue,
+): SchedulerJobDeps {
   const sweeper = createStuckWorkSweeper({
     database: container.database.drizzle,
     publishQueue: container.publishQueue,
+  });
+  const webhookDeliverySweeper = createWebhookDeliverySweeper({
+    database: container.database.drizzle,
+    webhookQueue,
   });
   const syncScheduler = createSyncScheduler({ database: container.database.drizzle, syncQueue });
   const purgeRetention = createPurgeRetention({
     database: container.database.drizzle,
     retentionDays: container.config.RETENTION_DAYS,
   });
-  return { sweeper, syncScheduler, purgeRetention };
+  return { sweeper, webhookDeliverySweeper, syncScheduler, purgeRetention };
 }
 
-/** The `comment-publish` and `comment-sync` workers — the two non-`scheduler` queues this role runs. */
+/** Builds the `webhook-process` worker (T081) — `IngestComments` wired the same way
+ * `sync-post.ts` wires it (same `syncTargetRepository`, same database handle), plus the Meta
+ * normalizer and the two platform-core ports it needs to resolve an `AccountContext`. */
+function buildWebhookWorker(container: Container, logger: Logger): Worker {
+  const syncTargetRepository = createSyncTargetRepository(
+    container.database.drizzle,
+    container.config,
+  );
+  const ingestComments = createIngestComments({
+    database: container.database.drizzle,
+    syncTargetRepository,
+  });
+
+  return createWebhookWorker({
+    database: container.database.drizzle,
+    redis: container.redis,
+    config: container.config,
+    accounts: container.ports.accounts,
+    accountCredentials: container.ports.accountCredentials,
+    ingestComments,
+    normalizer: createMetaWebhookNormalizer(),
+    logger,
+  });
+}
+
+/** The `comment-publish` and `comment-sync` workers — two of the three non-`scheduler` queues this
+ * role runs (the third, `webhook-process`, is {@link buildWebhookWorker}). */
 function buildQueueWorkers(
   container: Container,
   logger: Logger,
@@ -143,33 +190,29 @@ function buildQueueWorkers(
 function buildRuntime(container: Container, logger: Logger): Runtime {
   const publishQueue = container.publishQueue;
   const syncQueue = container.syncQueue;
+  const webhookQueue = new Queue(QUEUE_NAMES.webhookProcess, { connection: container.redis });
   const schedulerQueue = new Queue(QUEUE_NAMES.scheduler, { connection: container.redis });
   // Delivery only (D9, outbox-relay.ts's docstring) — losing Redis loses no data, since the
   // outbox row stays unpublished and the next relay pass republishes it.
   const domainEventsQueue = new Queue(QUEUE_NAMES.domainEvents, { connection: container.redis });
 
   const { publishWorker, syncWorker } = buildQueueWorkers(container, logger);
-  const { sweeper, syncScheduler, purgeRetention } = buildSchedulerJobDeps(container, syncQueue);
+  const webhookWorker = buildWebhookWorker(container, logger);
+  const jobDeps = buildSchedulerJobDeps(container, syncQueue, webhookQueue);
   const schedulerWorker = new Worker(
     QUEUE_NAMES.scheduler,
-    (job) =>
-      processSchedulerJob(
-        job.name,
-        sweeper,
-        syncScheduler,
-        purgeRetention,
-        container.database,
-        domainEventsQueue,
-      ),
+    (job) => processSchedulerJob(job.name, jobDeps, container.database, domainEventsQueue),
     { connection: container.redis, concurrency: 1 },
   );
 
   return {
     publishWorker,
     syncWorker,
+    webhookWorker,
     schedulerWorker,
     publishQueue,
     syncQueue,
+    webhookQueue,
     schedulerQueue,
     domainEventsQueue,
   };
@@ -182,7 +225,9 @@ async function shutdown(runtime: Runtime, container: Container, logger: Logger):
   await Promise.all([
     runtime.publishWorker.close(),
     runtime.syncWorker.close(),
+    runtime.webhookWorker.close(),
     runtime.schedulerWorker.close(),
+    runtime.webhookQueue.close(),
     runtime.schedulerQueue.close(),
     runtime.domainEventsQueue.close(),
   ]);
@@ -200,6 +245,9 @@ async function main(): Promise<void> {
   // `upsertJobScheduler`, not `add` with a `repeat` option — BullMQ 6 moved repeatable jobs to a
   // dedicated scheduler API; `add`'s `JobsOptions` no longer accepts `repeat` at all.
   await runtime.schedulerQueue.upsertJobScheduler(SWEEP_STUCK_WORK_JOB, {
+    every: SWEEP_INTERVAL_MS,
+  });
+  await runtime.schedulerQueue.upsertJobScheduler(SWEEP_WEBHOOK_DELIVERIES_JOB, {
     every: SWEEP_INTERVAL_MS,
   });
   await runtime.schedulerQueue.upsertJobScheduler(SYNC_SCHEDULER_TICK_JOB, {

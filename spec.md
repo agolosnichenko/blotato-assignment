@@ -701,6 +701,20 @@ implementation.
 
 ### Recorded changes
 
+- **`Accounts.listByPlatformAccount` (extends the `Accounts` port, §4.2/D8).** A webhook delivery
+  identifies its account only by the platform's own id — a Page id or an IG user id — while every
+  existing lookup is keyed by our internal `social_account_id`. The webhook worker therefore cannot
+  resolve a delivery at all with the port as specified, and the one forbidden alternative is a
+  direct `SELECT` against the `social_accounts` projection from inside `comments` (D8, D29,
+  Principle II). Added: `listByPlatformAccount(platform, platformAccountId)`.
+  It returns a **list**, not a `Found<T>`, because the projection carries no uniqueness on
+  `(platform, platform_account_id)` and none can be assumed: two workspaces may legitimately connect
+  the same Page, and a delivery concerns both. A single-record lookup would silently serve one
+  workspace and drop the other's comments — a tenancy-shaped data loss no test keyed to one
+  workspace would catch. An empty list is the "unknown account" case §7.2 step 2 marks processed
+  with a warning. Each matching account is ingested separately; the dedup key
+  `UNIQUE (social_account_id, platform_comment_id)` keeps the rows apart, so fan-out needs no
+  further guard.
 - **A17's two-variant equivalence test runs against one live fixture (narrows T097).** A17 asserts
   the two D28 login variants normalize identically, and the test was specified as one parameterized
   body over a fixture per variant. S2 produced the `facebook_login` fixture; the `instagram_login`

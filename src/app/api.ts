@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
+import { Queue } from 'bullmq';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
 import {
@@ -28,11 +29,13 @@ import {
   registerPlatformRoutes,
   registerSyncRoutes,
 } from '#src/modules/comments/http/routes.ts';
+import { registerMetaWebhookRoutes } from '#src/modules/comments/http/webhook-routes.ts';
 import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
 import type { Database } from '#src/shared/db.ts';
 import { ApiError, toProblemDetails, type ProblemDetails } from '#src/shared/errors.ts';
 import { createLogger } from '#src/shared/logger.ts';
+import { QUEUE_NAMES } from '#src/shared/queues.ts';
 
 /**
  * The subset of {@link Container} this app needs — `ports`, `contactQuota` and `publishQueue`
@@ -260,6 +263,38 @@ function registerCommentRoutes(
   app.register(registerPlatformRoutes());
 }
 
+/**
+ * Registers the Meta webhook intake (T078, T079) with its own `webhook-process` queue handle.
+ *
+ * The queue is built here rather than in `container.ts`: unlike `publishQueue`/`syncQueue`, the
+ * api role is the only one producing onto it — the worker role consumes through its own `Worker`,
+ * a separate BullMQ object over the same `QUEUE_NAMES.webhookProcess` name and Redis connection
+ * (bullmq.md's producer/consumer split), so there is no second role here to share a container
+ * singleton with.
+ */
+function registerWebhookRoutes(
+  app: Api,
+  deps: ApiDependencies,
+  logger: ReturnType<typeof createLogger>,
+): void {
+  const webhookQueue = new Queue(QUEUE_NAMES.webhookProcess, { connection: deps.redis });
+  app.addHook('onClose', async () => {
+    await webhookQueue.close();
+  });
+  app.register(
+    registerMetaWebhookRoutes({
+      database: deps.database,
+      webhookQueue,
+      logger,
+      secrets: {
+        appSecret: deps.config.META_APP_SECRET,
+        appSecretInstagram: deps.config.META_APP_SECRET_INSTAGRAM,
+        verifyToken: deps.config.META_WEBHOOK_VERIFY_TOKEN,
+      },
+    }),
+  );
+}
+
 /** Registers `GET /healthz` (liveness) and `GET /readyz` (Postgres + Redis, T035). */
 function registerHealthRoutes(app: Api, database: Database, redis: Redis): void {
   app.get('/healthz', () => ({ status: 'ok' }));
@@ -295,6 +330,7 @@ export function buildApi(deps: ApiDependencies) {
   registerApiKeyAuth(app, deps.ports.apiKeys);
   registerRateLimit(app, deps.config, deps.redis);
   registerCommentRoutes(app, deps, logger);
+  registerWebhookRoutes(app, deps, logger);
   registerHealthRoutes(app, deps.database, deps.redis);
 
   return app;

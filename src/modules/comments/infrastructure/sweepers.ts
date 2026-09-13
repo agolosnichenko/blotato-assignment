@@ -23,16 +23,27 @@
  * this a no-op, and `CommentRepository.markProcessing`'s conditional `UPDATE` is what makes a
  * second worker picking up a genuinely-not-stuck comment harmless — it loses the race and stops.
  * This sweeper adds no second mechanism on top of those two; it only decides *when* to enqueue.
+ *
+ * Also exports {@link createWebhookDeliverySweeper} (T082, §7.2 step 5): re-enqueues
+ * `webhook_deliveries` rows still `processed_at is null` past a threshold. Meta redelivers for up
+ * to 36 hours, but the normal path is `webhook-routes.ts`'s own enqueue on receipt — this sweeper
+ * only exists for the one case that path cannot cover itself: a delivery whose enqueue was lost
+ * (the process crashed between the insert and the `add`) or whose job failed without retrying
+ * further. Same idempotent shape as the stuck-work sweeper above: `webhookQueue.add` uses
+ * `jobId = delivery.id`, so a delivery still genuinely in flight makes re-enqueueing a no-op, and
+ * the worker's own `processed_at` write (not this sweeper) is what stops a delivery from being
+ * swept forever once it succeeds.
  */
 
-import { eq, lt, sql, type SQL } from 'drizzle-orm';
+import { eq, isNull, lt, sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type { Queue } from 'bullmq';
 import {
   createCommentRepository,
   type CommentRepository,
 } from '#src/modules/comments/infrastructure/comment-repository.ts';
-import { comments } from '#src/modules/comments/infrastructure/schema.ts';
+import { comments, webhookDeliveries } from '#src/modules/comments/infrastructure/schema.ts';
+import { JOB_NAMES } from '#src/shared/queues.ts';
 
 const STUCK_QUEUED_AFTER_MS = 60_000;
 /** Generous on purpose (see module docstring) — minutes, not the seconds a platform call takes. */
@@ -136,6 +147,56 @@ export function createStuckWorkSweeper(deps: StuckWorkSweeperDeps): StuckWorkSwe
       await Promise.all(
         commentIds.map((commentId) =>
           deps.publishQueue.add('publish', { commentId }, { jobId: commentId }),
+        ),
+      );
+    },
+  };
+}
+
+const UNPROCESSED_DELIVERY_AFTER_MS = 5 * 60_000;
+
+export interface WebhookDeliverySweeperDeps {
+  readonly database: NodePgDatabase;
+  readonly webhookQueue: Queue;
+}
+
+export interface WebhookDeliverySweeper {
+  sweep(): Promise<void>;
+}
+
+/** Unprocessed past the threshold: `processed_at is null` and `received_at` older than 5 minutes
+ * (§7.2 step 5). No `COALESCE` needed — unlike the stuck-work predicate above, `received_at` is
+ * set unconditionally at insert (`schema.ts`'s own `.defaultNow()`). */
+function unprocessedDeliveryPredicate(cutoff: Date): SQL {
+  return sql`${isNull(webhookDeliveries.processedAt)} and ${lt(webhookDeliveries.receivedAt, cutoff)}`;
+}
+
+async function findUnprocessedDeliveryIds(db: NodePgDatabase, cutoff: Date): Promise<string[]> {
+  const rows = await db
+    .select({ id: webhookDeliveries.id })
+    .from(webhookDeliveries)
+    .where(unprocessedDeliveryPredicate(cutoff))
+    .limit(SWEEP_BATCH_SIZE);
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Creates the webhook-delivery sweeper (T082). Registered on the `scheduler` queue
+ * (`src/app/worker.ts`) as a repeatable job, at the queue's required concurrency 1 (§9.2) — same
+ * reasoning as {@link createStuckWorkSweeper}: concurrency 1 is what keeps "re-enqueued once" true
+ * across however many sweep ticks overlap a slow pass.
+ */
+export function createWebhookDeliverySweeper(
+  deps: WebhookDeliverySweeperDeps,
+): WebhookDeliverySweeper {
+  return {
+    async sweep(): Promise<void> {
+      const cutoff = new Date(Date.now() - UNPROCESSED_DELIVERY_AFTER_MS);
+      const deliveryIds = await findUnprocessedDeliveryIds(deps.database, cutoff);
+
+      await Promise.all(
+        deliveryIds.map((deliveryId) =>
+          deps.webhookQueue.add(JOB_NAMES.processDelivery, { deliveryId }, { jobId: deliveryId }),
         ),
       );
     },

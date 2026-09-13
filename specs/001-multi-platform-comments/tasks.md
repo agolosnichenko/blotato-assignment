@@ -529,29 +529,29 @@ platform side and verify a complete refresh marks it deleted.
       `src/modules/comments/application/ingest-comments.ts`: when the parent is unknown locally, walk
       up with `adapter.fetchComment` until a known ancestor or the top-level comment is found, rather
       than storing an orphan; set `depth` and `root_comment_id` from the resolved chain (FR-022)
-- [ ] T078 [US3] Create `src/modules/comments/http/webhook-routes.ts` with `POST /webhooks/meta`
+- [X] T078 [US3] Create `src/modules/comments/http/webhook-routes.ts` with `POST /webhooks/meta`
       registering a route-scoped Fastify content-type parser that keeps the raw `Buffer`, verifying
       `X-Hub-Signature-256` over those exact bytes with `timingSafeEqual` **before any JSON
       parsing**, accepting either configured signing secret; valid → insert `webhook_deliveries` →
       enqueue `webhook-process` → `200`; invalid → `401` with nothing stored (R-04, S5) *(blocked by
       T070)*
-- [ ] T079 [US3] Add `GET /webhooks/meta` to `src/modules/comments/http/webhook-routes.ts`: compare
+- [X] T079 [US3] Add `GET /webhooks/meta` to `src/modules/comments/http/webhook-routes.ts`: compare
       `hub.verify_token` against the configured value first and only then echo `hub.challenge`; a
       wrong or missing token is `403` and echoes nothing — echoing unconditionally would let anyone
       confirm the subscription *(blocked by T070)*
-- [ ] T080 [US3] Create `src/platforms/meta/webhook-normalizer.ts` implementing `WebhookNormalizer`:
+- [X] T080 [US3] Create `src/platforms/meta/webhook-normalizer.ts` implementing `WebhookNormalizer`:
       turn a verified payload for `instagram.comments` and `page.feed` (`item=comment`,
       `verb=add|edited|remove`) into `upsert` / `delete` `IngestionEvent`s (§8.2). Subscriptions ask
       for values included, but a payload that arrives without `text` or author fields is normalized
       as **incomplete** rather than as empty — an absent field is not an edit to blank (A18)
       *(blocked by T070)*
-- [ ] T081 [US3] Create `src/modules/comments/infrastructure/webhook-worker.ts`: the
+- [X] T081 [US3] Create `src/modules/comments/infrastructure/webhook-worker.ts`: the
       `webhook-process` worker at concurrency 10 running the normalizer and the shared upsert path,
       marking a delivery for an unknown account processed with a warning log rather than retrying it.
       An event the normalizer flagged incomplete is completed through `adapter.fetchComment` before
       the upsert, so a thin payload never overwrites stored text with null (§7.2 step 2, A18)
       *(blocked by T070)*
-- [ ] T082 [P] [US3] Add the unprocessed-delivery sweeper to
+- [X] T082 [P] [US3] Add the unprocessed-delivery sweeper to
       `src/modules/comments/infrastructure/sweepers.ts`: re-enqueue `webhook_deliveries` unprocessed
       for more than five minutes (§7.2 step 5)
 - [X] T083 [US3] Implement `listComments` and `fetchComment` in
