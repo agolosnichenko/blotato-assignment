@@ -214,6 +214,25 @@ export function syncJobPollOutcome(status: string): SyncJobPollOutcome {
   return 'continue';
 }
 
+/**
+ * Checks that an identifier-free `GET /v1/comments` response carries no `sync` key (D27, V4 of
+ * `specs/002-flat-comment-listing/quickstart.md`): the block only exists when a post is named, and
+ * its presence here would mean the collection is quietly treating the inbox as if one were.
+ *
+ * Args:
+ *   body: The parsed response body of the identifier-free listing.
+ *
+ * Raises:
+ *   Error: If `body` is an object carrying a `sync` key.
+ */
+export function assertInboxHasNoSyncBlock(body: unknown): void {
+  if (typeof body === 'object' && body !== null && 'sync' in body) {
+    throw new Error(
+      `identifier-free listing must not carry a sync block, got: ${JSON.stringify(body)}`,
+    );
+  }
+}
+
 /** An assertion failure in one named step of the walkthrough, carrying the response as evidence. */
 export class SmokeFailure extends Error {
   constructor(step: string, expected: string, actual: string, responseBody?: unknown) {
