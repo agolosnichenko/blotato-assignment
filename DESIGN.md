@@ -538,9 +538,11 @@ what they left open, decides what is claimed below.
 - **Which secret signs `instagram_login` deliveries is still open.** S5 confirmed `META_APP_SECRET`
   over the raw body for the `page` product. The unresolved half is a *configuration value*, not a
   code shape: §17 requires the verifier to accept either configured secret, and it does.
-**Not deployed.** The Railway configuration (D24 — `api` and `worker` from one Dockerfile, managed
-Postgres and Redis, migrations as a pre-deploy step) is written but has not been applied. The README
-has a placeholder for the deployment URL and a verified local walkthrough in its place.
+**Deployed** at https://api-production-6ef5.up.railway.app (D24 — `api` and `worker` from one
+Dockerfile, managed Postgres 18 and Redis 8.2, the migration as api's pre-deploy command). Both
+services reached `SUCCESS` and `/readyz` reports Postgres and Redis reachable. No social account is
+seeded there yet, so the README's walkthrough is still evidenced by a local run rather than by this
+URL.
 
 **Two honest gaps in what's running today, not design decisions:**
 

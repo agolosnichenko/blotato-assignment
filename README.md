@@ -12,13 +12,16 @@ UI) and `worker` (BullMQ — publishing, sync, webhook processing, the outbox re
 
 ## Deployment
 
-`<DEPLOYMENT_URL>` — **placeholder**: this service has not been deployed yet (the Railway
-configuration is written but not applied — see [DESIGN.md](./DESIGN.md) "Implementation status").
-Until a URL is filled in here, run it locally with the instructions below; every request in the
-walkthrough was run and verified against a local instance.
+**https://api-production-6ef5.up.railway.app** — Swagger UI at
+[`/docs`](https://api-production-6ef5.up.railway.app/docs), the OpenAPI document at
+[`/openapi.json`](https://api-production-6ef5.up.railway.app/openapi.json), health at
+[`/healthz`](https://api-production-6ef5.up.railway.app/healthz) and `/readyz` (the latter pings
+Postgres and Redis and reports each).
 
-Once deployed: Swagger UI at `<DEPLOYMENT_URL>/docs`, the OpenAPI document at
-`<DEPLOYMENT_URL>/openapi.json`, health at `<DEPLOYMENT_URL>/healthz` and `/readyz`.
+What is verified there: both services deployed from this commit's image, the migration applied
+through api's pre-deploy command, and `/readyz` answering `200` with both dependencies reachable.
+What is **not**: no social account is seeded yet, so the walkthrough below has not been run against
+this URL. Every response quoted in it is real output from a local run, as the next section says.
 
 A demo API key for trying the endpoints above is sent separately (by email), never committed to
 this repository (D25) — it's scoped to a demo workspace with a reduced rate limit and can be
