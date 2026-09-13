@@ -70,7 +70,7 @@ failure — the verdict line says which one happened, don't conflate them when y
 |---|---|
 | `META_IG_MEDIA_ID` | An Instagram media ID with at least one comment, ideally more (so an empty result is informative rather than expected). Read via the media's `id` field or the Graph API Explorer. |
 | `META_FACEBOOK_LOGIN_TOKEN` | The long-lived Page access token that also covers the linked IG professional account (D28's `facebook_login` variant). |
-| `META_INSTAGRAM_LOGIN_TOKEN` | A long-lived Instagram user token with `instagram_business_manage_comments` (D28's `instagram_login` variant). |
+| `META_INSTAGRAM_LOGIN_TOKEN` | Optional. A long-lived Instagram user token with `instagram_business_manage_comments` (D28's `instagram_login` variant). It comes from a *second* Meta App — the two login variants cannot coexist in one. Unset, that variant is skipped and the verdict says `not attempted (no token supplied)`, which §17 records as distinct from "returned nothing". |
 | `META_GRAPH_API_VERSION` | Optional, defaults to `v21.0`. |
 
 ```bash

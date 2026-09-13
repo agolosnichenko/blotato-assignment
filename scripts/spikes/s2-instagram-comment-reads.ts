@@ -65,6 +65,20 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/**
+ * Reads a token that may legitimately not exist yet.
+ *
+ * `META_INSTAGRAM_LOGIN_TOKEN` comes from a separate Meta App and a separate OAuth flow, which may
+ * be unavailable (the two login variants cannot share one app). Absence is a recordable §17 outcome
+ * — "this variant was not attempted" — and must stay distinguishable from "the variant returned
+ * nothing", which is a claim about Meta's behaviour. Defaulting the token to a placeholder would
+ * collapse the two into an HTTP error and report a fact nobody established.
+ */
+function optionalEnv(name: string): string | undefined {
+  const value = process.env[name];
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
 function fingerprint(secret: string): string {
   return secret.length <= 8
     ? '*'.repeat(secret.length)
@@ -131,16 +145,11 @@ function describe(result: VariantResult): string {
     : `${result.variant} → HTTP ${result.status} error`;
 }
 
-async function main(): Promise<void> {
-  const mediaId = requireEnv('META_IG_MEDIA_ID');
-  const facebookLoginToken = requireEnv('META_FACEBOOK_LOGIN_TOKEN');
-  const instagramLoginToken = requireEnv('META_INSTAGRAM_LOGIN_TOKEN');
-  const apiVersion = process.env['META_GRAPH_API_VERSION'] ?? DEFAULT_API_VERSION;
-
-  console.log(`Facebook Login token fingerprint: ${fingerprint(facebookLoginToken)}`);
-  console.log(`Instagram Login token fingerprint: ${fingerprint(instagramLoginToken)}`);
-  console.log('');
-
+/** The variants to read, in report order; `instagram_login` is present only when its token is. */
+function buildVariants(
+  facebookLoginToken: string,
+  instagramLoginToken: string | undefined,
+): Variant[] {
   const variants: Variant[] = [
     {
       name: 'facebook_login',
@@ -148,13 +157,35 @@ async function main(): Promise<void> {
       token: facebookLoginToken,
       fixtureFile: 's2-facebook-login-comments.json',
     },
-    {
+  ];
+  if (instagramLoginToken !== undefined) {
+    variants.push({
       name: 'instagram_login',
       host: 'graph.instagram.com',
       token: instagramLoginToken,
       fixtureFile: 's2-instagram-login-comments.json',
-    },
-  ];
+    });
+  }
+  return variants;
+}
+
+async function main(): Promise<void> {
+  const mediaId = requireEnv('META_IG_MEDIA_ID');
+  const facebookLoginToken = requireEnv('META_FACEBOOK_LOGIN_TOKEN');
+  const instagramLoginToken = optionalEnv('META_INSTAGRAM_LOGIN_TOKEN');
+  const apiVersion = process.env['META_GRAPH_API_VERSION'] ?? DEFAULT_API_VERSION;
+
+  console.log(`Facebook Login token fingerprint: ${fingerprint(facebookLoginToken)}`);
+  console.log(
+    `Instagram Login token fingerprint: ${
+      instagramLoginToken === undefined
+        ? '(not set — that variant is skipped)'
+        : fingerprint(instagramLoginToken)
+    }`,
+  );
+  console.log('');
+
+  const variants = buildVariants(facebookLoginToken, instagramLoginToken);
 
   // The two variants are independent reads against unrelated hosts — run them concurrently.
   const results = await Promise.all(
@@ -162,8 +193,14 @@ async function main(): Promise<void> {
   );
 
   console.log('');
-  const bothEmpty = results.every((result) => result.status === 200 && result.commentCount === 0);
-  if (bothEmpty) {
+  const summaries = results.map((result) => describe(result));
+  if (instagramLoginToken === undefined) {
+    summaries.push('instagram_login → not attempted (no token supplied)');
+  }
+  const allEmpty =
+    instagramLoginToken !== undefined &&
+    results.every((result) => result.status === 200 && result.commentCount === 0);
+  if (allEmpty) {
     console.log(
       'Both variants returned HTTP 200 with 0 comments. Per §17, if this holds, IG stays ' +
         'fixture-tested and the live demo relies on Facebook and Bluesky — record that in ' +
@@ -171,7 +208,7 @@ async function main(): Promise<void> {
     );
   }
 
-  console.log(`SPIKE S2 VERDICT: ${results.map((result) => describe(result)).join(', ')}`);
+  console.log(`SPIKE S2 VERDICT: ${summaries.join(', ')}`);
 }
 
 try {

@@ -647,6 +647,22 @@ Infrastructure:
   empty `data` for `/comments` in Standard Access via Instagram Login. Test both variants and use
   whichever works for the live demo. If neither works, IG is covered by fixture-based tests, the live
   demo relies on FB and Bluesky, and the limitation is described in DESIGN.md.
+  - **Result (2026-09-13), `facebook_login` half:** `GET /{media-id}/comments` on
+    `graph.facebook.com` returned HTTP 200 with 2 top-level comments against a Standard Access app.
+    Raw body committed as `src/platforms/meta/__fixtures__/s2-facebook-login-comments.json`.
+    Three observations the implementation depends on:
+    1. **Replies are nested, not listed.** A reply to a comment does not appear as an element of
+       `data`; it appears under that comment's `replies.data`. The adapter flattens the page, the
+       edge does not.
+    2. **`from` is present and carries `{id, username}` only** — no `name`. `author_display_name`
+       is therefore null for Instagram, and FR-030's deletion path must tolerate nulling a field
+       that was already null.
+    3. **No `paging` key** when the result fits one page. Cursor handling for Instagram is
+       unexercised by this fixture — a known gap, not a resolved one.
+  - **`instagram_login` half: not attempted.** That variant requires a second Meta App (the two
+    login variants cannot coexist in one app) and its own OAuth flow. Not attempted is deliberately
+    recorded as distinct from "returned nothing": the latter is a claim about Meta's behaviour under
+    Standard Access, and this spike has not established it.
 - **S3. Railway Redis.** Confirm that `maxmemory-policy noeviction` can be set and persistence enabled;
   otherwise run Redis from a Docker image with a volume.
 - **S4. Bluesky limits.** Check current rate limits for `createRecord` and `getPostThread` and tune the
