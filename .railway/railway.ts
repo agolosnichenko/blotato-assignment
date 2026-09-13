@@ -1,4 +1,4 @@
-import { defineRailway, github, postgres, project, redis, service } from 'railway/iac';
+import { defineRailway, postgres, project, redis, service } from 'railway/iac';
 
 /**
  * Railway project for T111 (D24): `api` and `worker` are two services built from the same
@@ -8,7 +8,8 @@ import { defineRailway, github, postgres, project, redis, service } from 'railwa
  * This file is authored but not applied — the repository owner runs `railway config plan` then
  * `railway config apply` themselves (no credentials or external resources were touched writing
  * this). Before the first apply:
- *   1. Replace the `github()` call below with the real `owner/repo`.
+ *   1. `railway link` the directory to the target project and environment, so `plan` diffs against
+ *      the right environment rather than prompting for one.
  *   2. Create CREDENTIALS_ENCRYPTION_KEY, META_APP_SECRET, META_APP_SECRET_INSTAGRAM and
  *      META_WEBHOOK_VERIFY_TOKEN as environment-level *shared* variables (Railway dashboard →
  *      environment → Variables → Shared) — ctx.shared only references a value that already
@@ -25,6 +26,11 @@ import { defineRailway, github, postgres, project, redis, service } from 'railwa
  * Railway dashboard only once a default stops being right, not speculatively here. PORT
  * especially must stay unset: Railway assigns it, and config.ts already reads whatever Railway
  * sets, so a literal value here would fight that assignment.
+ *
+ * `.oxlintrc.json` overrides `max-lines-per-function` for this directory with
+ * `skipComments: true` (JSON takes no comment, so the reason lives here): the builder below is one
+ * declarative resource graph whose length is comment, and splitting it would scatter the
+ * infrastructure across functions for no reader's benefit. The 50-line cap still applies to code.
  */
 export default defineRailway((ctx) => {
   const db = postgres('postgres');
@@ -49,14 +55,24 @@ export default defineRailway((ctx) => {
   // by hand (redis://redis.railway.internal:6379) since a plain service has no `.env.REDIS_URL`.
   const cache = redis('redis');
 
-  // TODO(owner): point this at the real repository before the first `railway config apply`.
-  const repo = github('<github-org>/<repo>', { branch: 'main' });
+  // Neither service declares a `source`. A `github()` source would make Railway watch `main` and
+  // deploy both services itself, in parallel, the moment a commit lands — which contradicts D24's
+  // ordering requirement (api's pre-deploy migration must finish before worker starts against the
+  // new schema) and would be a second deploy trigger beside the one T111 actually specifies,
+  // ".github/workflows/". Omitting `source` is the documented way to have this file own service
+  // settings without declaring a repository or image
+  // (docs.railway.com/infrastructure-as-code/reference); the code itself arrives through the
+  // `railway up` steps in .github/workflows/ci.yml, which deploy api first and wait for SUCCESS.
+  // Railway builds those uploads with the repository's Dockerfile, the same image both services run.
 
+  // Bracket access because `ctx.shared` is an index signature and tsconfig sets
+  // `noPropertyAccessFromIndexSignature` — this file is in `tsc --noEmit`'s input, so the DSL is
+  // checked against the installed `railway` package rather than taken on trust.
   const sharedSecrets = {
-    CREDENTIALS_ENCRYPTION_KEY: ctx.shared.CREDENTIALS_ENCRYPTION_KEY,
-    META_APP_SECRET: ctx.shared.META_APP_SECRET,
-    META_APP_SECRET_INSTAGRAM: ctx.shared.META_APP_SECRET_INSTAGRAM,
-    META_WEBHOOK_VERIFY_TOKEN: ctx.shared.META_WEBHOOK_VERIFY_TOKEN,
+    CREDENTIALS_ENCRYPTION_KEY: ctx.shared['CREDENTIALS_ENCRYPTION_KEY'],
+    META_APP_SECRET: ctx.shared['META_APP_SECRET'],
+    META_APP_SECRET_INSTAGRAM: ctx.shared['META_APP_SECRET_INSTAGRAM'],
+    META_WEBHOOK_VERIFY_TOKEN: ctx.shared['META_WEBHOOK_VERIFY_TOKEN'],
   };
 
   // dist/migrate.mjs (scripts/migrate.ts) calls drizzle-orm's own `migrate()` against the
@@ -67,7 +83,6 @@ export default defineRailway((ctx) => {
   const migrate = 'node dist/migrate.mjs';
 
   const api = service('api', {
-    source: repo,
     start: 'node dist/api.mjs',
     // Runs before api serves traffic (D24). drizzle-orm's migrate() takes no lock against
     // concurrent runs (github.com/drizzle-team/drizzle-orm/issues/874) and must run exactly once
@@ -87,7 +102,6 @@ export default defineRailway((ctx) => {
   });
 
   const worker = service('worker', {
-    source: repo,
     start: 'node dist/worker.mjs',
     env: {
       DATABASE_URL: db.env.DATABASE_URL,
