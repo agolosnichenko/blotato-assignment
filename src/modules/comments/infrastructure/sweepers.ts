@@ -20,21 +20,20 @@
  *
  * Re-enqueueing is safe to run twice, and even safe against a job that is not actually stuck:
  * `jobId = comment.id` means a job genuinely in flight for that comment is left alone by
- * {@link reenqueueStuckJob} below, and `CommentRepository.markProcessing`'s conditional `UPDATE`
- * is what makes a second worker picking up a genuinely-not-stuck comment harmless — it loses the
- * race and stops. Double-enqueue is therefore not a hazard this code has to engineer against: only
- * one worker can ever transition a row out of `queued`/`processing`, so a second job for the same
- * `jobId` finds the row already moved on and stops immediately (D14). This sweeper adds no second
- * mechanism on top of that; it only decides *when* to enqueue, and — see below — makes sure the
- * enqueue it decides to do actually happens.
+ * `reenqueueStuckJob` (`reenqueue.ts`), and `CommentRepository.markProcessing`'s conditional
+ * `UPDATE` is what makes a second worker picking up a genuinely-not-stuck comment harmless — it
+ * loses the race and stops. Double-enqueue is therefore not a hazard this code has to engineer
+ * against: only one worker can ever transition a row out of `queued`/`processing`, so a second job
+ * for the same `jobId` finds the row already moved on and stops immediately (D14). This sweeper
+ * adds no second mechanism on top of that; it only decides *when* to enqueue, and leaves making
+ * sure the enqueue it decides to do actually happens to `reenqueueStuckJob`.
  *
  * `jobId = comment.id` (like `jobId = delivery.id` for the webhook sweeper below) is also exactly
  * what makes a *stale* re-enqueue a silent no-op (C1): `Queue.add` with a `jobId` that already
  * names a job retained in a terminal state does not move it back to `wait` — it resolves
  * successfully and does nothing, which a sweeper cannot tell apart from a real schedule unless it
- * checks. {@link reenqueueStuckJob} does that check: a retained completed/failed job is removed
- * before re-adding, and the final state is asserted so a sweep that decided work was stuck but
- * could not actually schedule it is `warn`-logged rather than silent.
+ * checks. `reenqueueStuckJob` (its own module, `reenqueue.ts`, since both sweepers need it and the
+ * reasoning is about BullMQ's semantics rather than either selector) does that check.
  *
  * Also exports {@link createWebhookDeliverySweeper} (T082, §7.2 step 5): re-enqueues
  * `webhook_deliveries` rows still `processed_at is null` past a threshold. Meta redelivers for up
@@ -42,25 +41,23 @@
  * only exists for the one case that path cannot cover itself: a delivery whose enqueue was lost
  * (the process crashed between the insert and the `add`) or whose job failed without retrying
  * further. Same idempotent shape as the stuck-work sweeper above, through the same
- * {@link reenqueueStuckJob} helper: a delivery still genuinely in flight makes re-enqueueing a
- * no-op, and the worker's own `processed_at` write (not this sweeper) is what stops a delivery
- * from being swept forever once it succeeds.
+ * `reenqueueStuckJob`: a delivery still genuinely in flight makes re-enqueueing a no-op, and the
+ * worker's own `processed_at` write (not this sweeper) is what stops a delivery from being swept
+ * forever once it succeeds.
  */
-
-// oxlint-disable max-lines -- two sweepers plus the shared `reenqueueStuckJob` helper they both go
-// through; the helper's three outcome branches (in-flight, completed, failed, and the genuine
-// "could not schedule" case) are each commented at the point of use rather than compressed, because
-// the comments are what keeps a warning meant to signal a broken recovery path from also firing on
-// the healthy path (see the function's own docstring).
 
 import { eq, isNull, lt, sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type { Queue } from 'bullmq';
-import type { Logger } from 'pino';
 import {
   createCommentRepository,
   type CommentRepository,
 } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import {
+  reenqueueStuckJob,
+  SILENT_LOGGER,
+  type WarnLogger,
+} from '#src/modules/comments/infrastructure/reenqueue.ts';
 import { comments, webhookDeliveries } from '#src/modules/comments/infrastructure/schema.ts';
 import { JOB_NAMES } from '#src/shared/queues.ts';
 
@@ -69,99 +66,6 @@ const STUCK_QUEUED_AFTER_MS = 60_000;
 const STUCK_PROCESSING_AFTER_MS = 5 * 60_000;
 /** Bounds one sweep pass; a healthy system has an empty result here (see the test's docstring). */
 const SWEEP_BATCH_SIZE = 500;
-
-/**
- * States BullMQ reports for a job that is genuinely in flight: waiting its turn, scheduled for a
- * backoff retry, actively running, waiting on a flow-producer parent, or held by priority
- * ordering. A row a sweeper's own SQL predicate selected as stuck but whose job is in one of these
- * states is not actually stuck — a worker (or a pending retry) already owns it, and re-enqueueing
- * on top would risk the second concurrent publish D14 exists to prevent. `completed`, `failed` and
- * anything {@link reenqueueStuckJob} cannot classify are the states that mean "nothing is actually
- * working on this" — those are the ones it must act on.
- */
-const IN_FLIGHT_JOB_STATES = new Set([
-  'waiting',
-  'active',
-  'delayed',
-  'waiting-children',
-  'prioritized',
-]);
-
-/** What {@link reenqueueStuckJob} needs from a logger — just `warn` — so a caller that has no
- * real one (a unit test exercising the selector logic, not the observability) can pass a no-op
- * rather than wiring up pino. Every production caller (`src/app/worker.ts`) passes the real
- * per-role `Logger`, which is a structural subtype of this. */
-type WarnLogger = Pick<Logger, 'warn'>;
-
-const SILENT_LOGGER: WarnLogger = { warn: () => {} };
-
-/**
- * Re-enqueues one stuck job, working around `Queue.add`'s own silent no-op when `jobId` already
- * names a job BullMQ has retained in a terminal state (C1): `addStandardJob`'s Lua script treats
- * an existing job key as a duplicate and resolves the caller's promise without moving anything
- * back to `wait`, regardless of whether that job is still in flight or long settled. Reusing the
- * accept path's own stable entity id (`comment.id`, `delivery.id`) is correct idempotency for
- * *that* job; it becomes a permanent stall for a sweeper, whose entire purpose is to re-enqueue
- * after the first job is gone.
- *
- * A job genuinely in flight ({@link IN_FLIGHT_JOB_STATES}) is left alone — that is the legitimate
- * no-op described in this module's docstring. A job retained in a terminal state is removed first,
- * then re-added. Either way the caller asserts the outcome rather than trusting `add()`'s resolved
- * promise: `add()` resolves the same way whether it scheduled new work or silently found the key
- * already taken, which is exactly the ambiguity that let C1 survive unnoticed.
- *
- * `logger.warn` fires only on the states that mean the re-enqueue itself did not work, never on the
- * in-flight no-op or on a job that was scheduled and actually ran (`completed`, `failed` — see the
- * inline comments below for why each is excluded, and why `failed` gets its own message).
- */
-async function reenqueueStuckJob(
-  queue: Queue,
-  jobName: string,
-  data: Record<string, unknown>,
-  jobId: string,
-  logger: WarnLogger,
-): Promise<void> {
-  const existing = await queue.getJob(jobId);
-  if (existing !== undefined) {
-    const state = await existing.getState();
-    if (IN_FLIGHT_JOB_STATES.has(state)) {
-      return;
-    }
-    await existing.remove();
-  }
-
-  const job = await queue.add(jobName, data, { jobId });
-  const state = await job.getState();
-  if (IN_FLIGHT_JOB_STATES.has(state)) {
-    return;
-  }
-  // `completed` here counts as success, and reads like a bug until you see the race: the publish
-  // queue runs at concurrency 10 and is usually idle when a sweep fires, so a worker can pick this
-  // job up and finish it between the `add` above and this `getState`. Any stale job of the same id
-  // was removed a few lines up, so nothing else could be reporting that state — the work was
-  // scheduled and ran. Warning here anyway would fire on the healthy path, and this line is the
-  // *only* signal that the recovery path is broken (C1 was invisible precisely because it had
-  // none). An alert that also fires on success teaches an operator to scroll past the one that
-  // matters.
-  if (state === 'completed') {
-    return;
-  }
-  if (state === 'failed') {
-    // A job that failed this fast was scheduled and ran — it is not the "nothing is scheduled"
-    // case the warning below means. It still went through `publishComment`/reconciliation (D14)
-    // before failing, so this is a platform/adapter problem worth its own signal, not evidence the
-    // re-enqueue itself didn't work.
-    logger.warn(
-      { jobId, jobName, state },
-      'sweeper re-enqueued stuck work but the job failed immediately',
-    );
-    return;
-  }
-  logger.warn(
-    { jobId, jobName, state },
-    'sweeper decided work was stuck but could not schedule a job for it',
-  );
-}
 
 export interface StuckWorkSweeperDeps {
   readonly database: NodePgDatabase;
