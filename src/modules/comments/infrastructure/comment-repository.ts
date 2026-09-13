@@ -271,8 +271,14 @@ const COMMENT_COLUMNS = {
   updatedAt: comments.updatedAt,
 } as const;
 
-/** A `deleted` comment is listed only while it still has live replies (FR-005, A4). */
-function visibleInList(): SQL {
+/**
+ * A `deleted` comment is listed only while it still has live replies (FR-005, A4).
+ *
+ * Exported so `benchmark.integration.test.ts` can build its `EXPLAIN` predicates from this
+ * function directly rather than keeping a second, hand-typed copy of it in sync by hand (T017
+ * fix round 4) — the same reasoning as {@link orderByFor}'s export.
+ */
+export function visibleInList(): SQL {
   return or(ne(comments.status, 'deleted'), gt(comments.replyCount, 0)) as SQL;
 }
 
@@ -356,8 +362,12 @@ const ACTIVE_SYNC_JOB_STATUSES = ['queued', 'running'] as const;
  *
  * No branch here picks an index or a query shape — Postgres's planner does that from the resulting
  * predicate against `comments_workspace_idx` and the other four comment indexes.
+ *
+ * Exported so `benchmark.integration.test.ts`'s `EXPLAIN` assertions can build their `WHERE` from
+ * this function directly rather than keeping a second, hand-typed copy of the same conditions in
+ * sync by hand (T017 fix round 4, I-2) — the same reasoning as {@link orderByFor}'s export.
  */
-function selectionPredicate(workspaceId: WorkspaceId, selection: CommentSelection): SQL {
+export function selectionPredicate(workspaceId: WorkspaceId, selection: CommentSelection): SQL {
   const conditions: SQL[] = [eq(comments.workspaceId, workspaceId)];
 
   if (selection.postId !== undefined) {
