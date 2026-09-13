@@ -249,6 +249,52 @@ Full request/response shapes, query parameters and the error-code catalogue are 
 and the generated [`openapi.json`](./openapi.json). The README has a real, run-and-verified curl
 walkthrough of this API against a local instance.
 
+### 4.1 Why reads flattened and writes didn't (D31, FR-014)
+
+- **One filtered collection, not discoverability.** The reason `GET /v1/comments` exists is not
+  that a flat API is easier to browse — it is that "every new comment across every account in the
+  workspace" had no address at all under the three nested reads. A moderator watching the whole
+  workspace had to fan out to every post's route and stitch the pages together client-side; nothing
+  about that gap is about ergonomics, it's a missing capability (§10 above walks the history).
+- **Writes stay addressed to their target.** `POST /v1/posts/:postId/comments` and
+  `POST /v1/comments/:commentId/replies` were not flattened alongside the reads, and won't be:
+  commands address a specific thing they act on, queries filter a set they select from. Collapsing
+  a write into a body field (`POST /v1/comments { postId: ... }`) would trade a URL any HTTP tool
+  can retry idempotently and log unambiguously for one more field to validate, with no compensating
+  benefit — there is exactly one target, known before the call is made.
+- **`topLevelOnly` exists as a filter, not a separate route, so a post's page still reads as its
+  top level.** The removed `GET /v1/posts/:postId/comments` implicitly meant "this post's top-level
+  comments" — `?postId=…&topLevelOnly=true` reproduces that reading explicitly rather than losing
+  it. It is also what keeps the partial index `comments_post_top_level_idx` (defined `WHERE
+  parent_comment_id IS NULL`) reachable from the collection: without the flag the predicate has no
+  way to match the index's partial condition, and the planner falls back to a broader index or a
+  scan.
+- **The refresh command (`POST /v1/posts/:postId/comments/sync`) stays addressed to a post**, for
+  the same reason as the other writes: a sync walk always has exactly one target — the post whose
+  comments are being reconciled — so there is nothing to filter and nothing gained by moving it
+  under the collection.
+
+**`NULLS LAST` ordering coupling (found and fixed during this feature).** All four `DESC` comment
+indexes are created `... occurred_at DESC NULLS LAST` (`occurred_at` is never null, but `id` orders
+ties, and Postgres's default for a `DESC` index column is `NULLS FIRST`). A bare `ORDER BY
+occurred_at DESC, id DESC` in a query means `NULLS FIRST` by default — a mismatch with the index's
+own ordering, so the planner has to add a sort node to reconcile the two instead of walking the
+index in order. The predicate builder writes `NULLS LAST` explicitly on every `DESC` clause to match
+the indexes; the sharpest thing this feature learned is that the ordering clause and the index
+definition are two places stating the same fact, and either one drifting silently costs the other
+its purpose.
+
+**SC-005 measurement (`pnpm bench:listing`, quickstart.md V7).** Run on a quiet MacBook Pro
+(Apple M-series, arm64, 12 cores, 24 GB RAM, macOS 26), nothing else of the author's running: the
+unfiltered `GET /v1/comments` against a 10,000-comment workspace measured p95 = 3.95ms, against a
+100,000-comment workspace (ten times the history) p95 = 3.01ms — ratio 1.31, under the 1.5 pass
+line. Both figures are **in-process** (`app.inject`, no HTTP or network layer), not end-to-end
+against a deployed server. The harness detects a regression whose cost scales with the *queried
+workspace's own* history (the `NULLS LAST` mismatch above is exactly such a regression, reproduced
+in the script's own docstring at ratio ~4.5); it structurally cannot detect one scaling with the
+*total* table size, since both seeded workspaces share one table and a plain sequential scan costs
+the same regardless of which workspace is queried.
+
 ## 5. Flows
 
 ### 5.1 Reply to a comment (also covers starting a top-level thread)
