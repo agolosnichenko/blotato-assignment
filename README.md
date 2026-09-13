@@ -18,15 +18,28 @@ UI) and `worker` (BullMQ — publishing, sync, webhook processing, the outbox re
 [`/healthz`](https://api-production-6ef5.up.railway.app/healthz) and `/readyz` (the latter pings
 Postgres and Redis and reports each).
 
-Verified against that URL: `/readyz` reports Postgres and Redis reachable; the demo workspace is
-seeded, so `GET /v1/platforms` returns the nine platforms with three supporting comments,
-`GET /v1/posts/:postId/comments` returns a page with its freshness block, a request without a key
-is `401`, and another workspace's post is `404` rather than `403` (D20).
+The whole SC-012 walkthrough has been run against that URL with real connected accounts — a real
+Instagram business account and a real Bluesky account, not fixtures:
 
-Not verified there: publishing a reply and the sync walkthrough. The seeded demo accounts carry
-placeholder credentials and invented platform post ids (`scripts/seed-account.ts` explains why —
-no real secret is ever in source, D25), so steps 3-6 below would fail at the platform, not in this
-service. Their responses are quoted from the local run described in the next section.
+| step | what happened |
+| --- | --- |
+| `GET /v1/platforms` | nine platforms, three supporting comments |
+| `GET /v1/posts/:postId/comments` | the post's two real Instagram comments, newest first, one with a reply |
+| `POST /v1/comments/:id/replies` | `202 queued` with a `Location` |
+| poll to `posted` | Instagram comment `18112975520094858` — posted on the platform |
+| reply to a reply (Instagram) | `422 REPLY_DEPTH_EXCEEDED`, `maxReplyDepth 1` (D12) |
+| reply to a reply (Bluesky) | `202` → `posted`, `at://…/3mvfhkkaki72x` |
+| `POST …/comments/sync` | Instagram `fetched: 3, inserted: 3`; Bluesky `succeeded` |
+
+Also verified there: `/readyz` reports Postgres and Redis reachable, a request without a key is
+`401`, and another workspace's post is `404` rather than `403` (D20).
+
+**Facebook is read-blocked by Meta's access model, not by this code.** Its sync job fails with
+`(#10) This endpoint requires the 'pages_read_user_content' permission or the 'Page Public Content
+Access' feature` — and Meta's own login dialog rejects that permission as invalid
+(`Invalid Scopes: pages_read_user_content`), because granting it needs App Review. The adapter,
+the sync path and the error handling are the same code Instagram and Bluesky run; what is missing
+is a Meta approval, which is exactly what D23 anticipates.
 
 A demo API key for trying the endpoints above is sent separately (by email), never committed to
 this repository (D25) — it's scoped to a demo workspace with a reduced rate limit and can be

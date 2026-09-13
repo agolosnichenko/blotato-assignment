@@ -540,11 +540,16 @@ what they left open, decides what is claimed below.
   code shape: §17 requires the verifier to accept either configured secret, and it does.
 **Deployed** at https://api-production-6ef5.up.railway.app (D24 — `api` and `worker` from one
 Dockerfile, managed Postgres 18 and Redis 8.2, the migration as api's pre-deploy command). Both
-services reached `SUCCESS`, the migration applied (the seed script writes against that schema), and
-the read walkthrough answers there: nine platforms, a comments page with its freshness block, `401`
-without a key, `404` for another workspace's post. The seeded accounts hold placeholder credentials
-and invented platform post ids, so publishing and sync are the parts the deployment cannot
-demonstrate — that gap is credentials, not code.
+services reached `SUCCESS`, the migration applied, and the full SC-012 walkthrough runs there
+against real connected accounts: Instagram's sync ingested the post's three real comments, a reply
+published to Instagram (`18112975520094858`) and two to Bluesky, and the reply-depth check answered
+`422 REPLY_DEPTH_EXCEEDED` on Instagram while Bluesky accepted the same shape (D12). README has the
+step-by-step result.
+
+Facebook is the exception, and not because of this code: its sync fails with `(#10) This endpoint
+requires the 'pages_read_user_content' permission`, while Meta's login dialog rejects that
+permission as invalid because granting it needs App Review. Same adapter, same sync path, same
+typed errors as the two platforms that work — the gap is a Meta approval (D23).
 
 **Two honest gaps in what's running today, not design decisions:**
 

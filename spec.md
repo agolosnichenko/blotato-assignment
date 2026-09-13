@@ -677,6 +677,16 @@ Infrastructure:
     login variants cannot coexist in one app) and its own OAuth flow. Not attempted is deliberately
     recorded as distinct from "returned nothing": the latter is a claim about Meta's behaviour under
     Standard Access, and this spike has not established it.
+- **S6 (unplanned, 2026-09-13). Reading Facebook Page comments needs a permission Meta will not
+  grant.** Running the walkthrough against the deployment with real accounts, the Facebook sync job
+  failed with `(#10) This endpoint requires the 'pages_read_user_content' permission or the 'Page
+  Public Content Access' feature`, while Meta's own login dialog refuses that permission with
+  `Invalid Scopes: pages_read_user_content` — it is no longer grantable without App Review, and the
+  new Business Login configuration flow cannot request it at all. Instagram and Bluesky ran the same
+  path end to end (ingest, publish, depth check), so the adapter and the sync walk are exercised;
+  what Facebook lacks is an approval, which is the shape of constraint D23 already records. No code
+  changes: the failure surfaced as a typed platform rejection with the platform's own message, which
+  is what §6.3 asks of it.
 - **S3. Railway Redis.** Confirm that `maxmemory-policy noeviction` can be set and persistence enabled;
   otherwise run Redis from a Docker image with a volume.
   - **Result (2026-09-13), half negative.** Against the deployed managed Redis,
