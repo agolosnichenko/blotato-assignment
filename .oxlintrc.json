@@ -11,5 +11,13 @@
     "no-console": "error",
     "typescript/consistent-type-imports": "error"
   },
-  "ignorePatterns": ["dist", "node_modules"]
+  "ignorePatterns": ["dist", "node_modules"],
+  "overrides": [
+    {
+      "files": [".railway/*.ts"],
+      "rules": {
+        "max-lines-per-function": ["warn", { "max": 50, "skipComments": true }]
+      }
+    }
+  ]
 }

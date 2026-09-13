@@ -103,6 +103,7 @@ is `400 VALIDATION_ERROR` rather than a silent re-order (A13, D27, FR-004, SC-00
 | 422 | `QUOTA_EXCEEDED` | The monthly audience-contact allowance is exhausted |
 | 429 | `RATE_LIMITED` | Per-key rate limit |
 | 429 | `SYNC_COOLDOWN` | Manual refresh requested inside the cooldown |
+| 500 | `INTERNAL_ERROR` | An unhandled failure in the service; `detail` carries no internal text (root `spec.md` §18) |
 
 Asynchronous failure codes carried on a `failed` comment: `PLATFORM_REJECTED`,
 `PLATFORM_AUTH_FAILED`, `PLATFORM_RATE_LIMITED`, `PARENT_DELETED`, `OUTCOME_UNKNOWN`.

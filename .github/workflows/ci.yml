@@ -35,9 +35,55 @@ jobs:
 
       - run: pnpm typecheck
 
+      - name: status-claims
+        run: pnpm check:status-claims
+
+      - name: openapi-drift
+        run: |
+          pnpm generate-openapi
+          if ! git diff --exit-code -- openapi.json; then
+            echo "::error::openapi.json is out of date. Run \`pnpm generate-openapi\` and commit the result."
+            exit 1
+          fi
+
       - run: pnpm test:unit
 
       # Testcontainers uses the Docker daemon available on ubuntu-latest runners.
       - run: pnpm test:integration
 
       - run: docker build .
+
+  deploy:
+    name: Deploy to Railway
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - run: npm install -g @railway/cli@5.48.0
+
+      # Sequential, not parallel (D24): api's pre-deploy command runs the database migration, and
+      # drizzle-kit's migrate has no lock against concurrent runs
+      # (github.com/drizzle-team/drizzle-orm/issues/874), so worker must not start against the old
+      # schema while it's in progress. `railway up` without --ci/--detach blocks and exits on the
+      # deployment's terminal status, so this step only finishes once api — migration included —
+      # has actually reached SUCCESS.
+      - name: Deploy api (runs the migration via its pre-deploy command)
+        run: railway up --service api --environment production -m "${{ github.sha }}"
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      - name: Deploy worker
+        run: railway up --service worker --environment production -m "${{ github.sha }}"
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

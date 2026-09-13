@@ -29,6 +29,13 @@ repos:
         types_or: [ts]
         pass_filenames: false
 
+      - id: status-claims
+        name: status claims
+        entry: pnpm check:status-claims
+        language: system
+        files: \.(md|ts)$
+        pass_filenames: false
+
       - id: actionlint
         name: actionlint
         entry: actionlint
