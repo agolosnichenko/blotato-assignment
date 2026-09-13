@@ -472,7 +472,7 @@ platform side and verify a complete refresh marks it deleted.
 > before the spike is building on a guess. Everything else in this phase, all of US1/US2, and the
 > whole Bluesky path proceed without it (R-09).
 
-- [ ] T070 [US3] Run spikes S1, S2 and S5 as scripts under `scripts/spikes/` against the real Meta
+- [X] T070 [US3] Run spikes S1, S2 and S5 as scripts under `scripts/spikes/` against the real Meta
       App and record the outcomes in `spec.md` §17 **before** writing the code they gate: S1 whether
       Facebook Page feed comment events are delivered under Standard Access, S2 whether Instagram
       comments are readable under each login variant, S5 which signing secret authenticates events
@@ -723,7 +723,7 @@ reason the registry gives.
       with AOF persistence — and record the outcome in `spec.md` §17. If it does not, provision Redis
       from a Docker image with a volume instead; this changes deployment configuration only, not code
       (FR-033, §9.2)
-- [ ] T106 [P] Run spike S4 — Bluesky's current `createRecord` and `getPostThread` rate limits — and
+- [X] T106 [P] Run spike S4 — Bluesky's current `createRecord` and `getPostThread` rate limits — and
       tune the §7.3 interval values in `.env.example` and the Railway configuration accordingly,
       recording the result in `spec.md` §17 (FR-018, SC-004)
 

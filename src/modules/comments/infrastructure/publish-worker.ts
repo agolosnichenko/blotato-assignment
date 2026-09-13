@@ -20,10 +20,10 @@
  * refilled lazily on each check via a Lua script so concurrent workers never read-then-write a
  * stale token count. When a job finds the bucket empty it does not fail or consume a retry
  * attempt: it calls `job.moveToDelayed` and throws `DelayedError`, BullMQ's documented way to
- * reschedule a job from inside its own processor without touching `attemptsMade`. The bucket's
- * capacity and refill rate below are conservative placeholders, not a published Meta or Bluesky
- * rate limit — the Meta spikes (S1/S2/S5, see root CLAUDE.md) have not run against Standard
- * Access, so this worker does not build on an unverified number.
+ * reschedule a job from inside its own processor without touching `attemptsMade`. Spike S4
+ * (spec.md §17) measured the Bluesky side of the bucket's numbers; the Meta side is still a
+ * conservative placeholder, since S1/S2 answered what Meta *returns*, not how often it may be
+ * written to.
  *
  * **`publish()` returns a `PublishOutcome`, this worker does no arithmetic of its own.** The
  * `'retry'` outcome carries a `delayMs` the use case already computed as the longer of the
@@ -68,8 +68,16 @@ const WORKER_CONCURRENCY = 10;
 const BUCKET_KEY_PREFIX = 'publish-worker:bucket:';
 /** Max burst per account before the bucket must refill. */
 const BUCKET_CAPACITY = 2;
-/** Sustained rate per account once the burst is spent — one publish every 2 seconds. */
-const BUCKET_REFILL_PER_SECOND = 0.5;
+/**
+ * Sustained rate per account once the burst is spent — one publish every four seconds.
+ *
+ * Set from spike S4 (spec.md §17, which carries the arithmetic): Bluesky allows 1,666 record
+ * creates an hour per DID, and the previous placeholder of 0.5/s allowed 1,800 — over the ceiling.
+ * 0.25/s is 900 an hour. The separate daily ceiling is deliberately unguarded: a bucket sized for
+ * it would throttle an ordinary day's bursts, and crossing it degrades to a `429` carrying
+ * `Retry-After`, which `PublishOutcome`'s `delayMs` already honours (§7.1 step 6).
+ */
+const BUCKET_REFILL_PER_SECOND = 0.25;
 /** Idle accounts' bucket rows expire instead of accumulating forever in Redis. */
 const BUCKET_TTL_SECONDS = 120;
 

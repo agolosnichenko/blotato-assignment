@@ -681,6 +681,22 @@ Infrastructure:
   otherwise run Redis from a Docker image with a volume.
 - **S4. Bluesky limits.** Check current rate limits for `createRecord` and `getPostThread` and tune the
   polling intervals.
+  - **Result (2026-09-13),** from the published limits (docs.bsky.app/docs/advanced-guides/rate-limits).
+    - **Writes are per DID, by points.** A record CREATE costs 3 points against **5,000 points per
+      hour and 35,000 per day** — 1,666 creates an hour, 11,666 a day. The publish worker's
+      placeholder refill of 0.5/s allowed 1,800 an hour and so **exceeded the hourly ceiling**;
+      lowered to 0.25/s (900 an hour, 54% of it). The daily ceiling is left unguarded on purpose: a
+      bucket sized for it would throttle an ordinary day's bursts, and crossing it degrades to a
+      `429` that arrives as `RetryableError` with `Retry-After`, honoured by `PublishOutcome`.
+    - **Reads are per IP, not per account:** ~3,000 requests per 5 minutes against the public
+      appview. This is the limit `getPostThread` falls under, and the per-account token bucket does
+      **not** protect it — every sync target in the deployment draws on one shared budget. At the
+      §7.3 `<24h` interval of 5 minutes, one request per target per window, the budget covers on the
+      order of 3,000 concurrently-fresh Bluesky posts. Well beyond this deployment; recorded because
+      the mitigation if it were ever approached is to lengthen that interval, not to add another
+      per-account bucket, which would not bind on a per-IP limit.
+    - `BLUESKY_THREAD_DEPTH` stays at 10: thread depth costs no additional requests, since
+      `getPostThread` returns the whole requested depth in one call.
 - **S5. Webhook signing secret for Instagram Login.** Check which secret (Meta App Secret or Instagram
   App Secret) signs webhooks for the `instagram_login` variant. The verifier must support both secrets
   from config.
