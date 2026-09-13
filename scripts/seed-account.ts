@@ -17,50 +17,52 @@
  * `comment_sync_targets` row (§7.3). That is what the publishing service would do in the real
  * platform; standing in for it is the entire point of this script.
  *
- * No real secret is ever in source (D25): platform tokens are read from optional
- * `SEED_*_TOKEN`/`SEED_BLUESKY_APP_PASSWORD` env vars and fall back to an obviously-fake
- * placeholder string when unset, then encrypted with `CREDENTIALS_ENCRYPTION_KEY` before being
- * written — nothing here is suitable for calling a real platform API (see CLAUDE.md's "Meta
- * constraints" and spikes S1/S2/S5 for why that is out of scope for this script).
+ * No real secret is ever in source (D25): platform tokens, account ids, usernames and post ids
+ * are all read from optional `SEED_*` env vars (see {@link DEMO_ACCOUNTS} for the exact names) and
+ * fall back to an obviously-fake placeholder / demo value when unset, then the token is encrypted
+ * with `CREDENTIALS_ENCRYPTION_KEY` before being written. With no variables set, nothing here is
+ * suitable for calling a real platform API (see CLAUDE.md's "Meta constraints" and spikes
+ * S1/S2/S5 for why that is out of scope by default); setting the real values turns this into the
+ * seed for a live demo.
  *
  * Idempotency: the workspace, its three accounts and their three posts all use fixed demo ids and
- * are inserted with `ON CONFLICT DO NOTHING`, so re-running leaves them untouched and reports
- * "already exists" for each. The API key is the one exception — like `create-api-key.ts`, every
- * run mints a fresh, independent key, because a key's secret cannot be recovered from the
- * database once minted (D25) and a workspace legitimately holding more than one key is normal.
+ * are inserted with `ON CONFLICT DO NOTHING`, so re-running with the *same* values leaves them
+ * untouched and reports "already exists" for each. Re-running with *different* values for a row
+ * that already exists is refused, not silently ignored: `ON CONFLICT DO NOTHING` would otherwise
+ * report success while the database kept the old row, which is indistinguishable from the seed
+ * having worked. Before writing an account or post, this script reads the existing row (if any)
+ * and compares the fields it owns; a mismatch stops the run with a `formatConflictMessage` error
+ * naming the row, the field, the stored value and the supplied one. Clear the demo workspace and
+ * re-run rather than trying to update a row this script does not know how to patch in place — a
+ * post in particular is written through the `PostPublished` port, not a raw `posts` insert, so
+ * changing `platform_post_id` behind that port's back would strand `comment_sync_targets`, which
+ * is unique on `(social_account_id, platform_post_id)`. The API key is the one field with no such
+ * check — like `create-api-key.ts`, every run mints a fresh, independent key, because a key's
+ * secret cannot be recovered from the database once minted (D25) and a workspace legitimately
+ * holding more than one key is normal.
+ *
+ * Split across three files to stay under the project's per-file line/dependency limits: this file
+ * is the CLI entry point (account table, orchestration), `seed-account-checks.ts` holds the pure,
+ * unit-tested decision functions (override resolution, conflict detection), and
+ * `seed-account-writes.ts` holds the actual database calls.
  *
  * Usage:
  *   pnpm seed:account
  */
 
-import { randomBytes } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { loadConfig } from '#src/app/config.ts';
 import { createSyncTargetRepository } from '#src/modules/comments/infrastructure/sync-target-repository.ts';
-import { encryptCredentials } from '#src/modules/platform-core/local/account-credentials.ts';
 import { createLocalPostPublished } from '#src/modules/platform-core/local/post-published.ts';
-import { apiKeys, socialAccounts, workspaces } from '#src/modules/platform-core/schema.ts';
-import { hashSecret } from '#src/shared/crypto.ts';
-import { generateId } from '#src/shared/ids.ts';
-
-const SECRET_ENTROPY_BYTES = 32;
-const PREFIX_BYTES = 6;
+import {
+  formatAccountStatus,
+  resolveAccountValues,
+  type DemoAccount,
+} from './seed-account-checks.ts';
+import { seedAccount, seedApiKey, seedPost, seedWorkspace } from './seed-account-writes.ts';
 
 const DEMO_WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
-const DEMO_CONTACT_LIMIT_MONTHLY = 1000;
-
-interface DemoAccount {
-  readonly id: string;
-  readonly platform: 'instagram' | 'facebook' | 'bluesky';
-  readonly authVariant: 'facebook_login' | 'instagram_login' | null;
-  readonly username: string;
-  /** Env var an operator can set to supply a real token instead of the placeholder. */
-  readonly tokenEnvVar: string;
-  readonly placeholderToken: string;
-  readonly postId: string;
-  readonly platformPostId: string;
-}
 
 // Two Meta auth variants (D28) are seeded deliberately, not just one: `instagram_login` and
 // `facebook_login` exercise the two different `AccountCredentials`/Graph-client code paths the
@@ -70,133 +72,65 @@ const DEMO_ACCOUNTS: readonly DemoAccount[] = [
     id: '22222222-2222-4222-8222-222222222221',
     platform: 'instagram',
     authVariant: 'instagram_login',
-    username: 'demo.instagram',
+    accountIdEnvVar: 'SEED_INSTAGRAM_ACCOUNT_ID',
+    defaultAccountId: 'demo-instagram-account',
+    usernameEnvVar: 'SEED_INSTAGRAM_USERNAME',
+    defaultUsername: 'demo.instagram',
     tokenEnvVar: 'SEED_INSTAGRAM_TOKEN',
     placeholderToken: 'demo-placeholder-token-instagram',
     postId: '33333333-3333-4333-8333-333333333331',
-    platformPostId: '17895600000000001',
+    platformPostIdEnvVar: 'SEED_INSTAGRAM_POST_ID',
+    defaultPlatformPostId: '17895600000000001',
   },
   {
     id: '22222222-2222-4222-8222-222222222222',
     platform: 'facebook',
     authVariant: 'facebook_login',
-    username: 'demo.facebook',
+    accountIdEnvVar: 'SEED_FACEBOOK_ACCOUNT_ID',
+    defaultAccountId: 'demo-facebook-account',
+    usernameEnvVar: 'SEED_FACEBOOK_USERNAME',
+    defaultUsername: 'demo.facebook',
     tokenEnvVar: 'SEED_FACEBOOK_TOKEN',
     placeholderToken: 'demo-placeholder-token-facebook',
     postId: '33333333-3333-4333-8333-333333333332',
-    platformPostId: '122100000000000002',
+    platformPostIdEnvVar: 'SEED_FACEBOOK_POST_ID',
+    defaultPlatformPostId: '122100000000000002',
   },
   {
     id: '22222222-2222-4222-8222-222222222223',
     platform: 'bluesky',
     authVariant: null,
-    username: 'demo.bsky.social',
+    accountIdEnvVar: 'SEED_BLUESKY_ACCOUNT_ID',
+    defaultAccountId: 'demo-bluesky-account',
+    usernameEnvVar: 'SEED_BLUESKY_USERNAME',
+    defaultUsername: 'demo.bsky.social',
     tokenEnvVar: 'SEED_BLUESKY_APP_PASSWORD',
     placeholderToken: 'demo-placeholder-app-password',
     postId: '33333333-3333-4333-8333-333333333333',
-    platformPostId: 'at://did:plc:demo0000000000000000000003/app.bsky.feed.post/demo0003',
+    platformPostIdEnvVar: 'SEED_BLUESKY_POST_ID',
+    defaultPlatformPostId: 'at://did:plc:demo0000000000000000000003/app.bsky.feed.post/demo0003',
   },
 ];
 
-type Db = ReturnType<typeof drizzle>;
-
-async function seedWorkspace(db: Db): Promise<void> {
-  const [inserted] = await db
-    .insert(workspaces)
-    .values({
-      id: DEMO_WORKSPACE_ID,
-      name: 'Demo workspace',
-      contactLimitMonthly: DEMO_CONTACT_LIMIT_MONTHLY,
-      createdAt: new Date(),
-    })
-    .onConflictDoNothing({ target: workspaces.id })
-    .returning({ id: workspaces.id });
-
-  console.log(
-    inserted === undefined
-      ? `Workspace ${DEMO_WORKSPACE_ID} already exists.`
-      : `Created workspace ${DEMO_WORKSPACE_ID}.`,
-  );
-}
-
-async function seedAccount(
-  db: Db,
-  account: DemoAccount,
-  keyMaterial: Parameters<typeof encryptCredentials>[1],
-): Promise<void> {
-  const token = process.env[account.tokenEnvVar] ?? account.placeholderToken;
-  const credentialsCiphertext = encryptCredentials(Buffer.from(token, 'utf8'), keyMaterial);
-
-  const [inserted] = await db
-    .insert(socialAccounts)
-    .values({
-      id: account.id,
-      workspaceId: DEMO_WORKSPACE_ID,
-      platform: account.platform,
-      platformAccountId: `demo-${account.platform}-account`,
-      username: account.username,
-      authVariant: account.authVariant,
-      credentialsCiphertext,
-      credentialsKeyVersion: keyMaterial.keyVersion,
-      status: 'active',
-      createdAt: new Date(),
-    })
-    .onConflictDoNothing({ target: socialAccounts.id })
-    .returning({ id: socialAccounts.id });
-
-  console.log(
-    inserted === undefined
-      ? `Social account ${account.id} (${account.platform}) already exists.`
-      : `Created social account ${account.id} (${account.platform}), credentials from ` +
-          `${process.env[account.tokenEnvVar] === undefined ? 'placeholder' : account.tokenEnvVar}.`,
-  );
-}
-
-/** Mints one fresh API key (see module docstring: unlike the workspace/accounts/posts, never reused). */
-async function seedApiKey(db: Db): Promise<void> {
-  const prefix = randomBytes(PREFIX_BYTES).toString('hex');
-  const secret = randomBytes(SECRET_ENTROPY_BYTES).toString('base64url');
-  const fullKey = `blt_${prefix}_${secret}`;
-
-  await db.insert(apiKeys).values({
-    id: generateId(),
-    workspaceId: DEMO_WORKSPACE_ID,
-    prefix,
-    keyHash: hashSecret(secret),
-    name: 'seed-account demo key',
-    rateLimitPerMin: null,
-    revokedAt: null,
-    createdAt: new Date(),
-  });
-
-  console.log('Minted a new API key for the demo workspace (shown once, not recoverable):');
-  console.log('');
-  console.log(fullKey);
-}
-
 /**
- * Publishes one demo post through the `PostPublished` port, the same way the publishing service
- * would in the real platform — not a direct `posts` insert. That is what turns the post into an
- * active `comment_sync_targets` row (module docstring, §7.3); `published_at` becomes the target's
- * `age_anchor_at`. Both the `posts` row and the target are inserted `ON CONFLICT DO NOTHING`, so
- * this is safe to call again on a re-run.
+ * Resolves every account's overridable fields once, up front and env-only (pure), so both the
+ * writes and the closing summary use exactly the same values.
  */
-async function seedPost(
-  postPublished: ReturnType<typeof createLocalPostPublished>,
-  account: DemoAccount,
-): Promise<void> {
-  await postPublished.notify({
-    id: account.postId,
-    workspaceId: DEMO_WORKSPACE_ID,
-    socialAccountId: account.id,
-    platform: account.platform,
-    platformPostId: account.platformPostId,
-    // 2 hours old: lands in §7.3's "< 24h" sync band, so a freshly seeded target is due soon
-    // rather than sitting in the slowest band until someone notices nothing is being polled.
-    publishedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-  });
+function resolveAllAccounts(): ReadonlyMap<string, ReturnType<typeof resolveAccountValues>> {
+  return new Map(
+    DEMO_ACCOUNTS.map((account) => [account.id, resolveAccountValues(process.env, account)]),
+  );
+}
 
-  console.log(`Registered post ${account.postId} (${account.platform}) as a sync target.`);
+function resolvedFor(
+  resolved: ReadonlyMap<string, ReturnType<typeof resolveAccountValues>>,
+  account: DemoAccount,
+): ReturnType<typeof resolveAccountValues> {
+  const values = resolved.get(account.id);
+  if (values === undefined) {
+    throw new Error(`no resolved values for account ${account.id}`);
+  }
+  return values;
 }
 
 async function main(): Promise<void> {
@@ -207,19 +141,34 @@ async function main(): Promise<void> {
   };
   const pool = new Pool({ connectionString: config.DATABASE_URL });
   const db = drizzle(pool);
+  const resolved = resolveAllAccounts();
 
   try {
-    await seedWorkspace(db);
+    await seedWorkspace(db, DEMO_WORKSPACE_ID);
 
     // Each account writes a different row by id, so running them concurrently is safe (and
     // satisfies the project's no-await-in-loop lint, which is otherwise just noise here).
-    await Promise.all(DEMO_ACCOUNTS.map((account) => seedAccount(db, account, keyMaterial)));
+    await Promise.all(
+      DEMO_ACCOUNTS.map((account) =>
+        seedAccount(db, DEMO_WORKSPACE_ID, account, resolvedFor(resolved, account), keyMaterial),
+      ),
+    );
 
-    await seedApiKey(db);
+    await seedApiKey(db, DEMO_WORKSPACE_ID);
 
     const syncTargetRepository = createSyncTargetRepository(db, config);
     const postPublished = createLocalPostPublished(db, syncTargetRepository);
-    await Promise.all(DEMO_ACCOUNTS.map((account) => seedPost(postPublished, account)));
+    await Promise.all(
+      DEMO_ACCOUNTS.map((account) =>
+        seedPost(db, DEMO_WORKSPACE_ID, postPublished, account, resolvedFor(resolved, account)),
+      ),
+    );
+
+    console.log('');
+    console.log('Credential and id sources for this run:');
+    for (const account of DEMO_ACCOUNTS) {
+      console.log(formatAccountStatus(account.platform, resolvedFor(resolved, account)));
+    }
 
     console.log('');
     console.log(`Demo workspace ready: ${DEMO_WORKSPACE_ID}`);
