@@ -709,6 +709,12 @@ Infrastructure:
     both secrets from config" — means the verifier takes the secret per variant from configuration
     either way. The webhook path is therefore built, with the `instagram_login` secret left as a
     deployment-time setting and this gap recorded rather than guessed.
+  - **Deployment setting (2026-09-13).** The deployed environment has one Meta App, serving
+    `facebook_login`, so `META_APP_SECRET_INSTAGRAM` is set to that same app's secret — the value
+    the verifier needs for any delivery this deployment can actually receive. It is a separate
+    variable rather than a fallback to `META_APP_SECRET` because a second app, when one exists,
+    brings its own secret; collapsing them in config would make that a code change instead of a
+    variable change. The equality is a fact about this environment, not about Meta.
 
 ## 18. Open questions
 
