@@ -53,7 +53,7 @@ The workspace's comments across every connected account and every post. Authenti
 | `parentCommentId` | uuid | — | direct replies to one comment |
 | `accountId` | uuid | — | one connected account |
 | `platform` | string, **repeatable** | — | one or more platforms; several occurrences are a union |
-| `topLevelOnly` | `true` \| `false` | — | `true` selects comments with no parent |
+| `topLevelOnly` | `true` \| `false` | — | `true` selects comments with no parent; `false` is accepted and means the same as omitting it (there is no "replies only" filter — name a `parentCommentId` for that) |
 | `isOwn` | `true` \| `false` | — | authored by us, or not |
 | `since` | ISO 8601 | — | inclusive lower bound on `occurredAt` |
 | `until` | ISO 8601 | — | inclusive upper bound on `occurredAt` |
@@ -144,8 +144,8 @@ which it is:
 | `GET /docs`, `/docs/*` | plugin-served UI assets | no (not a service route) | absent |
 
 The exempt list has **one** source: the `PUBLIC_ROUTES` array the authentication hook enforces, each
-entry carrying a `published` flag. The document's `security: []` annotations are derived from the
-published entries, and the test asserts both directions — a published entry must have a cleared
+entry carrying a `published` flag. The annotation is cleared for whatever
+`isPublicRoute` matches; the `published` flag is what lets the test assert both directions — a published entry must have a cleared
 operation, an unpublished one must have no operation at all — so neither the described list nor the
 published surface can drift from what is enforced (FR-012, SC-007).
 

@@ -118,9 +118,11 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "blotato-api-key: $API_KEY" \
 # 404
 ```
 
-`pnpm smoke` runs exactly this sequence with assertions instead of eyeballs — see
+`pnpm smoke` runs steps 1-7 of this sequence with assertions instead of eyeballs — see
 [`scripts/smoke.ts`](./scripts/smoke.ts); it needs `SMOKE_BASE_URL`, `SMOKE_API_KEY`,
-`SMOKE_INSTAGRAM_POST_ID` and `SMOKE_BLUESKY_POST_ID`.
+`SMOKE_INSTAGRAM_POST_ID` and `SMOKE_BLUESKY_POST_ID`. Step 8 stays a manual check here: asserting it
+needs a second workspace's key, which the integration suite mints for itself
+(`tenancy.integration.test.ts`) and a script pointed at a deployment cannot.
 
 ### Where to check the results on the platform
 

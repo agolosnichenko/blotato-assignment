@@ -1,6 +1,7 @@
 /**
- * Zod schemas for the read routes (T048, T050) — contracts/rest-api.md's `Comment` shape, the
- * shared pagination query and the mapping from a repository row to the wire representation.
+ * Zod schemas for every comment, platform and sync route (T048, T050) — contracts/rest-api.md's
+ * `Comment` shape, the listing's query, the write bodies, the capability and sync-job shapes, and the
+ * mappings from a repository row to each wire representation.
  *
  * `toCommentResponse` is where `error` collapses to `{ code, message }` only when `status` is
  * `failed` (otherwise null, T048) and where a deleted comment's `author` reads back as `null`

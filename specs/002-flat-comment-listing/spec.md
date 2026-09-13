@@ -6,6 +6,12 @@
 
 **Status**: Draft
 
+**Citing requirements**: `FR-###` ids in this directory are numbered within *this* feature and
+collide with 001's — 002's FR-005 ("an identifier-free read calls no port") and 001's FR-005 ("a
+deleted comment is listed only while it has replies") are different requirements. Code comments cite
+whichever feature introduced the rule they implement, so read an `FR-###` against the spec the
+surrounding text names, not against this one by default.
+
 **Input**: User description: "Comments as a flat read collection + a working Swagger Authorize button. Two independent problems: (a) the interactive docs page has no way to supply the API key, so every 'Try it out' answers 401; (b) there is no cross-account inbox — the moderation view 'every new comment across every account in the workspace' is not reachable from any route, because the only inbox is per account. Time, not post hierarchy, is the primary access path for comments, so hierarchy belongs in a filter rather than in the address. Reads become one collection with optional filters; writes stay addressed to their target (commands address, queries filter). Discoverability is explicitly *not* the justification — account and post identifiers legitimately come from platform-core (D8)."
 
 ## Clarifications

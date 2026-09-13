@@ -215,7 +215,7 @@ export function syncJobPollOutcome(status: string): SyncJobPollOutcome {
 }
 
 /**
- * Checks that an identifier-free `GET /v1/comments` response carries no `sync` key (D27, V4 of
+ * Checks that an identifier-free `GET /v1/comments` response carries no `sync` key (D31, FR-006, R-08; V4 of
  * `specs/002-flat-comment-listing/quickstart.md`): the block only exists when a post is named, and
  * its presence here would mean the collection is quietly treating the inbox as if one were.
  *

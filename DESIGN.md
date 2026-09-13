@@ -244,7 +244,7 @@ renders this `z.preprocess` step's **output** type into `openapi.json` — `{ ty
 starts from, so the published shape is one Swagger UI and a client's OpenAPI generator can actually
 exercise. No `.meta({ type: 'array', style: 'form', explode: true })` fallback was needed.
 
-Full request/response shapes, query parameters and the error-code catalogue are in
+Full request/response shapes and query parameters are in
 [`specs/001-multi-platform-comments/contracts/rest-api.md`](./specs/001-multi-platform-comments/contracts/rest-api.md)
 and the generated [`openapi.json`](./openapi.json). The README has a real, run-and-verified curl
 walkthrough of this API against a local instance.
@@ -255,7 +255,7 @@ walkthrough of this API against a local instance.
   that a flat API is easier to browse — it is that "every new comment across every account in the
   workspace" had no address at all under the three nested reads. A moderator watching the whole
   workspace had to fan out to every post's route and stitch the pages together client-side; nothing
-  about that gap is about ergonomics, it's a missing capability (§10 above walks the history).
+  about that gap is about ergonomics, it's a missing capability (§10 below walks the history).
 - **Writes stay addressed to their target.** `POST /v1/posts/:postId/comments` and
   `POST /v1/comments/:commentId/replies` were not flattened alongside the reads, and won't be:
   commands address a specific thing they act on, queries filter a set they select from. Collapsing
@@ -586,7 +586,7 @@ Read this before running anything against a production Meta App; it's also what 
 your reasoning, don't pretend the solution is finished" is really asking for.
 
 **Fully implemented and tested** (unit + integration, testcontainers Postgres + Redis): the read
-model (paginated top-level comments, replies, the account inbox, single-comment polling); the write
+model (one filtered, keyset-paginated collection plus single-comment polling); the write
 path (top-level comment + reply, idempotency, the full publish state machine including
 reconciliation and the webhook-echo race); sync (backfill, reconciliation, deletion inference, manual
 refresh with cooldown); the transactional outbox write path; tenancy (404-not-403 on every endpoint);

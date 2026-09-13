@@ -18,7 +18,7 @@
  *
  * `GET /v1/platforms` is the one authenticated endpoint with no workspace-scoped resource param
  * (T098) — the same registry, unfiltered, for every workspace — so it carries no tenancy case
- * here, only the credential ones. The four `PUBLIC_ROUTES` (`/healthz`, `/readyz`, `/openapi.json`,
+ * here, only the credential ones. The six `PUBLIC_ROUTES` entries (`/healthz`, `/readyz`, `/openapi.json`,
  * `/docs*`, the Meta webhook) authenticate themselves a different way (or are public by D25) and
  * are out of scope for both sweeps.
  *

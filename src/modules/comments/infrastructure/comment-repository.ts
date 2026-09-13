@@ -369,7 +369,10 @@ const ACTIVE_SYNC_JOB_STATUSES = ['queued', 'running'] as const;
  * than needing its own branch.
  *
  * No branch here picks an index or a query shape — Postgres's planner does that from the resulting
- * predicate against `comments_workspace_idx` and the other four comment indexes.
+ * predicate against whichever of the four listing indexes it makes selective —
+ * `comments_workspace_idx`, `comments_post_top_level_idx`, `comments_replies_idx` or
+ * `comments_social_account_idx`. (`comments` carries two more, for the retention purge and the
+ * stuck-work sweeper, which no listing predicate can use.)
  *
  * Exported so `benchmark.integration.test.ts`'s `EXPLAIN` assertions can build their `WHERE` from
  * this function directly rather than keeping a second, hand-typed copy of the same conditions in
