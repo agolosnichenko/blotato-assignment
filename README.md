@@ -171,7 +171,7 @@ pnpm dev:worker                    # in a second terminal — publishing, sync, 
 — 32 bytes base64, `openssl rand -base64 32`; `META_APP_SECRET`, `META_APP_SECRET_INSTAGRAM`,
 `META_WEBHOOK_VERIFY_TOKEN`) need a value before the process starts — config validation fails fast
 and names exactly which one is missing. For a local run that never talks to a real Meta App, any
-non-empty string for the Meta secrets is enough — they're only exercised by the (not yet implemented, see DESIGN.md)
+non-empty string for the Meta secrets is enough — they're only exercised by the
 webhook path and by the Meta adapter's own HMAC helper.
 
 Gates before any commit (also what CI runs):
@@ -272,11 +272,12 @@ generation, but as a process with its own checkpoints:
     The agent implementing the auth hook re-read the port file from disk before adapting to a
     paraphrased description of it, which is what caught that an earlier message had described an
     intermediate, not-yet-final state.
-  - The Instagram read path (`listComments`/`fetchComment`) is deliberately left throwing rather
-    than stubbed to return nothing — a stub returning an empty page would make a sync walk conclude
-    the post has no comments and mark an entire real thread `deleted`. This was a design call made
-    going in, not a catch, but it's the same category of "doing the actually-safe thing instead of
-    the thing that merely compiles."
+  - Before spike S2 ran, the Instagram read path was left **throwing** rather than stubbed to
+    return nothing — a stub returning an empty page would make a sync walk conclude the post has no
+    comments and mark an entire real thread `deleted`. The same instinct survives into the built
+    version: a comment whose nested reply edge is truncated throws instead of reporting a complete
+    walk, because an incomplete walk infers no deletions (FR-019). Refusing to answer is safe;
+    answering "nothing" is not.
 - **What I did myself.** I made the calls an agent shouldn't: which platforms to support, the
   service-boundary shape (no foreign key across services, ports only), what stays out of scope, and
   every point in `spec.md §18` where an amendment changes stated behavior — each of those went

@@ -172,10 +172,15 @@ post-scoped list answers `404` while the same comments stay in the inbox.
 `GET /v1/platforms` lists all nine publishing platforms — three supporting comments, six carrying an
 `unsupportedReason` — and the depth, text limit and unit it reports for a platform are the same
 values the write path enforces, so the registry cannot drift from behaviour. Separately, the
-Instagram adapter runs against fixtures for **both** login variants: `facebook_login` on
-`graph.facebook.com` and `instagram_login` on `graph.instagram.com` produce identical normalized
-comments, identical publish results and identical "own" detection — the same parameterized test body
-for both hosts.
+Instagram adapter runs the **same parameterized test body** for both D28 login variants —
+`facebook_login` on `graph.facebook.com` and `instagram_login` on `graph.instagram.com` — asserting
+identical normalized comments, identical publish results and identical "own" detection.
+
+Both arms replay the **one** fixture spike S2 recorded, for `facebook_login`; the `instagram_login`
+variant was never attempted, since it needs a second Meta App (§17). So the test proves the property
+A17 is about — the adapter does not branch on variant (Principle IV) — and claims nothing about what
+`graph.instagram.com` returns. `spec.md` §18 records why hand-writing the second fixture is
+forbidden rather than convenient.
 **Proves**: FR-031, SC-009, D28, A17, §8.1.
 
 ### V10 — Performance budgets (SC-005, SC-006)

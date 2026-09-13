@@ -144,5 +144,5 @@ SPIKE S5 VERDICT: signature matches META_APP_SECRET_INSTAGRAM only
 way, or truncated — recapture rather than treating it as "neither secret works".
 
 **Paste back:** the full output (both `MATCH` / `no match` lines and the verdict). Whichever secret
-matches is what the webhook verifier (not yet built) must use for `instagram_login` deliveries;
+matches is what the webhook verifier must use for `instagram_login` deliveries;
 carry that into `spec.md` §17.

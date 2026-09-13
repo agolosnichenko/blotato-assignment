@@ -227,7 +227,7 @@ name Blotato's existing public API uses, so API clients reuse settings). Errors 
 | `POST /v1/posts/:postId/comments/sync` | Request an out-of-band refresh |
 | `GET /v1/comment-sync-jobs/:jobId` | Poll a refresh job |
 | `GET /v1/platforms` | The capability registry, all nine platforms |
-| `GET`/`POST /webhooks/meta` | Meta event intake — **not yet implemented**, see §9 |
+| `GET`/`POST /webhooks/meta` | Meta event intake — handshake and signed delivery (§5.2) |
 | `GET /healthz`, `GET /readyz` | Liveness / readiness |
 | `GET /docs`, `GET /openapi.json` | Swagger UI and the generated document |
 
@@ -297,7 +297,7 @@ transaction that deletes the ingested duplicate and lets the original API-create
 `reply_count` and `last_activity_at` bookkeeping that already happened on the duplicate doesn't
 double-count.
 
-### 5.2 Webhook ingestion (Meta) — **design, not yet wired to an HTTP route** (see §9)
+### 5.2 Webhook ingestion (Meta)
 
 ```mermaid
 sequenceDiagram
@@ -372,8 +372,8 @@ comment support:
 
 | Platform | Top-level | Reply | `maxReplyDepth` | Text limit | Ingestion |
 |---|---|---|---|---|---|
-| Instagram | yes | yes | 1 | 2200 characters | webhook + sync (webhook not yet wired, §9) |
-| Facebook | yes | yes | 1 | 8000 characters | webhook + sync (webhook not yet wired, §9) |
+| Instagram | yes | yes | 1 | 2200 characters | webhook + sync (no real deliveries under D23, §9) |
+| Facebook | yes | yes | 1 | 8000 characters | webhook + sync (no real deliveries under D23, §9) |
 | Bluesky | yes | yes | unbounded (`null`) | 300 graphemes | sync (polling — no push channel exists) |
 | threads, x, linkedin, youtube, tiktok, pinterest | — | — | — | — | — (`unsupportedReason` set) |
 
@@ -517,21 +517,27 @@ limiting; OpenAPI generation with a CI drift check.
 
 **Deliberately not built yet, and why** (Principle I — don't build on unverified platform behavior):
 
-- **Instagram comment *reads*** (`listComments`, `fetchComment`) throw rather than return an empty
-  result. Spike S2 — whether `GET /{media-id}/comments` actually returns data under Standard Access
-  for either login variant — requires a real Meta App the author controls and has not been run. A
-  stub that returned `[]` would be actively dangerous here: a sync walk that sees zero comments
-  where there are real ones would mark the entire thread deleted. Leaving it throwing is the
-  decision, not a placeholder for one.
-- **The Meta webhook path end to end** — `GET`/`POST /webhooks/meta`, the signature verifier, the
-  `WebhookNormalizer`, and the `webhook-process` worker — is gated behind spikes S1 (does Facebook
-  deliver Page `feed` events under Standard Access to a non-role user) and S5 (which of two App
-  Secrets signs an `instagram_login` delivery). Both need a live capture against a real Meta App;
-  `scripts/spikes/` has the scripts and exact instructions, but they must be run by whoever holds the
-  Meta App's credentials — not by an agent. Until they're run and the result recorded in `spec.md`
-  §17, ingestion for Instagram and Facebook runs through sync only. The `webhook_deliveries` table,
-  the `WebhookNormalizer` type, and the shared upsert path it would call all exist and are exercised
-  by sync today — what's missing is the HTTP front door and the normalizer itself.
+Spikes S1, S2 and S5 have since been run against a real Meta App and their results are recorded in
+`spec.md` §17, so the read path and the whole webhook path are built. What the spikes answered, and
+what they left open, decides what is claimed below.
+
+- **The `instagram_login` variant is unverified.** S2 answered the `facebook_login` half —
+  `GET /{media-id}/comments` returns data, replies arrive nested under `replies.data`, `from` carries
+  `{id, username}` and no display name — and the raw response is committed as the fixture the
+  adapter was written against. The other variant needs a second Meta App and was never attempted, so
+  the two-variant equivalence test replays that one fixture on both hosts: it proves the adapter does
+  not branch on variant, and claims nothing about what `graph.instagram.com` returns (`spec.md` §18).
+- **A comment with more than one page of replies is not syncable.** Meta caps a nested edge, and no
+  spike exercised the truncated shape, so `listComments` throws rather than read a truncated reply
+  set as a complete one — an incomplete walk infers no deletions (FR-019), which is the safe
+  direction. Loud degradation, deliberately, until that edge's paging is observed.
+- **Real webhook deliveries do not arrive.** S1 established that a dashboard test send is delivered
+  and a real user's comment is not, under this app's access level — confirming D23. The intake,
+  verifier, normalizer and worker are built and tested against the recorded delivery, whose envelope
+  is the one a real delivery carries; IG/FB data reaches the service through sync.
+- **Which secret signs `instagram_login` deliveries is still open.** S5 confirmed `META_APP_SECRET`
+  over the raw body for the `page` product. The unresolved half is a *configuration value*, not a
+  code shape: §17 requires the verifier to accept either configured secret, and it does.
 **Not deployed.** The Railway configuration (D24 — `api` and `worker` from one Dockerfile, managed
 Postgres and Redis, migrations as a pre-deploy step) is written but has not been applied. The README
 has a placeholder for the deployment URL and a verified local walkthrough in its place.

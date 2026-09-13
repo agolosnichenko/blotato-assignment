@@ -35,6 +35,9 @@ jobs:
 
       - run: pnpm typecheck
 
+      - name: status-claims
+        run: pnpm check:status-claims
+
       - name: openapi-drift
         run: |
           pnpm generate-openapi
