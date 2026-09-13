@@ -559,7 +559,7 @@ platform side and verify a complete refresh marks it deleted.
       loading truncated branches, normalizing AT URIs and `cid`, deciding "own" by matching the
       author DID, and surfacing a `notFoundPost` marker as an **explicit tombstone** that may mark
       that comment deleted on its own — while absence still requires a complete walk (§8.3, FR-019)
-- [X] T084 [US3] Implement `listComments` and `fetchComment` in
+- [ ] T084 [US3] **Facebook half done; Instagram half blocked by S2.** Implement `listComments` and `fetchComment` in
       `src/platforms/meta/instagram-adapter.ts` (`GET /{media-id}/comments` with the `replies`
       expansion) and `src/platforms/meta/facebook-adapter.ts`
       (`GET /{post-id}/comments?filter=stream`), paging to exhaustion and deciding "own" by matching
