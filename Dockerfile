@@ -1,4 +1,4 @@
-FROM node:22.22.1-slim AS base
+FROM node:26.8-slim AS base
 ENV PNPM_HOME=/pnpm CI=true
 ENV PATH=$PNPM_HOME:$PATH
 WORKDIR /app
@@ -18,7 +18,7 @@ FROM base AS production-deps
 COPY package.json pnpm-lock.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile --prod
 
-FROM node:22.22.1-slim AS runtime
+FROM node:26.8-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=production-deps /app/node_modules ./node_modules
