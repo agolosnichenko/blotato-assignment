@@ -29,6 +29,27 @@
       "when": 1789314324914,
       "tag": "0003_great_power_man",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789322001144,
+      "tag": "0004_dapper_mulholland_black",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789333029508,
+      "tag": "0005_great_rafael_vega",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789334882682,
+      "tag": "0006_silent_aaron_stack",
+      "breakpoints": true
     }
   ]
 }

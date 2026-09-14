@@ -6,16 +6,22 @@ produced from the Zod route schemas and drift-checked in CI (D18, R-03).
 Base path `/v1`. JSON, `camelCase`. Authentication: the `blotato-api-key` header (A16), resolved to a
 workspace; every read and write is scoped to it, and another workspace's resource is `404`, never
 `403` (D20, FR-026). Errors are RFC 9457 `application/problem+json` carrying a machine-readable
-`code` (FR-032). Responses carry `RateLimit-*` and, on rejection, `Retry-After` (FR-027).
+`code` (FR-032). Responses carry `RateLimit-*` and, on rejection, `Retry-After` (FR-027). Rate
+limits are per API key and per method bucket (`read` or `write`) — never per post or other resource
+identifier — resolved from the authenticated key id (`keyGenerator` in `src/app/api.ts`).
+
+**Superseded by [`002-flat-comment-listing`](../../002-flat-comment-listing/spec.md) (D31):** the
+three nested reads this document originally listed — `GET /v1/posts/:postId/comments`,
+`GET /v1/comments/:commentId/replies` and `GET /v1/accounts/:accountId/comments` — are replaced by
+one filtered collection, `GET /v1/comments`, and answer `404 NOT_FOUND`. See that feature's own
+`contracts/rest-api.md` for the current endpoint table.
 
 ## Endpoints
 
 | Method and path | Purpose | Success response |
 |-----------------|---------|------------------|
-| `GET /v1/posts/:postId/comments` | A post's top-level comments. Query: `limit` 1–100 (default 20), `cursor`, `order` (default `desc`) | `200 { items: Comment[], nextCursor, sync: { lastSyncedAt, activeJobId } }` |
-| `GET /v1/comments/:commentId/replies` | Direct replies. Query: `limit`, `cursor`, `order` (default `asc`) | `200 { items: Comment[], nextCursor }` |
+| `GET /v1/comments` | The workspace's comments, filtered by `postId`, `parentCommentId`, `accountId`, `platform`, `topLevelOnly`, `isOwn`, `since`, `until`; `limit`, `cursor`, `order` (default `desc`) | `200 { items: Comment[], nextCursor, sync?: { lastSyncedAt, activeJobId } }` — `sync` present iff `postId` is named |
 | `GET /v1/comments/:commentId` | One comment — the polling target for a pending write | `200 Comment` |
-| `GET /v1/accounts/:accountId/comments` | Account inbox across internal and external posts. Query: `limit`, `cursor`, `since`, `until`, `isOwn`, `order` (default `desc`) | `200 { items: Comment[], nextCursor }` |
 | `POST /v1/posts/:postId/comments` | Top-level comment. Body `{ text }`, optional `Idempotency-Key` | `202 Comment` with `status: "queued"` + `Location` |
 | `POST /v1/comments/:commentId/replies` | Public reply. Body `{ text }`, optional `Idempotency-Key` | `202 Comment` with `status: "queued"` + `Location` |
 | `POST /v1/posts/:postId/comments/sync` | Request an immediate refresh | `202 SyncJob` |
@@ -30,9 +36,9 @@ workspace; every read and write is scoped to it, and another workspace's resourc
 (A11, FR-009).
 
 A top-level comment on a post not published through the platform is unreachable by construction, not
-by a special rule: both `POST` and `GET /v1/posts/:postId/...` are keyed by the internal `postId`,
-which such a post does not have, so the request is `404 NOT_FOUND`. Replies to comments on those
-posts are addressed by `commentId` and remain available (A7, D13, FR-015).
+by a special rule: `POST /v1/posts/:postId/comments` and `GET /v1/comments?postId=...` are both keyed
+by the internal `postId`, which such a post does not have, so the request is `404 NOT_FOUND`. Replies
+to comments on those posts are addressed by `commentId` and remain available (A7, D13, FR-015).
 
 ## `Comment`
 
@@ -64,8 +70,8 @@ posts are addressed by `commentId` and remain available (A7, D13, FR-015).
 - `postId` is null for comments on posts not published through the platform (D13), and only then. If
   the `posts` row stops resolving, `postId` keeps the value it was stored with: the service does not
   track the other service's deletions, and a read never calls a port per comment to find out (A10a,
-  §5.1). What changes is the route — `GET /v1/posts/:postId/comments` becomes `404` while the
-  comments stay reachable through the account inbox.
+  §5.1). What changes is the filter — `GET /v1/comments?postId=...` becomes `404` while the
+  comments stay reachable through `GET /v1/comments?accountId=...`.
 
 ## `SyncJob`
 
@@ -101,7 +107,7 @@ is `400 VALIDATION_ERROR` rather than a silent re-order (A13, D27, FR-004, SC-00
 | 422 | `PARENT_NOT_POSTED` | The parent is `queued`, `processing`, `failed` or `deleted` |
 | 422 | `ACCOUNT_DISCONNECTED` | The connected account is disconnected |
 | 422 | `QUOTA_EXCEEDED` | The monthly audience-contact allowance is exhausted |
-| 429 | `RATE_LIMITED` | Per-key rate limit |
+| 429 | `RATE_LIMITED` | Per-key, per-bucket (read/write) rate limit — never per post or other resource |
 | 429 | `SYNC_COOLDOWN` | Manual refresh requested inside the cooldown |
 | 500 | `INTERNAL_ERROR` | An unhandled failure in the service; `detail` carries no internal text (root `spec.md` §18) |
 

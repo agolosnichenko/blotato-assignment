@@ -4,14 +4,15 @@
  * Reviewer walkthrough (SC-012), run against a live deployment (T108).
  *
  * Automates `specs/001-multi-platform-comments/quickstart.md`'s "Reviewer walkthrough (SC-012)"
- * section step for step: platform capabilities, a post's conversation, a reply, polling it to
- * `posted`, the reply-depth check on both a platform that enforces it (Instagram) and one with
- * room to spare (Bluesky, D12), and a sync job. `openapi.json` is the authority on request and
- * response shapes. The pure assertions live in `scripts/smoke-checks.ts`.
+ * section step for step, in the order `specs/002-flat-comment-listing/quickstart.md` V9 requires:
+ * platform capabilities, the identifier-free workspace inbox (FR-015), a post's conversation, a
+ * reply, polling it to `posted`, the reply-depth check on both a platform that enforces it
+ * (Instagram) and one with room to spare (Bluesky, D12), and a sync job. `openapi.json` is the
+ * authority on request and response shapes. The pure assertions live in `scripts/smoke-checks.ts`.
  *
- * The Bluesky post drives steps 2-4 and 6 end to end: its step-3 reply (depth 1) is reused in step
- * 5 as the "reply to a reply" target, so the `202` case never depends on data already existing on
- * the account. The Instagram post only needs an existing reply (depth >= 1) for step 5's `422`
+ * The Bluesky post drives steps 3-5 and 7 end to end: its step-4 reply (depth 1) is reused in step
+ * 6 as the "reply to a reply" target, so the `202` case never depends on data already existing on
+ * the account. The Instagram post only needs an existing reply (depth >= 1) for step 6's `422`
  * case — the depth check rejects the request before anything is posted, so no new Instagram
  * comment is created by that step.
  *
@@ -19,11 +20,15 @@
  *   SMOKE_BASE_URL=... SMOKE_API_KEY=... SMOKE_INSTAGRAM_POST_ID=... SMOKE_BLUESKY_POST_ID=... \
  *     pnpm smoke
  */
+// oxlint-disable max-lines -- one end-to-end walkthrough, whose steps run in a fixed order and
+// share the seeded state each previous step leaves behind. Splitting it across files would hide that
+// ordering, which is the script's only real structure.
 
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import {
   assertDescendingOccurredAt,
+  assertInboxHasNoSyncBlock,
   assertPlatformsCapabilities,
   commentPollOutcome,
   isReplyDepthExceededProblem,
@@ -133,11 +138,29 @@ async function stepPlatforms(env: SmokeEnv): Promise<void> {
   logPass('1 platforms', `${items.length} platforms, 3 comment-capable`);
 }
 
-/** `step` is a parameter because step 5 reads a conversation too, and the printed output is the
- * reviewer's evidence — a line labelled "2 conversation" while step 5 is running misreports which
- * check passed. */
+/** FR-015: the first comment read names no identifier — `GET /v1/comments` with no filters. */
+async function stepInbox(env: SmokeEnv): Promise<void> {
+  const step = '2 inbox';
+  const response = await callApi(env, 'GET', '/v1/comments');
+  if (response.status !== 200) {
+    throw new SmokeFailure(step, '200', String(response.status), response.body);
+  }
+  const body = response.body as { items?: CommentRecord[] };
+  const items = body.items;
+  // An empty page satisfies `assertDescendingOccurredAt` vacuously, printing PASS over exactly the
+  // regressions this step catches. Step 3 needs a comment here anyway, so requiring one is free.
+  if (items === undefined || items.length === 0) {
+    throw new SmokeFailure(step, 'at least one comment', 'an empty page', response.body);
+  }
+  assertDescendingOccurredAt(items);
+  assertInboxHasNoSyncBlock(response.body);
+  logPass(step, `${items.length} comments across the workspace, newest-first, no sync block`);
+}
+
+/** `step` is a parameter because step 6 reads a conversation too, and a line labelled "3
+ * conversation" while step 6 is running would misreport which check passed. */
 async function stepConversation(env: SmokeEnv, step: string, postId: string): Promise<string> {
-  const response = await callApi(env, 'GET', `/v1/posts/${postId}/comments`);
+  const response = await callApi(env, 'GET', `/v1/comments?postId=${postId}&topLevelOnly=true`);
   if (response.status !== 200) {
     throw new SmokeFailure(step, '200', String(response.status), response.body);
   }
@@ -190,9 +213,13 @@ async function pollComment(env: SmokeEnv, step: string, commentId: string): Prom
 }
 
 async function stepInstagramDepthExceeded(env: SmokeEnv): Promise<void> {
-  const step = '5 instagram depth';
+  const step = '6 instagram depth';
   const topLevelId = await stepConversation(env, step, env.SMOKE_INSTAGRAM_POST_ID);
-  const repliesResponse = await callApi(env, 'GET', `/v1/comments/${topLevelId}/replies`);
+  const repliesResponse = await callApi(
+    env,
+    'GET',
+    `/v1/comments?parentCommentId=${topLevelId}&order=asc`,
+  );
   // Status first: `parseBody` deliberately hands back a raw string for a non-JSON response (a
   // proxy's HTML 502), and reaching into `.items[0]` on that threw a TypeError *before* this
   // check ran — losing the status and body that are the whole point of a smoke failure.
@@ -215,11 +242,11 @@ async function stepInstagramDepthExceeded(env: SmokeEnv): Promise<void> {
 }
 
 async function stepBlueskyDepthAllowed(env: SmokeEnv, replyCommentId: string): Promise<void> {
-  await stepCreateReply(env, '5 bluesky depth', replyCommentId);
+  await stepCreateReply(env, '6 bluesky depth', replyCommentId);
 }
 
 async function stepSync(env: SmokeEnv, postId: string): Promise<void> {
-  const step = '6 sync';
+  const step = '7 sync';
   const created = await callApi(env, 'POST', `/v1/posts/${postId}/comments/sync`);
   if (created.status !== 202) {
     throw new SmokeFailure(step, '202', String(created.status), created.body);
@@ -259,10 +286,11 @@ async function main(): Promise<void> {
   const env = parseSmokeEnv();
 
   await stepPlatforms(env);
+  await stepInbox(env);
 
-  const topLevelId = await stepConversation(env, '2 conversation', env.SMOKE_BLUESKY_POST_ID);
-  const replyId = await stepCreateReply(env, '3 create reply', topLevelId);
-  await pollComment(env, '4 poll posted', replyId);
+  const topLevelId = await stepConversation(env, '3 conversation', env.SMOKE_BLUESKY_POST_ID);
+  const replyId = await stepCreateReply(env, '4 create reply', topLevelId);
+  await pollComment(env, '5 poll posted', replyId);
 
   await stepInstagramDepthExceeded(env);
   await stepBlueskyDepthAllowed(env, replyId);

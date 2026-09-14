@@ -7,11 +7,14 @@
 // violate the brief's one-file-per-task boundary (w6a-brief.md) without shrinking the real work.
 
 /**
- * Contract tests for `GET /v1/posts/:postId/comments` (T040, V1).
+ * Contract tests for the top-level-comments-of-a-post read, driven through the flat collection
+ * (T019/T040, US2, quickstart.md V3, per D31): `GET /v1/comments?postId=:id&topLevelOnly=true`
+ * replaces `GET /v1/posts/:postId/comments`.
  *
- * Nothing under `src/modules/comments/{application,infrastructure,http}` exists yet, so this is
- * the first statement of the route's contract (rest-api.md): every request here 404s through
- * Fastify's own not-found handler today, not through the assertions below.
+ * Every scenario below reads the post's top level through `?postId=…&topLevelOnly=true` and asserts
+ * the page is genuinely narrowed to it. The nested address is asserted to be gone (`404`): a
+ * replacement that left the old route answering alongside the new one would satisfy every other
+ * assertion in this file.
  *
  * The load-bearing scenario is SC-002: keyset pagination must not repeat or skip a pre-existing
  * comment when rows are inserted between two page requests, in either `order` direction — the
@@ -183,6 +186,44 @@ async function seedTopLevelComments(
   return rows.map((row) => row.id as string);
 }
 
+/**
+ * Builds (without inserting) a reply row under `parentId` — `topLevelOnly=true`'s negative case.
+ */
+function buildReplyComment(
+  harness: Harness,
+  seeded: SeededPost,
+  parentId: string,
+  base: number,
+  offsetMs: number,
+): CommentInsert {
+  const id = generateId();
+  const occurredAt = new Date(base + offsetMs);
+  return {
+    id,
+    workspaceId: harness.workspaceId,
+    socialAccountId: seeded.socialAccountId,
+    postId: seeded.postId,
+    platform: 'instagram',
+    platformPostId: `ig-post-${seeded.postId}`,
+    parentCommentId: parentId,
+    rootCommentId: parentId,
+    depth: 1,
+    platformCommentId: `ig-comment-${id}`,
+    isOwn: false,
+    source: 'sync',
+    authorPlatformId: `author-${id}`,
+    authorUsername: `author-${id}`,
+    authorDisplayName: null,
+    text: `reply ${id}`,
+    status: 'posted',
+    replyCount: 0,
+    lastActivityAt: occurredAt,
+    occurredAt,
+    createdAt: occurredAt,
+    updatedAt: occurredAt,
+  };
+}
+
 async function seedSyncTarget(
   harness: Harness,
   seeded: SeededPost,
@@ -217,15 +258,20 @@ interface CommentsPage {
   sync?: { lastSyncedAt: string | null; activeJobId: string | null };
 }
 
+/**
+ * Drives `GET /v1/comments?postId=:id&topLevelOnly=true` (V3) — the collection selection that
+ * replaces `GET /v1/posts/:postId/comments`. `postId`/`topLevelOnly` merge with whatever `query`
+ * the caller supplies, so a test can still control `limit`/`cursor`/`order` freely.
+ */
 async function fetchPage(
   harness: Harness,
   postId: string,
   query: Record<string, string>,
 ): Promise<{ statusCode: number; body: unknown; headers: Record<string, string> }> {
-  const search = new URLSearchParams(query).toString();
+  const search = new URLSearchParams({ postId, topLevelOnly: 'true', ...query }).toString();
   const response = await harness.app.inject({
     method: 'GET',
-    url: `/v1/posts/${postId}/comments${search === '' ? '' : `?${search}`}`,
+    url: `/v1/comments?${search}`,
     headers: { 'blotato-api-key': harness.apiKey },
   });
   return {
@@ -365,7 +411,53 @@ function registerPagingScenario(getHarness: () => Harness): void {
   );
 }
 
-describe('GET /v1/posts/:postId/comments', () => {
+/**
+ * T019/V3's negative-data half: `postId` must exclude a comment seeded on a *different* post, and
+ * `topLevelOnly=true` must exclude a reply seeded under the matching post — a selection that
+ * silently ignores either filter would return both extra rows and pass a positive-only fixture.
+ */
+function registerFilterExclusionTest(getHarness: () => Harness): void {
+  it('excludes another post and excludes a reply on the same post', async () => {
+    const harness = getHarness();
+    const seeded = await seedPost(harness);
+    const [topLevelId] = await seedTopLevelComments(harness, seeded, 1);
+    const replyRow = buildReplyComment(harness, seeded, topLevelId as string, SEED_BASE_MS, 500);
+    await harness.database.drizzle.insert(comments).values(replyRow);
+
+    const otherSeeded = await seedPost(harness);
+    const [otherPostTopLevelId] = await seedTopLevelComments(harness, otherSeeded, 1);
+
+    const { statusCode, body } = await fetchPage(harness, seeded.postId, { limit: '20' });
+
+    expect(statusCode).toBe(200);
+    const ids = (body as CommentsPage).items.map((item) => item.id);
+    expect(ids).toContain(topLevelId);
+    expect(ids).not.toContain(replyRow.id);
+    expect(ids).not.toContain(otherPostTopLevelId);
+  });
+}
+
+/**
+ * T019/V3: the nested route this selection replaces no longer answers — `404 NOT_FOUND` (FR-009).
+ */
+function registerOldAddressGoneTest(getHarness: () => Harness): void {
+  it('answers 404 NOT_FOUND at the old GET /v1/posts/:postId/comments address', async () => {
+    const harness = getHarness();
+    const seeded = await seedPost(harness);
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/v1/posts/${seeded.postId}/comments`,
+      headers: { 'blotato-api-key': harness.apiKey },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.headers['content-type']).toContain('application/problem+json');
+    expect((response.json() as { code: string }).code).toBe('NOT_FOUND');
+  });
+}
+
+describe('GET /v1/comments?postId&topLevelOnly=true (was GET /v1/posts/:postId/comments)', () => {
   let harness: Harness;
 
   beforeAll(async () => {
@@ -377,4 +469,6 @@ describe('GET /v1/posts/:postId/comments', () => {
   });
 
   registerPagingScenario(() => harness);
+  registerFilterExclusionTest(() => harness);
+  registerOldAddressGoneTest(() => harness);
 });

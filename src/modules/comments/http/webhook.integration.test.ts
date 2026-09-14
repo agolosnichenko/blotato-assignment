@@ -257,7 +257,7 @@ interface InboxItem {
 
 /**
  * Waits for the worker's upsert to land, polling Postgres directly rather than
- * `GET /v1/accounts/:accountId/comments` itself — `RATE_LIMIT_READS_PER_MIN` defaults to 30
+ * `GET /v1/comments?accountId=…` itself — `RATE_LIMIT_READS_PER_MIN` defaults to 30
  * (`src/app/config.ts`), and a poll tight enough to catch ingestion landing within milliseconds
  * would exhaust that budget long before any deadline worth testing. Once the row exists, exactly
  * one `GET` against the read API (the caller's job, not this function's) is what proves "readable
@@ -417,7 +417,7 @@ describe('the webhook path end to end (assertion 5, the point of this file)', ()
 
     const inboxResponse = await harness.app.inject({
       method: 'GET',
-      url: `/v1/accounts/${account.socialAccountId}/comments`,
+      url: `/v1/comments?accountId=${account.socialAccountId}`,
       headers: { 'blotato-api-key': harness.apiKey },
     });
     const elapsedMs = Date.now() - deliveredAt;

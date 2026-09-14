@@ -2,10 +2,6 @@
  * Contract tests for the `ContactQuota` port (T053, V3; spec.md D16, A8; plan.md §Project
  * Structure "ContactQuota is implemented in comments/infrastructure").
  *
- * `src/modules/comments/infrastructure/contact-quota.ts` (T057) does not exist yet — this file is
- * the first statement of its contract, per w6-common.md. It fails today with "Cannot find module"
- * until T057 lands; once it does, these assertions are the target.
- *
  * The shape asserted here (`reserve` / `release`, `{ ok: true } | { ok: false, reason:
  * 'QUOTA_EXCEEDED' }`) is a contract decision this file makes, not one the design documents state
  * outright — plan.md names the responsibility (`pg_advisory_xact_lock` on `(workspace_id,

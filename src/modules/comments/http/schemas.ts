@@ -1,6 +1,7 @@
 /**
- * Zod schemas for the read routes (T048, T050) — contracts/rest-api.md's `Comment` shape, the
- * shared pagination query and the mapping from a repository row to the wire representation.
+ * Zod schemas for every comment, platform and sync route (T048, T050) — contracts/rest-api.md's
+ * `Comment` shape, the listing's query, the write bodies, the capability and sync-job shapes, and the
+ * mappings from a repository row to each wire representation.
  *
  * `toCommentResponse` is where `error` collapses to `{ code, message }` only when `status` is
  * `failed` (otherwise null, T048) and where a deleted comment's `author` reads back as `null`
@@ -11,24 +12,29 @@
  * (`comment-repository.ts`'s `visibleInList`), not this file's.
  */
 
+// oxlint-disable max-lines -- the module's wire contract: every request and response schema for the
+// seven comment/platform routes, plus the three pure row-to-wire mappers. Splitting it along the
+// obvious seam (queries vs. responses) would put an operation's request and its response in
+// different files, which is the one pairing a reader of this file always needs together.
+
 import { z } from 'zod';
 import type { CommentRecord } from '#src/modules/comments/infrastructure/comment-repository.ts';
 import type { SyncJobRecord } from '#src/modules/comments/application/request-sync.ts';
-import type { PlatformCapabilities } from '#src/platforms/registry.ts';
+import { platformRegistry, type PlatformCapabilities } from '#src/platforms/registry.ts';
+import type { Platform } from '#src/platforms/types.ts';
 import type { SortOrder } from '#src/shared/pagination.ts';
 import { COMMENT_STATUSES } from '#src/modules/comments/domain/status.ts';
 
 export const postIdParamsSchema = z.object({ postId: z.uuid() });
 export const commentIdParamsSchema = z.object({ commentId: z.uuid() });
 export const syncJobIdParamsSchema = z.object({ jobId: z.uuid() });
-export const accountIdParamsSchema = z.object({ accountId: z.uuid() });
 
 const DEFAULT_LIMIT = 20;
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 100;
 
-/** The shared `limit`/`cursor`/`order` query schema (T048) — `order`'s default varies by route. */
-export function paginationQuerySchema(defaultOrder: SortOrder) {
+/** The `limit`/`cursor`/`order` query schema `listCommentsQuerySchema` extends (T048). */
+function paginationQuerySchema(defaultOrder: SortOrder) {
   return z.object({
     limit: z.coerce.number().int().min(MIN_LIMIT).max(MAX_LIMIT).default(DEFAULT_LIMIT),
     cursor: z.string().min(1).optional(),
@@ -36,20 +42,55 @@ export function paginationQuerySchema(defaultOrder: SortOrder) {
   });
 }
 
+/** The registry's own platform keys (`Object.keys`, not a hand-written literal union) — adding a
+ * platform must not require editing this schema (Principle IV, research.md R-02). */
+const PLATFORM_KEYS = Object.keys(platformRegistry) as [Platform, ...Platform[]];
+
 /**
- * The account inbox's query schema (T094, FR-008, rest-api.md): the shared pagination params plus
- * `since`/`until` (inclusive ISO 8601 bounds on `occurredAt`) and `isOwn`. `isOwn` is the one
- * boolean query param in this API — `'true'`/`'false'` strings, not `z.coerce.boolean()`, since
- * coercion treats every non-empty string (including the literal `'false'`) as `true`.
+ * Normalizes the repeatable `platform` query parameter to an array before validation (T023,
+ * research.md R-02): Fastify's default query parser (`node:querystring.parse`) yields a `string`
+ * for one occurrence and a `string[]` for several, so a single value and a repeated value must
+ * take the same path through the schema rather than diverging into two different result types.
  */
-export const accountCommentsQuerySchema = paginationQuerySchema('desc').extend({
-  since: z.iso.datetime().optional(),
-  until: z.iso.datetime().optional(),
-  isOwn: z
+function toPlatformArray(value: unknown): unknown {
+  return value === undefined || Array.isArray(value) ? value : [value];
+}
+
+/** The `'true'`/`'false'` string-enum boolean query param this API uses everywhere — never
+ * `z.coerce.boolean()`, which treats every non-empty string (including `'false'`) as `true`. */
+function booleanQueryParam() {
+  return z
     .enum(['true', 'false'])
     .transform((value) => value === 'true')
-    .optional(),
-});
+    .optional();
+}
+
+/**
+ * The flat `GET /v1/comments` listing's query schema (T013, T022, T023, D31, research.md R-02,
+ * R-03). Built on the shared pagination schema with `order` defaulting to `desc` for every
+ * selection — unlike the removed replies route, this collection has one address and so one
+ * default, not one that varies by which filter is present. Every filter key is optional; absence
+ * means "no filter", never an implicit default.
+ *
+ * `strict()` because a Zod object otherwise *strips* an unrecognized key, and here that is a filter
+ * silently not applied: `?post_id=…` would answer `200` with the whole workspace's history, which no
+ * client can tell from a correct narrowed page. An unsatisfiable combination of *recognized* filters
+ * stays a deliberate empty page (contracts/rest-api.md).
+ */
+export const listCommentsQuerySchema = paginationQuerySchema('desc')
+  .extend({
+    postId: z.uuid().optional(),
+    parentCommentId: z.uuid().optional(),
+    accountId: z.uuid().optional(),
+    platform: z.preprocess(toPlatformArray, z.array(z.enum(PLATFORM_KEYS))).optional(),
+    // `offset: true` accepts a numeric timezone offset (`+02:00`), not only `Z` — plain ISO 8601,
+    // as contracts/rest-api.md promises for `since`/`until` (M-4); the default rejected an offset.
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional(),
+    topLevelOnly: booleanQueryParam(),
+    isOwn: booleanQueryParam(),
+  })
+  .strict();
 
 const commentAuthorSchema = z
   .object({
@@ -90,16 +131,21 @@ export const commentSchema = z.object({
 
 export type CommentResponse = z.infer<typeof commentSchema>;
 
+/**
+ * `sync` (T014) is optional so the serialized body can **omit the key entirely** for a page with
+ * no single post to report freshness for — an unfiltered or multi-post `GET /v1/comments` listing
+ * omits it, since no one `lastSyncedAt`/`activeJobId` describes more than one post, but a
+ * `postId`-filtered selection gets it populated (`list-comments.ts` resolves the sync port then).
+ */
 export const commentsPageSchema = z.object({
   items: z.array(commentSchema),
   nextCursor: z.string().nullable(),
-});
-
-export const postCommentsPageSchema = commentsPageSchema.extend({
-  sync: z.object({
-    lastSyncedAt: z.iso.datetime().nullable(),
-    activeJobId: z.uuid().nullable(),
-  }),
+  sync: z
+    .object({
+      lastSyncedAt: z.iso.datetime().nullable(),
+      activeJobId: z.uuid().nullable(),
+    })
+    .optional(),
 });
 
 /** Request body shared by both write routes (contracts/rest-api.md `POST .../comments`, `.../replies`). */

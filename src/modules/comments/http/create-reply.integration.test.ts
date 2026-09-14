@@ -1,12 +1,7 @@
 /**
  * Contract tests for `POST /v1/comments/:commentId/replies` (T052, V3).
  *
- * `src/modules/comments/http/routes.ts` does not register this route yet (it is added by T069,
- * against the `CreateReply` use case T058 has not been written yet either) — this file is the
- * first statement of the route's write-validation contract (rest-api.md §Error codes, spec.md
- * §7.1 step 1). Every request here 404s through Fastify's own not-found handler today; once
- * T058/T069 land, the assertions below are the target, the same relationship
- * `post-comments.integration.test.ts` already has to `GET /v1/posts/:postId/comments`.
+ * The route's write-validation contract (rest-api.md §Error codes, spec.md §7.1 step 1).
  *
  * Two things every case is really pinning:
  *   - The pairing of the depth check across Instagram (`maxReplyDepth: 1`) and Bluesky
@@ -15,10 +10,10 @@
  *   - "With nothing sent" (over-length text, an unsupported platform) is checked by asserting no
  *     `comment-publish` job was enqueued (`QUEUE_NAMES.commentPublish`, `src/shared/queues.ts`),
  *     not merely that the response was 422. This proves the narrower, earlier claim "no job was
- *     enqueued" rather than "no adapter call was made" — no adapter-injection path exists in the
- *     DI graph yet (that is T063), and for a pre-flight rejection the queue is the right place to
- *     look anyway: the HTTP layer never calls an adapter directly, only the worker consuming this
- *     queue does, so a rejection that left the queue empty could not have reached one. Do not
+ *     enqueued" rather than "no adapter call was made" — the queue is the right place to look for a
+ *     pre-flight rejection: the HTTP layer never calls an adapter directly, only the worker
+ *     consuming this queue does, so a rejection that left the queue empty could not have reached
+ *     an adapter, and asserting on the queue does not depend on how adapters are injected. Do not
  *     "upgrade" this to an adapter mock without keeping this assertion — replacing it would weaken
  *     the claim to "the adapter wasn't called, though a job may be sitting in the queue".
  */

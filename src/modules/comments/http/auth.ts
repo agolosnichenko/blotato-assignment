@@ -82,9 +82,29 @@ function verifySecret(secret: string, keyHash: string): boolean {
  */
 const DUMMY_KEY_HASH = hashSecret('blt-dummy-key-hash-used-when-no-record-is-found');
 
+/**
+ * `published` answers a question the OpenAPI document (R-09, D31) cannot answer for itself: does
+ * this exemption correspond to an operation the document actually contains? `matches` is applied
+ * both to real request paths, by this module's own hook, and — in `api.ts`'s `transform` wrapper
+ * — to OpenAPI path *templates*. Every current entry is a literal path, so the two coincide; a
+ * future exempt route carrying a path parameter must write its entry to match `/v1/x/:id`, not a
+ * concrete id, or the template comparison silently stops matching.
+ *
+ * Nothing at runtime reads `published`: `api.ts`'s `transform` clears `security` from whatever
+ * {@link isPublicRoute} matches, and that function looks only at `method`/`matches`. Its one reader
+ * is `openapi-security.integration.test.ts`, which uses it to assert both directions — every
+ * published exemption appears in the document with `security: []`, and every unpublished one appears
+ * nowhere in it. So the field does not *cause* the document and this array to agree; it is what lets
+ * a test prove they do, and a hidden-but-exempt route previously passed every check in that file
+ * (FR-012).
+ *
+ * Being required rather than defaulted is the point: a new entry cannot be added without stating
+ * whether the document contains the operation, which is the fact the assertion needs.
+ */
 interface PublicRoute {
   readonly method: string;
   readonly matches: (path: string) => boolean;
+  readonly published: boolean;
 }
 
 /**
@@ -93,19 +113,49 @@ interface PublicRoute {
  * checks, not a regex — widening it is meant to be a reviewable, one-line diff, and the `/docs`
  * check is anchored to the whole `/docs` path segment so it can never accidentally widen to match
  * a route under `/v1` that happens to start with the same characters.
+ *
+ * `GET /healthz` and `GET /readyz` are the only two entries the OpenAPI document contains as
+ * operations, so they are the only two marked `published`; the other four are registered with
+ * `schema: { hide: true }` or served entirely outside `fastify-type-provider-zod` (the `/docs`
+ * assets), so no `transform` call ever sees them (see `api.ts`'s `registerDocs`).
  */
-const PUBLIC_ROUTES: readonly PublicRoute[] = [
-  { method: 'GET', matches: (path) => path === '/healthz' },
-  { method: 'GET', matches: (path) => path === '/readyz' },
-  { method: 'GET', matches: (path) => path === '/openapi.json' },
+export const PUBLIC_ROUTES: readonly PublicRoute[] = [
+  { method: 'GET', matches: (path) => path === '/healthz', published: true },
+  { method: 'GET', matches: (path) => path === '/readyz', published: true },
+  { method: 'GET', matches: (path) => path === '/openapi.json', published: false },
   // Swagger UI serves several asset paths beneath /docs (the page itself, /docs/json, /docs/static/*).
-  { method: 'GET', matches: (path) => path === '/docs' || path.startsWith('/docs/') },
-  { method: 'GET', matches: (path) => path === '/webhooks/meta' },
-  { method: 'POST', matches: (path) => path === '/webhooks/meta' },
+  {
+    method: 'GET',
+    matches: (path) => path === '/docs' || path.startsWith('/docs/'),
+    published: false,
+  },
+  { method: 'GET', matches: (path) => path === '/webhooks/meta', published: false },
+  { method: 'POST', matches: (path) => path === '/webhooks/meta', published: false },
 ];
 
-function isPublicRoute(method: string, path: string): boolean {
+export function isPublicRoute(method: string, path: string): boolean {
   return PUBLIC_ROUTES.some((route) => route.method === method && route.matches(path));
+}
+
+/**
+ * Whether *every* method a route answers is exempt — what the OpenAPI `transform` must ask.
+ *
+ * `@fastify/swagger` calls `transform` once per route, not once per operation, so clearing
+ * `security` there clears it for every method that route declares. Asking about one method (the
+ * first, say) would publish a route whose `GET` is exempt and whose `POST` is not as
+ * unauthenticated on both, contradicting the `onRequest` hook, which decides per method. An empty
+ * method list is not exempt: there is no method to have checked.
+ *
+ * Args:
+ *   method: The route's `method`, one string or the array Fastify allows.
+ *   path: The request path, or the OpenAPI path template for a published operation.
+ *
+ * Returns:
+ *   Whether the auth hook exempts every method named.
+ */
+export function isFullyPublicRoute(method: string | readonly string[], path: string): boolean {
+  const methods = typeof method === 'string' ? [method] : method;
+  return methods.length > 0 && methods.every((one) => isPublicRoute(one, path));
 }
 
 /** `request.url` includes the query string; only the path is checked against {@link PUBLIC_ROUTES}. */

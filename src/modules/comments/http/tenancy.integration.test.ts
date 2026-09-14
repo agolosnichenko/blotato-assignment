@@ -18,9 +18,17 @@
  *
  * `GET /v1/platforms` is the one authenticated endpoint with no workspace-scoped resource param
  * (T098) — the same registry, unfiltered, for every workspace — so it carries no tenancy case
- * here, only the credential ones. The four `PUBLIC_ROUTES` (`/healthz`, `/readyz`, `/openapi.json`,
+ * here, only the credential ones. The six `PUBLIC_ROUTES` entries (`/healthz`, `/readyz`, `/openapi.json`,
  * `/docs*`, the Meta webhook) authenticate themselves a different way (or are public by D25) and
  * are out of scope for both sweeps.
+ *
+ * T021 (US2, quickstart.md V5, per D31): the three nested reads `GET /v1/posts/:postId/comments`,
+ * `GET /v1/comments/:commentId/replies` and `GET /v1/accounts/:accountId/comments` are dropped
+ * from `TENANCY_ENDPOINTS` here — the collection replaces them — and one case per
+ * identifier-shaped filter (`postId`, `accountId`, `parentCommentId`) is added below instead,
+ * each asserting `404 NOT_FOUND` for a foreign workspace's resource. A filter resolved without a
+ * tenancy check would answer `200` with an empty page here, which is why these cases assert the
+ * status and body shape rather than merely that no foreign row came back.
  *
  * The credential section pins that "no header", "unrecognized prefix" and "revoked key" are truly
  * the same failure as far as a caller can tell (`auth.ts`'s single `unauthorized()` call site).
@@ -293,31 +301,10 @@ interface TenancyEndpoint {
 
 const TENANCY_ENDPOINTS: readonly TenancyEndpoint[] = [
   {
-    label: 'GET /v1/posts/:postId/comments',
-    method: 'GET',
-    path: (id) => `/v1/posts/${id}/comments`,
-    resourceId: (seeded) => seeded.postId,
-    successStatus: 200,
-  },
-  {
-    label: 'GET /v1/comments/:commentId/replies',
-    method: 'GET',
-    path: (id) => `/v1/comments/${id}/replies`,
-    resourceId: (seeded) => seeded.topLevelCommentId,
-    successStatus: 200,
-  },
-  {
     label: 'GET /v1/comments/:commentId',
     method: 'GET',
     path: (id) => `/v1/comments/${id}`,
     resourceId: (seeded) => seeded.topLevelCommentId,
-    successStatus: 200,
-  },
-  {
-    label: 'GET /v1/accounts/:accountId/comments',
-    method: 'GET',
-    path: (id) => `/v1/accounts/${id}/comments`,
-    resourceId: (seeded) => seeded.socialAccountId,
     successStatus: 200,
   },
   {
@@ -401,7 +388,95 @@ function registerTenancySweep(getHarness: () => Harness, getWorkspaces: () => Wo
   });
 }
 
+/** One case per identifier-shaped `GET /v1/comments` filter (T021, V5, R-07). */
+interface CollectionFilterTenancyCase {
+  readonly label: string;
+  readonly key: string;
+  readonly foreignId: (foreign: SeededWorkspace) => string;
+}
+
+const COLLECTION_FILTER_TENANCY_CASES: readonly CollectionFilterTenancyCase[] = [
+  { label: 'postId', key: 'postId', foreignId: (foreign) => foreign.postId },
+  { label: 'accountId', key: 'accountId', foreignId: (foreign) => foreign.socialAccountId },
+  {
+    label: 'parentCommentId',
+    key: 'parentCommentId',
+    foreignId: (foreign) => foreign.topLevelCommentId,
+  },
+];
+
+/**
+ * T021/V5: calling `GET /v1/comments` with another workspace's `postId`/`accountId`/
+ * `parentCommentId` is `404 NOT_FOUND` — never `403`, and never an empty `200`, since an empty
+ * success would confirm the identifier is well-formed and merely empty (R-07). The body itself
+ * must be indistinguishable from a request for an id that was never seeded at all
+ * (`assertNotFoundIndistinguishable`, the same shape-parity check `registerTenancySweep` already
+ * applies to the path-parameter routes) — a status-code-only check would let a body that leaks
+ * which foreign id it belongs to (a different `detail`, an extra field) pass while still
+ * defeating the reason D20 chose `404` over `403`.
+ *
+ * Each case also asserts the positive half, which `registerTenancySweep` gets from its own
+ * `successStatus` expectation: without it, a route answering `404` to *every* value of this filter —
+ * one that resolved the identifier against no workspace at all, or failed the lookup outright —
+ * would satisfy the negative case and read as airtight tenancy.
+ */
+function registerCollectionFilterTenancyTests(
+  getHarness: () => Harness,
+  getWorkspaces: () => WorkspacePair,
+): void {
+  describe.each(COLLECTION_FILTER_TENANCY_CASES)(
+    'GET /v1/comments?$label (foreign workspace)',
+    (testCase) => {
+      it('is 404, never 403 — indistinguishable from a missing resource', async () => {
+        const harness = getHarness();
+        const [own, other] = getWorkspaces();
+
+        const ownKey = await mintApiKey(harness.database, own.workspaceId);
+        const crossWorkspace = await request(
+          harness,
+          'GET',
+          `/v1/comments?${testCase.key}=${testCase.foreignId(other)}`,
+          ownKey,
+        );
+
+        const missingKey = await mintApiKey(harness.database, own.workspaceId);
+        const missing = await request(
+          harness,
+          'GET',
+          `/v1/comments?${testCase.key}=${generateId()}`,
+          missingKey,
+        );
+
+        assertNotFoundIndistinguishable(crossWorkspace, missing);
+      });
+
+      it("answers 200 for the same filter naming the caller's own resource", async () => {
+        const harness = getHarness();
+        const [own] = getWorkspaces();
+
+        const ownKey = await mintApiKey(harness.database, own.workspaceId);
+        const response = await request(
+          harness,
+          'GET',
+          `/v1/comments?${testCase.key}=${testCase.foreignId(own)}`,
+          ownKey,
+        );
+
+        expect(response.statusCode).toBe(200);
+      });
+    },
+  );
+}
+
 const PLATFORMS_PATH = '/v1/platforms';
+
+/**
+ * The paths the credential cases run against. `/v1/platforms` is the endpoint with no
+ * workspace-scoped parameter, so a rejection there can only be the key; `/v1/comments` is the one
+ * read collection every client goes through (D31), and the auth hook keys on the path, so "the
+ * collection is guarded" is a claim about a different path than "the registry is guarded".
+ */
+const GUARDED_PATHS = [PLATFORMS_PATH, '/v1/comments'] as const;
 
 /** A well-formed but unseeded key — the "unrecognized prefix" half of the credential sweep. */
 function buildBogusKey(): string {
@@ -413,31 +488,33 @@ function registerCredentialTests(
   getOwnWorkspaceId: () => WorkspaceId,
 ): void {
   describe('credential rejection (D20, FR-026)', () => {
-    it('rejects a request with no API key header as 401 UNAUTHORIZED', async () => {
-      const harness = getHarness();
-      const response = await request(harness, 'GET', PLATFORMS_PATH);
-      expect(response.statusCode).toBe(401);
-      expect(response.headers['content-type']).toContain('application/problem+json');
-      expect(response.body['code']).toBe('UNAUTHORIZED');
-    });
-
-    it('rejects an unrecognized key prefix as 401 UNAUTHORIZED', async () => {
-      const harness = getHarness();
-      const bogusKey = buildBogusKey();
-      const response = await request(harness, 'GET', PLATFORMS_PATH, bogusKey);
-      expect(response.statusCode).toBe(401);
-      expect(response.body['code']).toBe('UNAUTHORIZED');
-    });
-
-    it('rejects a revoked key as 401 UNAUTHORIZED', async () => {
-      const harness = getHarness();
-      const revokedKey = await mintApiKey(harness.database, getOwnWorkspaceId(), {
-        revokedAt: new Date(),
+    for (const guardedPath of GUARDED_PATHS) {
+      it(`rejects a request to ${guardedPath} with no API key header as 401 UNAUTHORIZED`, async () => {
+        const harness = getHarness();
+        const response = await request(harness, 'GET', guardedPath);
+        expect(response.statusCode).toBe(401);
+        expect(response.headers['content-type']).toContain('application/problem+json');
+        expect(response.body['code']).toBe('UNAUTHORIZED');
       });
-      const response = await request(harness, 'GET', PLATFORMS_PATH, revokedKey);
-      expect(response.statusCode).toBe(401);
-      expect(response.body['code']).toBe('UNAUTHORIZED');
-    });
+
+      it(`rejects an unrecognized key prefix on ${guardedPath} as 401 UNAUTHORIZED`, async () => {
+        const harness = getHarness();
+        const bogusKey = buildBogusKey();
+        const response = await request(harness, 'GET', guardedPath, bogusKey);
+        expect(response.statusCode).toBe(401);
+        expect(response.body['code']).toBe('UNAUTHORIZED');
+      });
+
+      it(`rejects a revoked key on ${guardedPath} as 401 UNAUTHORIZED`, async () => {
+        const harness = getHarness();
+        const revokedKey = await mintApiKey(harness.database, getOwnWorkspaceId(), {
+          revokedAt: new Date(),
+        });
+        const response = await request(harness, 'GET', guardedPath, revokedKey);
+        expect(response.statusCode).toBe(401);
+        expect(response.body['code']).toBe('UNAUTHORIZED');
+      });
+    }
 
     it('answers all three rejection paths with exactly the same body', async () => {
       const harness = getHarness();
@@ -562,6 +639,10 @@ describe('tenancy and credential sweep (T102)', () => {
   });
 
   registerTenancySweep(
+    () => harness,
+    () => [ownWorkspace, otherWorkspace],
+  );
+  registerCollectionFilterTenancyTests(
     () => harness,
     () => [ownWorkspace, otherWorkspace],
   );

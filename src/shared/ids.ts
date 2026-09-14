@@ -21,7 +21,7 @@ type Branded<T, B extends string> = T & { readonly [brand]: B };
  *
  * Branded because the ids in this service are all bare strings of the same shape, and the
  * repository signatures put several of them side by side —
- * `listByAccount(db, workspaceId, socialAccountId, …)`. Swapping two adjacent arguments compiles
+ * `getById(workspaceId, commentId)`. Swapping two adjacent arguments compiles
  * and produces exactly the cross-tenant read D20 forbids; only an integration test catches it.
  * `WorkspaceId` makes that swap a compile error instead.
  *

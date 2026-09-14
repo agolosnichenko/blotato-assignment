@@ -3,7 +3,9 @@
 > Status: **FINAL** (2026-09-11). The contested assumptions (A3, A4, A9, A11, A16, A17) were reviewed
 > with the author; decisions D27–D28 were added as a result. A later review of the system shape
 > replaced the "modular monolith" framing with an explicit service boundary: D29 and A10a, with
-> §4.1, §5.1, §5.2, D8 and D26 updated to match.
+> §4.1, §5.1, §5.2, D8 and D26 updated to match. A later review of the read surface collapsed the
+> three nested reads into one filtered collection: D31 (§18), with §5.2, §6.1, §12, D11, D13, D27,
+> A3 and A10a updated to match.
 > This is the working specification. The deliverable documents (README, DESIGN.md, OpenAPI) are also
 > in English (D18).
 > All decisions are in section 3, all assumptions in section 16, risks and spikes in section 17.
@@ -92,15 +94,15 @@ Sources: <https://developers.facebook.com/docs/instagram-platform/webhooks>,
 | D8 | Service boundaries | Workspaces, API keys, social accounts (+ tokens) and posts are owned by other services of the platform. The comments service reads them only through ports; it never writes them and never joins to them in SQL | Focus on comments; the service plugs into an existing platform |
 | D9 | Domain events | Transactional outbox → relay → BullMQ. Consumers are not implemented; only the contract and a test | At-least-once delivery without dual writes |
 | D10 | Write operations | Public reply to a comment + top-level comment on a post. Private reply is out of scope | Mirrors the product; DMs are a different domain |
-| D11 | Read shape | `GET /posts/:postId/comments` — top-level comments with `replyCount`; `GET /comments/:commentId/replies` — direct replies; a cursor at each level | One model for depth 1 and ∞, predictable response size |
+| D11 | Read shape | (narrowed → D31, §18) One collection `GET /comments`: hierarchy is a filter, not an address. `postId` + `topLevelOnly` gives a post's top level with `replyCount`, `parentCommentId` gives direct replies; one cursor shape at every level | One model for depth 1 and ∞, predictable response size; the address does not have to be known to read |
 | D12 | Reply depth | Strict check against the `maxReplyDepth` capability → `422 REPLY_DEPTH_EXCEEDED` | No implicit change of request semantics |
-| D13 | External posts | Comments on posts not published through Blotato are stored with `postId = null`, emit events, are available via `GET /accounts/:accountId/comments`, and can be replied to | Required for the "on any post" automation and the account inbox |
+| D13 | External posts | Comments on posts not published through Blotato are stored with `postId = null`, emit events, are available via `GET /comments?accountId=...` (D31), and can be replied to | Required for the "on any post" automation and the account inbox |
 | D14 | Publish retries | Backoff only on retryable errors; on an uncertain outcome, reconcile first (look for our comment on the platform), then retry | A duplicate public reply on behalf of a brand is worse than a delay |
 | D15 | Retention | 45 days (configurable), purge job. Partitioning is described in DESIGN.md as the next step | Mirrors the product, limits PII and table growth |
 | D16 | Active contacts | A `ContactQuota` port reserves the contact before enqueueing; exceeding the limit → `422 QUOTA_EXCEEDED`. The limit is read through the port from the projected `workspaces.contact_limit_monthly` (in the real platform — billing entitlements) | A real business constraint behind a billing interface |
 | D17 | Bluesky ingestion | Adaptive polling; Jetstream is described in DESIGN.md as the scaling path | One sync mechanism without a stateful WebSocket component |
 | D18 | Documentation | English: README, DESIGN.md (mermaid), OpenAPI generated from Zod schemas. `spec.md` is the working specification, also in English | The founder reads the repository |
-| D19 | Manual sync | `POST /posts/:postId/comments/sync` → `202` + sync job; `lastSyncedAt` in read responses | A client or agent can request fresh data itself |
+| D19 | Manual sync | `POST /posts/:postId/comments/sync` → `202` + sync job; `lastSyncedAt` reported on a read that names a post (D31) | A client or agent can request fresh data itself |
 | D20 | Tenancy and auth | API key (only the hash is stored) → workspace; scoped by `workspace_id`; another workspace's resource → `404`; per-key rate limit in Redis | Team-friendly model that does not reveal other tenants' resources |
 | D21 | Tooling and CI | pnpm, oxlint + oxfmt, `tsc --noEmit`, vitest + testcontainers, prek, GitHub Actions (SHA-pinned, zizmor), Dependabot | Guardrails from the first commit |
 | D22 | How the result is evaluated | The reviewer won't run the code locally → public deployment with real accounts | Author's decision |
@@ -108,7 +110,7 @@ Sources: <https://developers.facebook.com/docs/instagram-platform/webhooks>,
 | D24 | Hosting | Railway: `api` and `worker` services from one Dockerfile, managed Postgres and Redis, HTTPS domain, deploys from GitHub | Minimal ops while still running real HTTPS / worker / Postgres / Redis |
 | D25 | Reviewer access | Public Swagger UI (`/docs`); the demo API key is sent in the email, not committed to the repository; the key is bound to a demo workspace, has a reduced rate limit and can be revoked; README contains a curl walkthrough | The reviewer can try a reply, but a random repository visitor cannot post on behalf of real accounts |
 | D26 | Account tokens | Adapters obtain credentials through an `AccountCredentials` port, never from a table. The single implementation for this deployment reads the local projection and decrypts AES-256-GCM (key from env); a CLI seed script accepts manually obtained tokens (Meta long-lived Page token or Instagram user token, Bluesky app password) and subscribes the account to webhooks. In the platform the port is a call to the accounts service returning a short-lived token | Token custody belongs to the accounts service (D8); the port is the seam, and the demo needs exactly one implementation behind it |
-| D27 | List ordering | All list endpoints accept `order=asc\|desc`. Defaults: top-level and account inbox — `desc`, replies — `asc`. The cursor encodes the direction | The client picks the scenario (inbox or reading a conversation); B-tree indexes are readable in both directions, so no extra indexes are needed |
+| D27 | List ordering | The listing accepts `order=asc\|desc` and the cursor encodes the direction; a cursor replayed under the other direction is a `400`. The per-route defaults (`desc` for top-level and inbox, `asc` for replies) are superseded by D31 (§18): one collection has one default, `desc`, and a reply thread asks for `order=asc` | The client picks the scenario (inbox or reading a conversation); B-tree indexes are readable in both directions, so no extra indexes are needed |
 | D28 | Instagram login | The IG adapter supports both variants: Facebook Login for Business (Page token, `graph.facebook.com`) and Instagram Login (Instagram user token, `graph.instagram.com`). The variant is stored in `social_accounts.auth_variant`; differences are isolated in the Graph client, and use cases do not depend on the variant | Instagram Login is how most modern creators connect without an FB Page; Facebook Login covers businesses with a linked Page |
 | D29 | Data ownership | The service owns its schema. References to other services' entities (`workspace_id`, `social_account_id`, `post_id`) are plain `uuid` columns with no foreign key; only links inside the service (`parent_comment_id`, `root_comment_id`) keep foreign keys. Referential integrity comes from port validation on write and platform events on delete | A foreign key across a service boundary forces a shared database and blocks independent schema changes; the read contract (§6.2) needs no data from other services, so the boundary costs nothing |
 
@@ -148,7 +150,7 @@ src/
                             # (workspaces, api keys, social accounts, posts)
     comments/
       domain/               # Comment, status state machine, reply rules, capability checks
-      application/          # use cases: ListPostComments, ListReplies, CreateReply,
+      application/          # use cases: ListComments (one filtered read, D31), CreateReply,
                             # CreateTopLevelComment, RequestSync, IngestComments, PublishComment
       infrastructure/       # drizzle repositories, outbox, contact quota, queues and workers
       http/                 # routes, Zod request/response schemas, error mapping
@@ -237,12 +239,22 @@ Constraints and indexes:
 - `UNIQUE (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL`.
 - `CHECK (status <> 'posted' OR platform_comment_id IS NOT NULL)`.
 - `CHECK ((parent_comment_id IS NULL) = (depth = 0))`.
-- `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` — a post's top-level page.
-- `(parent_comment_id, occurred_at ASC, id ASC)` — a replies page.
-- `(social_account_id, occurred_at DESC, id DESC)` — the account inbox.
+- `(workspace_id, occurred_at DESC, id DESC)` — the workspace-wide listing with no identifier filter
+  (D31); this is what keeps its cost bound to the page rather than to the workspace's history.
+- `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` — a post's top-level page
+  (`postId` + `topLevelOnly`).
+- `(parent_comment_id, occurred_at ASC, id ASC)` — a replies page (`parentCommentId`).
+- `(social_account_id, occurred_at DESC, id DESC)` — one account's inbox (`accountId`).
 - `(last_activity_at) WHERE parent_comment_id IS NULL` — retention purge.
 - `(status, last_attempt_started_at) WHERE status IN ('queued', 'processing')` — finding stuck rows.
-- List indexes serve both `order` values (D27): Postgres scans B-trees backwards.
+- List indexes serve both `order` values (D27): Postgres scans B-trees backwards. This holds only
+  while each index and the listing's `ORDER BY` agree on NULL placement, so both are left at
+  Postgres's own default for the direction (`NULLS FIRST` for `DESC`, `NULLS LAST` for `ASC`) and
+  neither names one. A pathkey includes NULL placement and the planner does not use a column's
+  `NOT NULL` to match one, so naming `NULLS LAST` on a `DESC` index costs `order=asc` that index
+  entirely — its backward scan yields `ASC NULLS FIRST` — and the read degrades to a full `Sort` of
+  the selection. `benchmark.integration.test.ts` asserts the whole selection × direction matrix
+  through `EXPLAIN`, which is the only automatic guard on this.
 
 ### 5.3. Module-internal tables
 
@@ -263,10 +275,8 @@ Base path `/v1`. Auth: `blotato-api-key: <api key>` header (A16). JSON, `camelCa
 
 | Method and path | Purpose | Response |
 |-----------------|---------|----------|
-| `GET /v1/posts/:postId/comments` | A post's top-level comments (`limit` 1–100, default 20; `cursor`; `order`, default `desc`) | `200 { items: Comment[], nextCursor, sync: { lastSyncedAt, activeJobId } }` |
-| `GET /v1/comments/:commentId/replies` | Direct replies (`limit`, `cursor`; `order`, default `asc`) | `200 { items: Comment[], nextCursor }` |
+| `GET /v1/comments` | The workspace's comments across every account and post (D31). All filters optional and combinable: `postId`, `parentCommentId`, `accountId`, `platform` (repeatable), `topLevelOnly`, `isOwn`, `since`, `until`; `order`, default `desc`; `limit` 1–100, default 20; `cursor` | `200 { items: Comment[], nextCursor, sync?: { lastSyncedAt, activeJobId } }` — `sync` present iff `postId` is among the filters |
 | `GET /v1/comments/:commentId` | A single comment (status polling) | `200 Comment` |
-| `GET /v1/accounts/:accountId/comments` | Account inbox, including external posts (`limit`, `cursor`, `since`, `until`, `isOwn`; `order`, default `desc`) | `200 { items, nextCursor }` |
 | `POST /v1/posts/:postId/comments` | Top-level comment. Body `{ text }`, `Idempotency-Key` header | `202 Comment(status=queued)` + `Location` |
 | `POST /v1/comments/:commentId/replies` | Public reply. Body `{ text }`, `Idempotency-Key` | `202 Comment(status=queued)` + `Location` |
 | `POST /v1/posts/:postId/comments/sync` | Manual sync | `202 SyncJob` |
@@ -276,6 +286,15 @@ Base path `/v1`. Auth: `blotato-api-key: <api key>` header (A16). JSON, `camelCa
 | `POST /webhooks/meta` | Meta event intake (IG and Page) | `200` |
 | `GET /healthz`, `GET /readyz` | Liveness / readiness (Postgres + Redis) | `200` / `503` |
 | `GET /docs`, `GET /openapi.json` | Swagger UI and the spec | |
+
+Every endpoint above requires the API key except the two health probes and the two webhook
+operations, which authenticate by their own means (`hub.verify_token`, HMAC over the raw body). The
+published document declares the key scheme globally (A16) and clears it on the exempt operations the
+document actually contains — the two health probes. The webhook operations and `GET /openapi.json`
+are registered `hide: true`, and the `/docs` assets are served by the Swagger UI plugin, so none of
+those is an operation the document can annotate at all. The exempt list still has one source — the
+array the authentication hook itself enforces, each entry carrying whether it is published — so what
+is described and what is enforced cannot drift.
 
 ### 6.2. `Comment` representation
 
@@ -494,7 +513,8 @@ Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).
 - Logs: pino with redaction for `blotato-api-key`, tokens and comment text; `requestId` / `jobId` on
   every entry.
 - Tenancy: every repository call takes `workspaceId`; integration tests assert 404 for other
-  workspaces' resources on every endpoint.
+  workspaces' resources on every endpoint that names one — and, on the listing, on every
+  identifier-shaped filter it accepts (D31), which is where a foreign id can enter a read.
 - Per-key rate limit: `@fastify/rate-limit` with a Redis store; the demo key gets 30 reads and 5
   writes per minute.
 - Config is validated with Zod at startup; a missing variable fails fast with a clear message.
@@ -520,7 +540,8 @@ Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).
     echo and the worker (7.1, step 7);
   - sync: a complete walk marks deletions; a partial walk doesn't; manual sync cooldown;
   - outbox: an event appears only after commit and is published once;
-  - tenancy: 404 for other workspaces' resources on every endpoint;
+  - tenancy: 404 for other workspaces' resources on every endpoint that names one, and one case per
+    identifier-shaped filter of the listing (`postId`, `parentCommentId`, `accountId` — D31);
   - retention: purge removes inactive threads and keeps active ones.
 - **Smoke against the deployment**: a script runs the README walkthrough against real accounts.
 - Verifying tests catch failures: for key invariants (deduplication, reconciliation, tenancy) the
@@ -535,8 +556,9 @@ Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).
   account linked to an FB Page; webhooks configured at `https://<domain>/webhooks/meta`.
 - Bluesky: a dedicated test account with an app password.
 - Seed (D26): workspace + demo API key + 3 social accounts + several published posts as sync targets.
-- README walkthrough: `GET /v1/platforms` → `GET /v1/posts/:id/comments` → `POST .../replies` → poll
-  `GET /v1/comments/:id` until `posted` → reply to a reply on IG (422) and on Bluesky (202) →
+- README walkthrough: `GET /v1/comments` with no identifier at all (D31 — the reviewer holds only a
+  key) → `GET /v1/platforms` → `GET /v1/comments?postId=:id&topLevelOnly=true` → `POST .../replies` →
+  poll `GET /v1/comments/:id` until `posted` → reply to a reply on IG (422) and on Bluesky (202) →
   `POST .../comments/sync`.
 
 ## 13. Deliverables
@@ -576,9 +598,9 @@ Product and domain:
   belong to the publishing service and are not visible to the comments service.
 - **A2.** An "own" comment is determined by the author id matching the connected account id, not by
   whether it was created through our API.
-- **A3.** (changed → D27) Ordering is controlled by the `order` parameter; by default top-level
-  comments and the inbox go newest first (inbox semantics, as in Blotato), replies go oldest first
-  (reading a conversation).
+- **A3.** (changed → D27, then → D31) Ordering is controlled by the `order` parameter. With one
+  collection there is one default — newest first, the inbox semantics the cross-account view needs;
+  reading a conversation oldest-first is `order=asc` on the request.
 - **A4.** (confirmed) Lists include comments in every status except `deleted`: clients see their own
   `queued` and `failed` replies. A deleted comment with live replies is returned as a placeholder
   (`status: deleted`, `text: null`); otherwise it is hidden.
@@ -596,9 +618,10 @@ Product and domain:
   react to old comments.
 - **A10a.** (added with D29) A comment can outlive the `posts` row it references, and the service does
   not track that: comments are anchored to `platform_post_id`, which the adapters use, while `post_id`
-  only serves the post-scoped route. If the ports no longer resolve a `postId`,
-  `GET /v1/posts/:postId/comments` returns `404` and the comments stay reachable through the account
-  inbox — the same shape as an external post (D13). No cross-service cascade or `post.deleted`
+  only serves the `postId` filter. If the ports no longer resolve a `postId`, that filter answers
+  `404` and the comments stay reachable through the unfiltered listing or an `accountId` filter —
+  the same shape as an external post (D13). A comment is never withheld because its post reference
+  has stopped resolving; only a request that *names* the vanished post fails. No cross-service cascade or `post.deleted`
   subscription is needed; retention bounds the dangling rows. A post deleted on the **platform** is a
   different case and is handled by sync (§7.3).
 
@@ -990,3 +1013,89 @@ implementation.
   costs one un-throttled call, which is what §4.1 permits Redis to hold. "Nothing known" is
   deliberately not "throttled", so an empty cache never stalls the deployment. This implements a
   section; it revises no decision, so no D-number changes.
+- **D31. Reads are one filtered collection; writes stay addressed (narrows D11, D13, D27, A3, A10a
+  and §6.1).** The moderation view the product is for — "every new comment across every account in
+  the workspace" — was reachable from no address: the three reads §6.1 used to carry are each keyed
+  to an identifier the caller must already hold, and the only inbox was per account. Time, not post
+  hierarchy, is the primary access path for comments, so hierarchy belongs in a filter rather than
+  in the address. `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
+  `GET /v1/accounts/:accountId/comments` are therefore **replaced** by one collection,
+  `GET /v1/comments`, whose filters (`postId`, `parentCommentId`, `accountId`, `platform`,
+  `topLevelOnly`, `isOwn`, `since`, `until`) intersect: no filter overrides another, and a
+  combination no comment can satisfy is a valid request answered with an empty page, not a `400`.
+  The removal is outright — no alias, no redirect, no deprecation period — because two read paths
+  for one read is exactly the drift the change exists to end.
+  - **What this does not touch.** Writes keep their addresses (`POST /v1/posts/:postId/comments`,
+    `POST /v1/comments/:commentId/replies`, `POST /v1/posts/:postId/comments/sync`): a command names
+    its target, a query describes a set. D19's refresh therefore stays addressed to a post, and the
+    `202` contract, idempotency, reply-depth enforcement (D12) and quota reservation (D16) are
+    untouched. So is the `Comment` representation (§6.2), the error catalogue (§6.3), tenancy (D20 —
+    a foreign identifier in any filter is `404`, never `403` and never an empty success) and the
+    keyset half of D27 (opaque cursor over `(occurred_at, id)`, direction encoded in it, a cursor
+    replayed under the other direction is `400`).
+  - **Two visible behaviour changes, stated rather than buried.** (1) One collection has one default
+    direction, `desc`; the replies read, which defaulted to `asc` at its own address, now asks for
+    `order=asc` explicitly. A default that depended on which filter was present would silently flip
+    direction when an unrelated filter was added — and since the cursor carries its direction, the
+    caller's next page would then fail as a mismatch. (2) `sync: { lastSyncedAt, activeJobId }` is
+    reported iff the selection names a post, whichever other filters accompany it, and is **absent**
+    rather than `null` otherwise: refresh freshness is a property of a post, and a selection spanning
+    many posts has no single answer to give.
+  - **`topLevelOnly` is this service's own filter, not a borrowed one.** It preserves the "a post's
+    page is its top level" reading the removed route gave for free, and it is the predicate that
+    keeps `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` reachable from the
+    collection — which is how the three preserved reads keep the plans they have today.
+  - **The task-level requirement is preserved, not dropped.** `task.md`'s "retrieve comments for a
+    published post" is `GET /v1/comments?postId=…&topLevelOnly=true` — the same rows, the same
+    `replyCount`, the same `sync` block, reached by a filter instead of a path. The shape also
+    coincides with Blotato's own documented flat `GET /comments` (§2.1), which is a corroboration
+    and not the argument: the argument is the missing cross-account inbox. Discoverability is
+    explicitly **not** the justification — account and post identifiers legitimately originate
+    outside this service (D8), and this feature adds no listing of either.
+  - **Cost.** The workspace-wide listing is the one read not bounded by an identifier, so it gets one
+    additive index, `(workspace_id, occurred_at DESC, id DESC)` (§5.2), and one measurable claim: at
+    equal page size its p95 on a ten-times-larger history stays within 1.5× — measured on demand by a
+    script and recorded in DESIGN.md, deliberately not a CI gate, because timing on a shared runner
+    is too noisy to gate on and a flaky gate gets disabled. Filter combinations with no leading index
+    (a post's whole thread, `platform`-only, `isOwn`-only) degrade to an ordered walk of that index
+    with a residual filter; an index per combination is a power set, and the trigger to add one is a
+    measurement rather than an intuition.
+  - **Scope of the revision.** In feature 001's requirement set this revises FR-001 (a post's
+    top-level comments), FR-003 (per-list default ordering), FR-006 (post-scoped refresh reporting)
+    and FR-008 (the per-account inbox) — each becomes a selection over the collection rather than its
+    own address. FR-002's "replies are a separately paged list" survives as the `parentCommentId`
+    filter, and FR-005's visibility rule (A4) is unchanged: a deleted comment is listed only while it
+    still has replies beneath it.
+  - **Not part of this decision: the docs page.** A16 already requires OpenAPI to describe the key as
+    an `apiKey` header scheme so Swagger UI can authorize. The document does not, so every "Try it
+    out" answers `401`. Publishing the scheme globally and clearing it on the exempt operations the
+    document contains — from the *same* array the authentication hook enforces, each entry carrying
+    whether the route is published, so the described and the enforced lists cannot drift — implements
+    A16 rather than changing it, and so carries no decision of its own. Which exempt routes are
+    published is a property of how they are registered, not a decision: the webhook operations and
+    `/openapi.json` are `hide: true`, and `/docs` is plugin-served.
+- **An unrecognized query parameter on `GET /v1/comments` is a `400` (clarifies D31, §6.3).** D31
+  states that filters intersect and that an unsatisfiable *combination* is an empty `200`. It said
+  nothing about a parameter name the schema does not define, and a Zod object strips one by default —
+  so `?post_id=…` in snake_case, or `?platform[]=…` in the bracket-array convention, answered `200`
+  with the whole workspace's history. The filter the client asked for was never applied, and no field
+  of the response says so; on a read where every parameter narrows the result, that is
+  indistinguishable from a wrong answer. The query schema is strict: an unrecognized name is
+  `400 VALIDATION_ERROR`. A combination of *recognized* filters still produces an empty page, so this
+  narrows nothing D31 promised. It revises no decision — it answers a question D31 left open.
+- **Both `order` values are indexed only while neither the index nor the `ORDER BY` names a NULL
+  placement (implements D27, §5.2).** D27's "B-tree indexes are readable in both directions" is true
+  of the index and false of a query that disagrees with it about where nulls sort: a Postgres pathkey
+  includes NULL placement, and the planner does not use a column's `NOT NULL` to match one. Naming
+  `NULLS LAST` on the ordering clause cost `order=asc` its index on all three `DESC` listing indexes,
+  and cost a `parentCommentId` selection — whose default is `desc` — `comments_replies_idx`; each
+  planned a full `Sort` of the selection. Both sides now stay at Postgres's default for the direction
+  (migration `0005`), and `benchmark.integration.test.ts` asserts the whole selection × direction
+  matrix. This is an implementation fact about D27, not a change to it.
+- **`comments.occurred_at` is `timestamptz(3)` (implements D27, data-model.md §2).** The keyset cursor
+  encodes `toISOString()`, which is millisecond-precision, while the column accepted microseconds.
+  A stored value the cursor cannot express makes paging lossy in both directions — `desc` skips the
+  rest of that millisecond, `asc` repeats the cursor row — and it is invisible from TypeScript, since
+  the driver parses timestamps into a millisecond-precision `Date`. Every writer passes a JS `Date`,
+  so nothing stored microseconds; pinning the column (migration `0006`) makes that the database's
+  guarantee rather than a convention each new writer must know.

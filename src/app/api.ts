@@ -8,7 +8,7 @@
 import { pathToFileURL } from 'node:url';
 import { onShutdownSignal } from '#src/shared/shutdown.ts';
 import fastifyRateLimit from '@fastify/rate-limit';
-import fastifySwagger from '@fastify/swagger';
+import fastifySwagger, { type SwaggerTransform } from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
@@ -22,7 +22,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { createRequestSync } from '#src/modules/comments/application/request-sync.ts';
-import { registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
+import { isFullyPublicRoute, registerApiKeyAuth } from '#src/modules/comments/http/auth.ts';
 import {
   registerCommentReadRoutes,
   registerCommentWriteRoutes,
@@ -140,23 +140,87 @@ function registerErrorHandler(app: Api): void {
 }
 
 /**
+ * Wraps `jsonSchemaTransform` (T036, R-09, D31) to clear `security` on the two operations
+ * {@link PUBLIC_ROUTES} exempts from the `onRequest` auth hook and that actually reach this
+ * transform — `GET /healthz` and `GET /readyz`. The other four exempt entries never call this
+ * function at all: the webhook and `/openapi.json` routes are registered with
+ * `schema: { hide: true }`, so `@fastify/swagger` skips them before `transform` runs, and the
+ * `/docs` assets are served entirely by `@fastify/swagger-ui`, outside this document.
+ *
+ * Wraps rather than replaces `jsonSchemaTransform`, so Zod remains the single source of the
+ * request/response schemas (R-03 of the 001 plan); reads {@link isFullyPublicRoute} rather than
+ * re-checking `PUBLIC_ROUTES` itself, so the exempt list stays the one the auth hook enforces
+ * (FR-012) — this function only decides whether to *publish* that exemption, never redefines it.
+ *
+ * `isFullyPublicRoute`, not a check of one method: this transform runs once per route, so the
+ * `security` it clears is cleared for every operation that route produces. A route whose `GET` is
+ * exempt and whose `POST` is not would otherwise be published as unauthenticated on both.
+ */
+const transformWithPublicRoutes: SwaggerTransform = (input) => {
+  const { schema, url } = jsonSchemaTransform(input);
+  if (isFullyPublicRoute(input.route.method, url)) {
+    return { schema: { ...schema, security: [] }, url };
+  }
+  return { schema, url };
+};
+
+/**
  * Registers `@fastify/swagger` + `@fastify/swagger-ui` at `/docs`, driven by the Zod schemas
  * routes declare via `ZodTypeProvider` (T036, R-03) — one schema object serves request
- * validation, static types and this document. `/openapi.json` is a plain route rather than
- * swagger-ui's own `/docs/json`, to match the path spec.md §6.1 documents.
+ * validation, static types and this document.
+ *
+ * The `apiKey` security scheme (T035, R-09, D31) mirrors what `auth.ts`'s `onRequest` hook
+ * already enforces: applied globally (`security: [{ apiKey: [] }]`) with per-operation
+ * exemptions, never the inverse — a route added without thought is published as authenticated,
+ * the same way the hook itself fails closed for a route added without being exempted.
+ *
+ * `/openapi.json` itself is registered separately, by {@link registerOpenApiDocRoute} — see that
+ * function's doc comment for why it must not be a bare route defined here.
  */
 function registerDocs(app: Api): void {
   // `.register()` queues the plugin for Fastify's own boot sequence (resolved by `.ready()`/
-  // `.listen()`), so it is not awaited here — the route below only calls `app.swagger()` inside a
-  // handler, by which point boot has already completed.
+  // `.listen()`), so it is not awaited here.
   app.register(fastifySwagger, {
     openapi: {
       info: { title: 'Blotato Comments API', version: '0.1.0' },
+      components: {
+        securitySchemes: {
+          apiKey: { type: 'apiKey', name: 'blotato-api-key', in: 'header' },
+        },
+      },
+      security: [{ apiKey: [] }],
     },
-    transform: jsonSchemaTransform,
+    transform: transformWithPublicRoutes,
   });
   app.register(fastifySwaggerUi, { routePrefix: '/docs' });
-  app.get('/openapi.json', { schema: { hide: true } }, () => app.swagger());
+}
+
+/**
+ * Registers `GET /openapi.json` (spec.md §6.1 — a plain route, not swagger-ui's own `/docs/json`),
+ * the same category of fix `registerHealthRoutes` (T035) applied to `/healthz`/`/readyz` (fix
+ * round 2): registered through `app.register()`, deferred to avvio's boot queue, rather than as a
+ * bare `app.get()` call on `app` directly. A bare call fires synchronously — before `registerDocs`'s
+ * own `fastifySwagger` plugin has even started its deferred boot, let alone before
+ * `registerRateLimit`'s `onRoute` hook exists — so the route would vanish from every tool that
+ * observes routes via `onRoute` (this repository's own OpenAPI-security test harness included,
+ * `openapi-security.integration.test.ts`'s `collectLiveRoutes`) while `schema: { hide: true }`
+ * still correctly keeps it out of the *published document* either way (`@fastify/swagger` reads
+ * `hide` off the final route table when `app.swagger()` is called, not off `onRoute` events, so
+ * that guarantee never depended on registration timing).
+ *
+ * Called last in {@link buildApi}, after {@link registerRateLimit}, so that hook has already
+ * finished wiring `onRoute` up by the time this route is defined — same ordering
+ * `registerHealthRoutes` relies on, and the same `allowList` coupling: `/openapi.json` is
+ * `published: false` in {@link PUBLIC_ROUTES}, so the auth hook never sets `apiKeyId` for it, and
+ * `registerRateLimit`'s `allowList: (request) => request.apiKeyId === ''` exempts it from rate
+ * limiting the same way it exempts `/healthz`/`/readyz` — see that function's `allowList` line for
+ * the other half of this coupling.
+ */
+function registerOpenApiDocRoute(app: Api): void {
+  app.register((instance, _opts, done) => {
+    instance.get('/openapi.json', { schema: { hide: true } }, () => instance.swagger());
+    done();
+  });
 }
 
 const READ_METHODS = new Set(['GET', 'HEAD']);
@@ -209,6 +273,9 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
     enableDraftSpec: true,
     keyGenerator: (request) =>
       `${isReadRequest(request.method) ? 'read' : 'write'}:${request.apiKeyId}`,
+    // `registerHealthRoutes`'s /healthz and /readyz, and `registerOpenApiDocRoute`'s
+    // /openapi.json, all rely on this exact predicate to stay unlimited — see those functions'
+    // doc comments for the coupling.
     allowList: (request) => request.apiKeyId === '',
     max: (request) => {
       const envDefault = isReadRequest(request.method)
@@ -224,7 +291,7 @@ function registerRateLimit(app: Api, config: Container['config'], redis: Contain
 }
 
 /**
- * Registers the four read routes, the two write routes, the two sync routes and
+ * Registers the two read routes, the two write routes, the two sync routes and
  * `GET /v1/platforms` (T049, T069, T090, T098).
  */
 function registerCommentRoutes(
@@ -296,20 +363,43 @@ function registerWebhookRoutes(
   );
 }
 
-/** Registers `GET /healthz` (liveness) and `GET /readyz` (Postgres + Redis, T035). */
+/**
+ * Registers `GET /healthz` (liveness) and `GET /readyz` (Postgres + Redis, T035).
+ *
+ * Registered through `app.register()` rather than as bare `app.get()` calls on `app` directly, so
+ * that Fastify's avvio queue defers route registration to boot time — same as every other route
+ * module here. `@fastify/swagger` (`registerDocs`) attaches its own `onRoute` hook only once its
+ * own `.register()`'d plugin body runs; a bare `app.get()` call fires synchronously, immediately,
+ * outside avvio's queue, so it would run — and add its route to the router — before that hook
+ * exists, silently vanishing from the published document (T035, R-09: `GET /healthz` and
+ * `GET /readyz` are meant to be the two operations the exemption actually clears).
+ *
+ * Side effect: `@fastify/rate-limit`'s `onRoute` hook (`registerRateLimit`, registered earlier)
+ * now sees these two routes too, and attaches its `preHandler` to them — before this change they
+ * were bare `app.get()` calls that ran before that hook existed, so it never saw them at all.
+ * They stay unlimited today only because `registerRateLimit`'s `allowList` exempts any request
+ * with `apiKeyId === ''`, which both routes always have ({@link PUBLIC_ROUTES} skips the auth hook
+ * before it sets `apiKeyId`). If `allowList`'s predicate ever changes to key on something else,
+ * these two liveness/readiness probes could start getting rate-limited with no warning — see the
+ * `allowList` line in `registerRateLimit` for the other half of this coupling.
+ */
 function registerHealthRoutes(app: Api, database: Database, redis: Redis): void {
-  app.get('/healthz', () => ({ status: 'ok' }));
+  app.register((instance, _opts, done) => {
+    instance.get('/healthz', () => ({ status: 'ok' }));
 
-  app.get('/readyz', async (_request, reply) => {
-    const [postgres, redisCheck] = await Promise.all([
-      runCheck(() => database.ping()),
-      runCheck(() => redis.ping()),
-    ]);
-    const ready = postgres.ok && redisCheck.ok;
-    return reply.code(ready ? 200 : 503).send({
-      status: ready ? 'ok' : 'degraded',
-      checks: { postgres, redis: redisCheck },
+    instance.get('/readyz', async (_request, reply) => {
+      const [postgres, redisCheck] = await Promise.all([
+        runCheck(() => database.ping()),
+        runCheck(() => redis.ping()),
+      ]);
+      const ready = postgres.ok && redisCheck.ok;
+      return reply.code(ready ? 200 : 503).send({
+        status: ready ? 'ok' : 'degraded',
+        checks: { postgres, redis: redisCheck },
+      });
     });
+
+    done();
   });
 }
 
@@ -333,6 +423,7 @@ export function buildApi(deps: ApiDependencies) {
   registerCommentRoutes(app, deps, logger);
   registerWebhookRoutes(app, deps, logger);
   registerHealthRoutes(app, deps.database, deps.redis);
+  registerOpenApiDocRoute(app);
 
   return app;
 }

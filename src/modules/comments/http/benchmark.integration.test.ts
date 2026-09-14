@@ -15,8 +15,9 @@
  * the index cannot serve, and a post's comment page goes from an index scan over ~200 rows to a
  * sequential scan over the whole 100,000-row table. A wall-clock number on a shared CI machine is
  * the flakiest kind of assertion, so the read benchmark makes the real claim twice: once
- * structurally, via `EXPLAIN` on the exact predicate `listTopLevelByPost` runs (proving an index
- * scan is actually chosen), and once as a secondary, time-boxed signal (p95 under budget) for the
+ * structurally, via `EXPLAIN` on the exact predicate `selectionPredicate` builds for
+ * `?postId=…&topLevelOnly=true` (proving an index scan is actually chosen), and once as a
+ * secondary, time-boxed signal (p95 under budget) for the
  * regression an `EXPLAIN` check alone could still miss — a chosen index that is itself bloated or
  * unusably large, say.
  *
@@ -34,7 +35,7 @@
 
 import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Worker, type Job } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -43,7 +44,13 @@ import { loadConfig } from '#src/app/config.ts';
 import { buildContainer, type Container } from '#src/app/container.ts';
 import { createPublishComment } from '#src/modules/comments/application/publish-comment.ts';
 import { createAccountHealth } from '#src/modules/comments/infrastructure/account-health.ts';
-import { createCommentRepository } from '#src/modules/comments/infrastructure/comment-repository.ts';
+import {
+  createCommentRepository,
+  orderByFor,
+  selectionPredicate,
+  visibleInList,
+  type CommentSelection,
+} from '#src/modules/comments/infrastructure/comment-repository.ts';
 import { createContactQuota } from '#src/modules/comments/infrastructure/contact-quota.ts';
 import { comments } from '#src/modules/comments/infrastructure/schema.ts';
 import {
@@ -56,15 +63,38 @@ import type { CommentPlatformAdapter, Platform, PublishedComment } from '#src/pl
 import { hashSecret } from '#src/shared/crypto.ts';
 import type { Database } from '#src/shared/db.ts';
 import { asWorkspaceId, generateId, type WorkspaceId } from '#src/shared/ids.ts';
+import type { SortOrder } from '#src/shared/pagination.ts';
 import { QUEUE_NAMES } from '#src/shared/queues.ts';
 import { startTestContainers, type TestContainers } from '#src/shared/testing/containers.ts';
 import { TEST_CREDENTIALS_ENCRYPTION_KEY, TEST_ENV } from '#src/shared/testing/test-env.ts';
 
 const PLATFORM: Platform = 'bluesky';
 const TOTAL_COMMENTS = 100_000;
-const POST_COUNT = 500;
+/**
+ * The distribution across workspaces/accounts/posts (T017 fix round 2, research.md R-04/R-05): a
+ * single workspace and a single social account owning the whole table made `workspace_id` and
+ * `social_account_id` both match 100% of rows, so once their pathkeys agreed with the indexes
+ * (fix round 1), the planner's choice between `comments_workspace_idx` and
+ * `comments_social_account_idx` for the account read was an arbitrary tie at equal cost. Five
+ * workspaces of five accounts each makes `workspace_id` a 1-in-5 filter and `social_account_id` a
+ * 1-in-25 filter — selective the way they would be in a real deployment, where a workspace holds
+ * several accounts and the whole table holds many workspaces. `POSTS_PER_ACCOUNT` keeps
+ * `COMMENTS_PER_POST` identical to before this change, so the pre-existing top-level assertion's
+ * own selectivity is unaffected.
+ */
+const WORKSPACE_COUNT = 5;
+const ACCOUNTS_PER_WORKSPACE = 5;
+const POSTS_PER_ACCOUNT = 20;
+const POST_COUNT = WORKSPACE_COUNT * ACCOUNTS_PER_WORKSPACE * POSTS_PER_ACCOUNT;
 const COMMENTS_PER_POST = TOTAL_COMMENTS / POST_COUNT;
 const SEED_CHUNK_SIZE = 1000;
+/**
+ * Replies seeded under the benchmark post's root comment (M-3) — redistributed out of that post's
+ * `COMMENTS_PER_POST` share rather than added, so `TOTAL_COMMENTS` stays exact. Comfortably below
+ * `COMMENTS_PER_POST` (200) so the post still has plenty of top-level comments left for the
+ * top-level `EXPLAIN`/read-budget assertions.
+ */
+const REPLIES_PER_PARENT = 50;
 const READ_BUDGET_MS = 300;
 const WRITE_BUDGET_MS = 300;
 /** Long enough that a synchronous write path would blow the budget many times over. */
@@ -78,6 +108,7 @@ interface Harness {
   workspaceId: WorkspaceId;
   socialAccountId: string;
   benchmarkPostId: string;
+  benchmarkParentCommentId: string;
 }
 
 function keyMaterial() {
@@ -100,22 +131,171 @@ async function mintApiKey(database: Database, workspaceId: WorkspaceId): Promise
   return `blt_${prefix}_${secret}`;
 }
 
-/** One social account with real, decryptable credentials — the write benchmark publishes through it. */
-async function seedSocialAccount(database: Database, workspaceId: WorkspaceId): Promise<string> {
+/**
+ * One social account with real, decryptable credentials. Every seeded account gets real
+ * credentials, not just the primary one the write benchmark publishes through — the accounts this
+ * file adds purely to give `social_account_id` genuine selectivity (T017 fix round 2) are cheap
+ * enough (25 total) that a second, credential-less code path would only be more code to keep in
+ * sync with this one.
+ */
+async function seedSocialAccount(
+  database: Database,
+  workspaceId: WorkspaceId,
+  label: string,
+): Promise<string> {
   const socialAccountId = generateId();
   const credentialsCiphertext = encryptCredentials(Buffer.from('app-password'), keyMaterial());
   await database.drizzle.insert(socialAccounts).values({
     id: socialAccountId,
     workspaceId,
     platform: PLATFORM,
-    platformAccountId: 'bsky-benchmark-account',
-    username: 'benchmark',
+    platformAccountId: `bsky-account-${label}`,
+    username: label,
     credentialsCiphertext,
     credentialsKeyVersion: 1,
     status: 'active',
     createdAt: new Date(),
   });
   return socialAccountId;
+}
+
+async function seedWorkspace(database: Database, name: string): Promise<WorkspaceId> {
+  const workspaceId = asWorkspaceId(generateId());
+  await database.drizzle.insert(workspaces).values({
+    id: workspaceId,
+    name,
+    contactLimitMonthly: 1_000_000,
+    createdAt: new Date(),
+  });
+  return workspaceId;
+}
+
+/** The `workspaceIndex`th workspace — index 0 is the caller's already-seeded primary workspace. */
+function resolveWorkspace(
+  database: Database,
+  primaryWorkspaceId: WorkspaceId,
+  workspaceIndex: number,
+): Promise<WorkspaceId> {
+  if (workspaceIndex === 0) {
+    return Promise.resolve(primaryWorkspaceId);
+  }
+  return seedWorkspace(database, `Benchmark workspace ${workspaceIndex}`);
+}
+
+/**
+ * The `accountIndex`th account of `workspaceId` — workspace 0's account 0 is the caller's
+ * already-seeded, already-credentialed primary account, the one the write benchmark publishes
+ * through and the read benchmark/top-level `EXPLAIN` assertion reads through.
+ */
+function resolveSocialAccount(
+  database: Database,
+  workspaceId: WorkspaceId,
+  primarySocialAccountId: string,
+  workspaceIndex: number,
+  accountIndex: number,
+): Promise<string> {
+  if (workspaceIndex === 0 && accountIndex === 0) {
+    return Promise.resolve(primarySocialAccountId);
+  }
+  return seedSocialAccount(database, workspaceId, `${workspaceIndex}-${accountIndex}`);
+}
+
+/**
+ * Buffers comment rows and flushes them in `SEED_CHUNK_SIZE` multi-row inserts — one round trip
+ * per row would make a 100,000-row seed too slow for anyone to actually run this file. Pulled out
+ * of `seedDistributedComments` so pushing a row doesn't add another level of nesting there.
+ */
+interface CommentBuffer {
+  push(row: CommentInsert): Promise<void>;
+  flush(): Promise<void>;
+}
+
+function createCommentBuffer(database: Database): CommentBuffer {
+  let pending: CommentInsert[] = [];
+  return {
+    async push(row) {
+      pending.push(row);
+      if (pending.length >= SEED_CHUNK_SIZE) {
+        await database.drizzle.insert(comments).values(pending);
+        pending = [];
+      }
+    },
+    async flush() {
+      if (pending.length > 0) {
+        await database.drizzle.insert(comments).values(pending);
+        pending = [];
+      }
+    },
+  };
+}
+
+interface AccountSeedResult {
+  readonly firstPostId: string;
+  /** Set only when `seedReplies` is true — the root comment `REPLIES_PER_PARENT` replies target. */
+  readonly benchmarkParentCommentId: string | null;
+}
+
+/**
+ * Seeds `POSTS_PER_ACCOUNT` posts for one account, starting the post-numbering (used only for
+ * `platformPostId` uniqueness and spacing `occurredAt`) at `startPostIndex`, pushing every comment
+ * into `buffer` rather than returning them — keeps `seedDistributedComments`'s own nesting within
+ * the project's depth limit. Returns the account's first post's id, so the caller can note it as
+ * the `benchmarkPostId` when this is workspace 0's account 0.
+ *
+ * When `seedReplies` is true, the first post's first comment becomes a root and the next
+ * `REPLIES_PER_PARENT` comments are seeded as its replies instead of as top-level comments —
+ * redistributing `COMMENTS_PER_POST` rather than adding to it (M-3), so the replies `EXPLAIN`
+ * assertion runs against a parent with genuine cardinality instead of an estimated-empty
+ * selection.
+ */
+async function seedAccountPostsAndComments(
+  database: Database,
+  workspaceId: WorkspaceId,
+  socialAccountId: string,
+  startPostIndex: number,
+  base: number,
+  buffer: CommentBuffer,
+  seedReplies: boolean,
+): Promise<AccountSeedResult> {
+  let firstPostId = '';
+  let benchmarkParentCommentId: string | null = null;
+  for (let postSlot = 0; postSlot < POSTS_PER_ACCOUNT; postSlot += 1) {
+    const postIndex = startPostIndex + postSlot;
+    // oxlint-disable-next-line no-await-in-loop
+    const postId = await seedPost(database, workspaceId, socialAccountId, postIndex);
+    if (postSlot === 0) {
+      firstPostId = postId;
+    }
+    const seedRepliesForThisPost = seedReplies && postSlot === 0;
+    let parentCommentId: string | null = null;
+    for (let commentIndex = 0; commentIndex < COMMENTS_PER_POST; commentIndex += 1) {
+      const occurredAt = new Date(base + postIndex * COMMENTS_PER_POST + commentIndex);
+      if (seedRepliesForThisPost && commentIndex === 0) {
+        const root = buildComment(workspaceId, socialAccountId, postId, occurredAt);
+        // `comments.id` has a schema default, so the inferred insert type allows `undefined`;
+        // `buildComment` always sets a concrete id, so this `?? null` never actually fires.
+        parentCommentId = root.id ?? null;
+        benchmarkParentCommentId = parentCommentId;
+        // oxlint-disable-next-line no-await-in-loop
+        await buffer.push(root);
+        continue;
+      }
+      if (
+        seedRepliesForThisPost &&
+        commentIndex <= REPLIES_PER_PARENT &&
+        parentCommentId !== null
+      ) {
+        // oxlint-disable-next-line no-await-in-loop
+        await buffer.push(
+          buildReply(workspaceId, socialAccountId, postId, occurredAt, parentCommentId),
+        );
+        continue;
+      }
+      // oxlint-disable-next-line no-await-in-loop
+      await buffer.push(buildComment(workspaceId, socialAccountId, postId, occurredAt));
+    }
+  }
+  return { firstPostId, benchmarkParentCommentId };
 }
 
 async function seedPost(
@@ -172,44 +352,123 @@ function buildComment(
   };
 }
 
-/**
- * Bulk-seeds `POST_COUNT` posts and `TOTAL_COMMENTS` comments spread evenly across them, in
- * chunked multi-row inserts rather than one round trip per row — a 100,000-row seed that took
- * minutes would protect nothing, because nobody would run the file. Returns the id of one post to
- * run the read benchmark against.
- */
-async function seedManyPostsAndComments(
-  database: Database,
+/** A reply to `parentCommentId`, otherwise identical to {@link buildComment} (M-3). */
+function buildReply(
   workspaceId: WorkspaceId,
   socialAccountId: string,
-): Promise<string> {
-  const base = Date.parse('2026-01-01T00:00:00.000Z');
+  postId: string,
+  occurredAt: Date,
+  parentCommentId: string,
+): CommentInsert {
+  return {
+    ...buildComment(workspaceId, socialAccountId, postId, occurredAt),
+    parentCommentId,
+    rootCommentId: parentCommentId,
+    depth: 1,
+  };
+}
+
+interface DistributionResult {
+  readonly benchmarkPostId: string;
+  readonly benchmarkParentCommentId: string;
+}
+
+/**
+ * Bulk-seeds `WORKSPACE_COUNT` workspaces, `ACCOUNTS_PER_WORKSPACE` accounts each,
+ * `POSTS_PER_ACCOUNT` posts per account and `TOTAL_COMMENTS` comments spread evenly across every
+ * post, in chunked multi-row inserts rather than one round trip per row — a 100,000-row seed that
+ * took minutes would protect nothing, because nobody would run the file. `primaryWorkspaceId`/
+ * `primarySocialAccountId` are workspace 0's account 0 (T017 fix round 2) — already seeded by the
+ * caller with real credentials, and reused here rather than re-created, so the harness's read/write
+ * benchmarks and the `EXPLAIN` assertions all run against the same slice. Returns the id of that
+ * account's first post, to run the read benchmark and the top-level `EXPLAIN` assertion against.
+ */
+/** One workspace's `ACCOUNTS_PER_WORKSPACE` accounts, folded out of `seedDistributedComments` to
+ * keep that function within the project's line limit. */
+async function seedWorkspaceAccounts(
+  database: Database,
+  workspaceId: WorkspaceId,
+  primarySocialAccountId: string,
+  workspaceIndex: number,
+  startPostIndex: number,
+  base: number,
+  buffer: CommentBuffer,
+): Promise<DistributionResult> {
   let benchmarkPostId = '';
-  let pending: CommentInsert[] = [];
+  let benchmarkParentCommentId = '';
+  let globalPostIndex = startPostIndex;
 
-  for (let postIndex = 0; postIndex < POST_COUNT; postIndex += 1) {
-    // Posts are few enough (500) to insert one at a time without a second bulk path; the bulk
-    // seed this function exists for is the 100,000-row comments table.
+  for (let accountIndex = 0; accountIndex < ACCOUNTS_PER_WORKSPACE; accountIndex += 1) {
     // oxlint-disable-next-line no-await-in-loop
-    const postId = await seedPost(database, workspaceId, socialAccountId, postIndex);
-    if (postIndex === 0) {
-      benchmarkPostId = postId;
-    }
-    for (let commentIndex = 0; commentIndex < COMMENTS_PER_POST; commentIndex += 1) {
-      const occurredAt = new Date(base + postIndex * COMMENTS_PER_POST + commentIndex);
-      pending.push(buildComment(workspaceId, socialAccountId, postId, occurredAt));
-      if (pending.length >= SEED_CHUNK_SIZE) {
-        // oxlint-disable-next-line no-await-in-loop
-        await database.drizzle.insert(comments).values(pending);
-        pending = [];
+    const socialAccountId = await resolveSocialAccount(
+      database,
+      workspaceId,
+      primarySocialAccountId,
+      workspaceIndex,
+      accountIndex,
+    );
+    const isBenchmarkAccount = workspaceIndex === 0 && accountIndex === 0;
+    // oxlint-disable-next-line no-await-in-loop
+    const result = await seedAccountPostsAndComments(
+      database,
+      workspaceId,
+      socialAccountId,
+      globalPostIndex,
+      base,
+      buffer,
+      isBenchmarkAccount,
+    );
+    globalPostIndex += POSTS_PER_ACCOUNT;
+    if (isBenchmarkAccount) {
+      benchmarkPostId = result.firstPostId;
+      if (result.benchmarkParentCommentId === null) {
+        throw new Error('seedAccountPostsAndComments: benchmark account seeded no replies');
       }
+      benchmarkParentCommentId = result.benchmarkParentCommentId;
     }
-  }
-  if (pending.length > 0) {
-    await database.drizzle.insert(comments).values(pending);
   }
 
-  return benchmarkPostId;
+  return { benchmarkPostId, benchmarkParentCommentId };
+}
+
+async function seedDistributedComments(
+  database: Database,
+  primaryWorkspaceId: WorkspaceId,
+  primarySocialAccountId: string,
+): Promise<DistributionResult> {
+  const base = Date.parse('2026-01-01T00:00:00.000Z');
+  const buffer = createCommentBuffer(database);
+  let benchmarkPostId = '';
+  let benchmarkParentCommentId = '';
+  let globalPostIndex = 0;
+
+  for (let workspaceIndex = 0; workspaceIndex < WORKSPACE_COUNT; workspaceIndex += 1) {
+    // oxlint-disable-next-line no-await-in-loop
+    const workspaceId = await resolveWorkspace(database, primaryWorkspaceId, workspaceIndex);
+    // oxlint-disable-next-line no-await-in-loop
+    const result = await seedWorkspaceAccounts(
+      database,
+      workspaceId,
+      primarySocialAccountId,
+      workspaceIndex,
+      globalPostIndex,
+      base,
+      buffer,
+    );
+    globalPostIndex += ACCOUNTS_PER_WORKSPACE * POSTS_PER_ACCOUNT;
+    if (workspaceIndex === 0) {
+      ({ benchmarkPostId, benchmarkParentCommentId } = result);
+    }
+  }
+
+  await buffer.flush();
+
+  // Without this, the planner works off the empty-table defaults autovacuum has not yet
+  // replaced with real statistics, and picks bitmap/sort plans no production table this size
+  // would run — a seed artifact, not a claim about the indexes themselves (T017).
+  await database.drizzle.execute(sql`ANALYZE ${comments}`);
+
+  return { benchmarkPostId, benchmarkParentCommentId };
 }
 
 async function startHarness(): Promise<Harness> {
@@ -230,17 +489,24 @@ async function startHarness(): Promise<Harness> {
   const app = buildApi(container);
   await app.ready();
 
-  const workspaceId = asWorkspaceId(generateId());
-  await database.drizzle.insert(workspaces).values({
-    id: workspaceId,
-    name: 'Benchmark workspace',
-    contactLimitMonthly: 1_000_000,
-    createdAt: new Date(),
-  });
-  const socialAccountId = await seedSocialAccount(database, workspaceId);
-  const benchmarkPostId = await seedManyPostsAndComments(database, workspaceId, socialAccountId);
+  const workspaceId = await seedWorkspace(database, 'Benchmark workspace');
+  const socialAccountId = await seedSocialAccount(database, workspaceId, 'benchmark');
+  const { benchmarkPostId, benchmarkParentCommentId } = await seedDistributedComments(
+    database,
+    workspaceId,
+    socialAccountId,
+  );
 
-  return { containers, container, database, app, workspaceId, socialAccountId, benchmarkPostId };
+  return {
+    containers,
+    container,
+    database,
+    app,
+    workspaceId,
+    socialAccountId,
+    benchmarkPostId,
+    benchmarkParentCommentId,
+  };
 }
 
 async function stopHarness(harness: Harness): Promise<void> {
@@ -268,7 +534,7 @@ async function measureReadLatencies(
     // oxlint-disable-next-line no-await-in-loop
     const response = await harness.app.inject({
       method: 'GET',
-      url: `/v1/posts/${harness.benchmarkPostId}/comments?limit=20`,
+      url: `/v1/comments?postId=${harness.benchmarkPostId}&topLevelOnly=true&limit=20`,
       headers: { 'blotato-api-key': apiKey },
     });
     samplesMs.push(performance.now() - startedAt);
@@ -278,48 +544,61 @@ async function measureReadLatencies(
 }
 
 /**
- * `EXPLAIN (FORMAT JSON)` on exactly the predicate `listTopLevelByPost` runs (workspace + post +
- * top-level + the `visibleInList` placeholder filter, ordered and limited the same way) — the
- * structural half of the read budget (module docstring). Returns the root plan node.
+ * The predicate `listByPredicate` runs for one `selection`, built from `selectionPredicate` and
+ * `visibleInList` (`comment-repository.ts`) directly rather than a second, hand-typed copy of the
+ * same conditions (T017 fix round 4, I-2) — a hand-typed copy agrees with production only until a
+ * condition is added to `selectionPredicate` and nobody remembers to add it here too; calling the
+ * same functions the repository calls makes that impossible instead of merely unlikely.
  */
-async function explainTopLevelQuery(
+function explainPredicate(workspaceId: WorkspaceId, selection: CommentSelection): SQL {
+  return and(selectionPredicate(workspaceId, selection), visibleInList()) as SQL;
+}
+
+/**
+ * The `ORDER BY` for one direction, built from `orderByFor` (`comment-repository.ts`) itself
+ * rather than a second, hand-typed copy of its `NULLS LAST` column list (T017 fix round 3) — a
+ * hand-typed copy agrees with `orderByFor` only until one side's column reference changes, and
+ * nothing but a human re-reading both would catch the drift; calling the same function the
+ * repository calls makes that impossible instead of merely unlikely.
+ */
+function explainOrderBy(order: SortOrder): SQL {
+  return sql.join(orderByFor(order), sql`, `);
+}
+
+/**
+ * `EXPLAIN (FORMAT JSON)` on one predicate/order pair, limited the same way `listByPredicate`
+ * limits its own query (`limit + 1`, here a fixed 21 to match the harness's `limit=20` reads) —
+ * the structural half of the read budget (module docstring). Returns the root plan node.
+ */
+async function explainQuery(
   db: NodePgDatabase,
-  workspaceId: WorkspaceId,
-  postId: string,
+  predicate: SQL,
+  order: SQL,
 ): Promise<Record<string, unknown>> {
   const rows = await db.execute<{ 'QUERY PLAN': [{ Plan: Record<string, unknown> }] }>(sql`
     EXPLAIN (FORMAT JSON)
     SELECT id FROM comments
-    WHERE workspace_id = ${workspaceId}
-      AND post_id = ${postId}
-      AND parent_comment_id IS NULL
-      AND (status <> 'deleted' OR reply_count > 0)
-    ORDER BY occurred_at DESC, id DESC
+    WHERE ${predicate}
+    ORDER BY ${order}
     LIMIT 21
   `);
   const [row] = rows.rows;
   if (row === undefined) {
-    throw new Error('explainTopLevelQuery: EXPLAIN returned no row');
+    throw new Error('explainQuery: EXPLAIN returned no row');
   }
   return row['QUERY PLAN'][0].Plan;
 }
 
-/** Walks the plan tree looking for any node whose name matches `predicate`. */
-function planContains(
-  plan: Record<string, unknown>,
-  predicate: (nodeType: string) => boolean,
-): boolean {
-  const nodeType = plan['Node Type'];
-  if (typeof nodeType === 'string' && predicate(nodeType)) {
-    return true;
-  }
+/** Flattens a plan tree into every node it contains, root first. */
+function planNodes(plan: Record<string, unknown>): Record<string, unknown>[] {
+  const nodes = [plan];
   const children = plan['Plans'];
-  if (!Array.isArray(children)) {
-    return false;
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      nodes.push(...planNodes(child as Record<string, unknown>));
+    }
   }
-  return children.some((child: unknown) =>
-    planContains(child as Record<string, unknown>, predicate),
-  );
+  return nodes;
 }
 
 // oxlint-disable require-await -- `listComments`/`findPublishedComment`/`fetchComment` implement
@@ -431,15 +710,33 @@ async function measureWriteLatencies(
   return samplesMs;
 }
 
-/** Asserts the plan used an index and, separately, that it used no sequential scan. */
-function assertPlanUsesIndex(plan: Record<string, unknown>): void {
+/**
+ * Asserts the plan scans `indexName` by name (T017) — not just *some* index, which a flip to
+ * `comments_workspace_idx` on one of the three preserved reads would satisfy just as well
+ * (research.md R-04) — and that it does so with no `Seq Scan` and no sort node of any kind: the
+ * index must supply both the rows and the ordering, not just one of the two.
+ *
+ * Matches any `Node Type` containing `Sort`, not only the exact `'Sort'` node (T017 fix round 4,
+ * I-1) — Postgres emits a distinct node type, `Incremental Sort`, when an index supplies only a
+ * prefix of the required ordering. An exact match let that node type through silently: together
+ * with {@link registerPlanMatrixTests}'s selection × direction matrix, this assertion is the only
+ * automatic guard on the NULL-placement coupling between `schema.ts`'s index DDL and
+ * `orderByFor`'s `ORDER BY`, and a plan that gained an `Incremental Sort` would have passed every
+ * check here.
+ */
+function assertPlanUsesIndex(plan: Record<string, unknown>, indexName: string): void {
+  const nodes = planNodes(plan);
   expect(
-    planContains(plan, (nodeType) => nodeType.includes('Index')),
-    `expected an index scan in the plan, got: ${JSON.stringify(plan)}`,
+    nodes.some((node) => node['Index Name'] === indexName),
+    `expected index ${indexName} in the plan, got: ${JSON.stringify(plan)}`,
   ).toBe(true);
   expect(
-    planContains(plan, (nodeType) => nodeType === 'Seq Scan'),
+    nodes.some((node) => node['Node Type'] === 'Seq Scan'),
     `expected no sequential scan in the plan, got: ${JSON.stringify(plan)}`,
+  ).toBe(false);
+  expect(
+    nodes.some((node) => String(node['Node Type']).includes('Sort')),
+    `expected no sort node in the plan, got: ${JSON.stringify(plan)}`,
   ).toBe(false);
 }
 
@@ -453,12 +750,15 @@ function registerReadBenchmarkTest(getHarness: () => Harness): void {
     const harness = getHarness();
     const apiKey = await mintApiKey(harness.database, harness.workspaceId);
 
-    const plan = await explainTopLevelQuery(
+    const plan = await explainQuery(
       harness.database.drizzle,
-      harness.workspaceId,
-      harness.benchmarkPostId,
+      explainPredicate(harness.workspaceId, {
+        postId: harness.benchmarkPostId,
+        topLevelOnly: true,
+      }),
+      explainOrderBy('desc'),
     );
-    assertPlanUsesIndex(plan);
+    assertPlanUsesIndex(plan, 'comments_post_top_level_idx');
 
     // Warm up the connection pool and query plan cache before timing — the first request on a
     // fresh pool measures connection setup, not the query (module docstring).
@@ -505,6 +805,70 @@ function registerWriteBenchmarkTest(getHarness: () => Harness): void {
   }, 60_000);
 }
 
+/** One selection the listing supports, and the index it must be answered from in both directions. */
+interface PlanCase {
+  readonly name: string;
+  readonly selection: (harness: Harness) => CommentSelection;
+  readonly index: string;
+}
+
+/**
+ * Every selection `GET /v1/comments` has a dedicated index for (T017, FR-013, research.md R-04,
+ * R-05, quickstart.md V7) — each pinned to the narrower index it had before the flat listing's
+ * index was added, not just to "some" index, which a flip to `comments_workspace_idx` would
+ * satisfy just as well.
+ */
+const PLAN_CASES: readonly PlanCase[] = [
+  {
+    name: "a post's top level",
+    selection: (harness) => ({ postId: harness.benchmarkPostId, topLevelOnly: true }),
+    index: 'comments_post_top_level_idx',
+  },
+  {
+    name: "a comment's replies",
+    selection: (harness) => ({ parentCommentId: harness.benchmarkParentCommentId }),
+    index: 'comments_replies_idx',
+  },
+  {
+    name: 'an account inbox',
+    selection: (harness) => ({ accountId: harness.socialAccountId }),
+    index: 'comments_social_account_idx',
+  },
+  { name: 'the unfiltered collection', selection: () => ({}), index: 'comments_workspace_idx' },
+];
+
+/**
+ * The full selection × direction matrix, because `order` is a client-chosen parameter on one
+ * collection (D27, D31) and every selection must be answered from its index in *both* directions.
+ *
+ * Asserting only the direction that happens to match each index's declared sort order is what let
+ * a real regression through: while `orderByFor` emitted an explicit `NULLS LAST` and the DDL
+ * declared `DESC NULLS LAST`, `order=asc` on the three `DESC` indexes — and `order=desc` on
+ * `comments_replies_idx`, which is the collection's *default* for a `parentCommentId` selection —
+ * planned as a `Seq Scan`/`Bitmap Heap Scan` plus a `Sort` of the whole selection. A pathkey in
+ * Postgres includes NULL placement, and the planner does not use a column's `NOT NULL` to match
+ * one: the backward scan of a `DESC NULLS LAST` index yields `ASC NULLS FIRST`, which no
+ * `ASC NULLS LAST` request can use. Each index now declares the placement Postgres already
+ * defaults to for its direction, and `orderByFor` emits no `NULLS` clause, so every index reads
+ * forwards and backwards.
+ */
+function registerPlanMatrixTests(getHarness: () => Harness): void {
+  const orders: readonly SortOrder[] = ['desc', 'asc'];
+  for (const planCase of PLAN_CASES) {
+    for (const order of orders) {
+      it(`lists ${planCase.name} in ${order} order via an index scan on ${planCase.index}`, async () => {
+        const harness = getHarness();
+        const plan = await explainQuery(
+          harness.database.drizzle,
+          explainPredicate(harness.workspaceId, planCase.selection(harness)),
+          explainOrderBy(order),
+        );
+        assertPlanUsesIndex(plan, planCase.index);
+      });
+    }
+  }
+}
+
 describe('seeded performance budget (T104, SC-005, SC-006)', () => {
   let harness: Harness;
 
@@ -518,4 +882,5 @@ describe('seeded performance budget (T104, SC-005, SC-006)', () => {
 
   registerReadBenchmarkTest(() => harness);
   registerWriteBenchmarkTest(() => harness);
+  registerPlanMatrixTests(() => harness);
 });

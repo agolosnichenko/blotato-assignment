@@ -218,10 +218,8 @@ name Blotato's existing public API uses, so API clients reuse settings). Errors 
 
 | Method & path | Purpose |
 |---|---|
-| `GET /v1/posts/:postId/comments` | A post's top-level comments, paginated |
-| `GET /v1/comments/:commentId/replies` | Direct replies to one comment |
+| `GET /v1/comments` | The workspace's comments, filtered by `postId`, `parentCommentId`, `accountId`, `platform` (repeatable), `topLevelOnly`, `isOwn`, `since`/`until` — filters intersect (D31) |
 | `GET /v1/comments/:commentId` | Poll a single comment (the async-write polling target) |
-| `GET /v1/accounts/:accountId/comments` | The account inbox — including comments on posts not published through this platform (D13) |
 | `POST /v1/posts/:postId/comments` | Start a top-level thread — `202`, not `201` |
 | `POST /v1/comments/:commentId/replies` | Reply to a comment — `202`, not `201` |
 | `POST /v1/posts/:postId/comments/sync` | Request an out-of-band refresh |
@@ -231,10 +229,91 @@ name Blotato's existing public API uses, so API clients reuse settings). Errors 
 | `GET /healthz`, `GET /readyz` | Liveness / readiness |
 | `GET /docs`, `GET /openapi.json` | Swagger UI and the generated document |
 
-Full request/response shapes, query parameters and the error-code catalogue are in
+`GET /v1/comments` (D31, `specs/002-flat-comment-listing`) replaces three former nested reads —
+`GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
+`GET /v1/accounts/:accountId/comments` — each reproduced as a filter on the one collection; the
+three addresses now answer `404`. `sync: { lastSyncedAt, activeJobId }` is present in the response
+iff `postId` is named.
+
+The repeatable `platform` query parameter is validated against the keys of
+`src/platforms/registry.ts`, never a hand-written literal union (Principle IV) — normalized to an
+array before validation, since Fastify's default query parser yields a `string` for one occurrence
+and a `string[]` for several. Verified during implementation (T024): `fastify-type-provider-zod@7`
+renders this `z.preprocess` step's **output** type into `openapi.json` — `{ type: "array", items:
+{ type: "string", enum: [...9 platforms] } }` — not the single-string input type the normalization
+starts from, so the published shape is one Swagger UI and a client's OpenAPI generator can actually
+exercise. No `.meta({ type: 'array', style: 'form', explode: true })` fallback was needed.
+
+Full request/response shapes and query parameters are in
 [`specs/001-multi-platform-comments/contracts/rest-api.md`](./specs/001-multi-platform-comments/contracts/rest-api.md)
 and the generated [`openapi.json`](./openapi.json). The README has a real, run-and-verified curl
 walkthrough of this API against a local instance.
+
+### 4.1 Why reads flattened and writes didn't (D31, FR-014)
+
+- **One filtered collection, not discoverability.** The reason `GET /v1/comments` exists is not
+  that a flat API is easier to browse — it is that "every new comment across every account in the
+  workspace" had no address at all under the three nested reads. A moderator watching the whole
+  workspace had to fan out to every post's route and stitch the pages together client-side; nothing
+  about that gap is about ergonomics, it's a missing capability (§10 below walks the history).
+- **Writes stay addressed to their target.** `POST /v1/posts/:postId/comments` and
+  `POST /v1/comments/:commentId/replies` were not flattened alongside the reads, and won't be:
+  commands address a specific thing they act on, queries filter a set they select from. Collapsing
+  a write into a body field (`POST /v1/comments { postId: ... }`) would trade a URL any HTTP tool
+  can retry idempotently and log unambiguously for one more field to validate, with no compensating
+  benefit — there is exactly one target, known before the call is made.
+- **`topLevelOnly` exists as a filter, not a separate route, so a post's page still reads as its
+  top level.** The removed `GET /v1/posts/:postId/comments` implicitly meant "this post's top-level
+  comments" — `?postId=…&topLevelOnly=true` reproduces that reading explicitly rather than losing
+  it. It is also what keeps the partial index `comments_post_top_level_idx` (defined `WHERE
+  parent_comment_id IS NULL`) reachable from the collection: without the flag the predicate has no
+  way to match the index's partial condition, and the planner falls back to a broader index or a
+  scan.
+- **The refresh command (`POST /v1/posts/:postId/comments/sync`) stays addressed to a post**, for
+  the same reason as the other writes: a sync walk always has exactly one target — the post whose
+  comments are being reconciled — so there is nothing to filter and nothing gained by moving it
+  under the collection.
+
+**NULL-placement ordering coupling (found and fixed twice during this feature).** An index's sort
+order and a query's `ORDER BY` are two places stating the same fact, and a Postgres pathkey includes
+NULL placement — not just the direction. The planner does not use a column's `NOT NULL` to match a
+pathkey either, so "`occurred_at` is never null" does not rescue a mismatch: the two must agree
+textually or the index stops supplying the ordering and the planner adds a sort node.
+
+The first round of this fix made the ordering clause name `NULLS LAST` to match indexes declared
+`DESC NULLS LAST`. That repaired `order=desc` and quietly broke the other half of the matrix: the
+backward scan of a `DESC NULLS LAST` index yields `ASC NULLS FIRST`, which cannot answer an
+`ASC NULLS LAST` request, so `order=asc` lost `comments_workspace_idx`,
+`comments_post_top_level_idx` and `comments_social_account_idx` — and, mirroring it,
+`comments_replies_idx` (declared `ASC`) could not answer the collection's own default `desc`. Each
+of those planned a full `Sort` of the selection, at 100,000 rows a `Seq Scan` or a two-index
+`BitmapAnd` underneath it.
+
+What holds now: **neither side names a placement.** Every listing index is declared with the
+placement Postgres already defaults to for its direction (`NULLS FIRST` for `DESC`, `NULLS LAST` for
+`ASC`, migration `0005`), and `orderByFor` emits a clause-free `ORDER BY`. Every index then reads
+forwards for its own direction and backwards for the other, which is what D27 claims and what makes
+`order` a free parameter rather than one cheap value and one expensive one.
+
+The lesson generalizes past this coupling: a test that asserts only the direction matching each
+index's declaration will pass on exactly the half of the matrix that works. The guard is the full
+selection × direction matrix in `benchmark.integration.test.ts`, which fails on four of its eight
+cases against either earlier version.
+
+**SC-005 measurement (`pnpm bench:listing`, quickstart.md V7).** Run on a MacBook Pro (Apple
+M-series, arm64, 12 cores, 24 GB RAM, macOS 26), quiet of anything of the author's — no test suite
+or other container workload of mine running during the measurement. The machine was not a
+cleanroom: several unrelated Docker containers from other, unrelated projects were already running
+throughout (idle, not started or stopped for this run). The unfiltered `GET /v1/comments` against a
+10,000-comment workspace measured p95 = 3.95ms, against a 100,000-comment workspace (ten times the
+history) p95 = 3.01ms — ratio 1.31, under the 1.5 pass line, with the *larger* history measuring
+*faster* than the smaller one, which is not a result background noise plausibly flips. Both figures
+are **in-process** (`app.inject`, no HTTP or network layer), not end-to-end against a deployed
+server. The harness detects a regression whose cost scales with the *queried workspace's own*
+history (the `NULLS LAST` mismatch above is exactly such a regression, reproduced in the script's
+own docstring at ratio ~4.5); it structurally cannot detect one scaling with the *total* table
+size, since both seeded workspaces share one table and a plain sequential scan costs the same
+regardless of which workspace is queried.
 
 ## 5. Flows
 
@@ -507,7 +586,7 @@ Read this before running anything against a production Meta App; it's also what 
 your reasoning, don't pretend the solution is finished" is really asking for.
 
 **Fully implemented and tested** (unit + integration, testcontainers Postgres + Redis): the read
-model (paginated top-level comments, replies, the account inbox, single-comment polling); the write
+model (one filtered, keyset-paginated collection plus single-comment polling); the write
 path (top-level comment + reply, idempotency, the full publish state machine including
 reconciliation and the webhook-echo race); sync (backfill, reconciliation, deletion inference, manual
 refresh with cooldown); the transactional outbox write path; tenancy (404-not-403 on every endpoint);
@@ -540,11 +619,17 @@ what they left open, decides what is claimed below.
   code shape: §17 requires the verifier to accept either configured secret, and it does.
 **Deployed** at https://api-production-6ef5.up.railway.app (D24 — `api` and `worker` from one
 Dockerfile, managed Postgres 18 and Redis 8.2, the migration as api's pre-deploy command). Both
-services reached `SUCCESS`, the migration applied, and the full SC-012 walkthrough runs there
+services reached `SUCCESS`, the migration applied, and the full SC-012 walkthrough ran there
 against real connected accounts: Instagram's sync ingested the post's three real comments, a reply
 published to Instagram (`18112975520094858`) and two to Bluesky, and the reply-depth check answered
 `422 REPLY_DEPTH_EXCEEDED` on Instagram while Bluesky accepted the same shape (D12). README has the
 step-by-step result.
+
+That run predates D31 and migration `0005`: the walkthrough's read step used
+`GET /v1/posts/:postId/comments`, which no longer exists, and the deployment has not been
+re-verified since. The writes, sync and depth results are unaffected — those addresses did not
+change — and the collection that replaced the read is covered by the integration suite, but the
+deployed build is behind this branch.
 
 Facebook now runs there too: its sync ingested the Page post's three comments, a reply published
 (`122093382351485339_936214829041858`) and the second level came back `422`. It took a detour worth
@@ -580,7 +665,7 @@ that reasoning is what's being evaluated, not parity (`task.md`). The difference
 | `/v2/comments` (documented, §2.1 of `spec.md`) | This service | Why |
 |---|---|---|
 | `POST` returns `201` | `POST` returns `202` | The row exists; the platform hasn't acted yet. `201` would claim more than is true (§7 above). |
-| One flat `GET /comments` with filters (`postId`, `parentCommentId`, `accountId`, `platform`, `since`, `until`) | Three separate reads: `GET /posts/:id/comments` (top-level), `GET /comments/:id/replies` (direct replies), `GET /accounts/:id/comments` (inbox) | One model serves depth-1 platforms and Bluesky's unbounded depth identically — a flat list with a `parentCommentId` filter either needs the client to reconstruct the tree itself or needs the server to answer "how deep do you want" implicitly. Splitting by access pattern also gives each its own index and its own default `order` (top-level/inbox newest-first, replies oldest-first — D27), which a single endpoint would have to encode as another parameter. |
+| One flat `GET /comments` with filters (`postId`, `parentCommentId`, `accountId`, `platform`, `since`, `until`) | Also one flat `GET /comments`, with the same filters plus `topLevelOnly`/`isOwn` | **No longer a difference (D31).** This service originally split by access pattern — `GET /posts/:id/comments`, `GET /comments/:id/replies`, `GET /accounts/:id/comments` — reasoning that each pattern wanted its own index and its own default `order`. That held until the product need turned out to be moderation across the whole workspace ("every new comment on every account"), which none of the three addresses could answer without a client stitching several paginated reads together itself. `GET /comments` replaces all three (D31); the per-pattern indexes did not go away — `comments_post_top_level_idx`, `comments_replies_idx` and `comments_social_account_idx` are still there and still what the planner picks for a narrow-enough filter (`comments_workspace_idx` covers the unfiltered case) — only the *addressing* converged with `/v2/comments`'s, for the same reason `/v2/comments` had it this way from the start: filters, not paths, are how a caller narrows a set. |
 | No ordering parameter; implicitly `createdAt desc` | Explicit `order=asc\|desc` on every list endpoint, encoded into the cursor | A client reading a conversation wants oldest-first; a client watching an inbox wants newest-first. `/v2/comments`'s single fixed order forces the client to either accept the wrong order or reverse client-side, which breaks under pagination. |
 | `createdAt` is the sort key | `occurredAt` is the sort key; `createdAt` still exists but means "when this row was written here" | An ingested comment's platform timestamp and an API-created comment's insertion time are not on the same clock. Sorting ingested and API-created comments by *our* insertion time would put a comment the platform says happened an hour ago ahead of one from five minutes ago, if the five-minute-old one was ingested first. |
 | Rate limits: 60/min reads, 30/min writes | 30/min reads, 5/min writes (demo default; a key's own `rate_limit_per_min` can lower, never raise, this) | This deployment is a reviewer demo against real accounts, not a production tier — tighter limits on a document/ecosystem the author doesn't want abused. The mechanism (per-key, not per-IP) is the same idea Blotato's limits imply: tie the budget to the credential. |

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertDescendingOccurredAt,
+  assertInboxHasNoSyncBlock,
   assertPlatformsCapabilities,
   commentPollOutcome,
   isReplyDepthExceededProblem,
@@ -78,6 +79,22 @@ describe('assertDescendingOccurredAt', () => {
     expect(() =>
       assertDescendingOccurredAt([{ occurredAt: '2026-09-13T10:00:00.000Z' }]),
     ).not.toThrow();
+  });
+});
+
+describe('assertInboxHasNoSyncBlock', () => {
+  it('passes when the body carries no sync key', () => {
+    expect(() => assertInboxHasNoSyncBlock({ items: [], nextCursor: null })).not.toThrow();
+  });
+
+  it('fails when the body carries a sync key', () => {
+    const body = { items: [], nextCursor: null, sync: { lastSyncedAt: null, activeJobId: null } };
+    expect(() => assertInboxHasNoSyncBlock(body)).toThrowError(/must not carry a sync block/u);
+  });
+
+  it('passes on a non-object body rather than throwing on the `in` check', () => {
+    expect(() => assertInboxHasNoSyncBlock(null)).not.toThrow();
+    expect(() => assertInboxHasNoSyncBlock('not an object')).not.toThrow();
   });
 });
 

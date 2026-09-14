@@ -2,10 +2,19 @@ import { z } from 'zod';
 
 export type SortOrder = 'asc' | 'desc';
 
+/**
+ * A decoded keyset position — where a page resumes, and nothing about which way it scans.
+ *
+ * The *encoded* cursor carries the direction it was minted under (D27) and {@link decodeCursor}
+ * rejects one replayed under the other, so by the time a caller holds a `KeysetCursor` the direction
+ * is already agreed. Keeping a second copy of it here would let a caller build
+ * `{ cursor: { order: 'asc', … }, order: 'desc' }` — a state with no correct behaviour, which the
+ * repository would resolve silently by preferring one of the two. There is one `order` in the
+ * repository's pagination argument, and this type does not hold a second.
+ */
 export interface KeysetCursor {
   readonly occurredAt: Date;
   readonly id: string;
-  readonly order: SortOrder;
 }
 
 export type CursorDecodeError = 'MALFORMED' | 'ORDER_MISMATCH';
@@ -27,16 +36,17 @@ const cursorPayloadSchema = z.object({
  * encryption, only a shape that `decodeCursor` can reject cleanly when tampered with.
  *
  * Args:
- *   cursor: The keyset position `(occurredAt, id)` plus the `order` it was minted under.
+ *   cursor: The keyset position `(occurredAt, id)` the next page resumes from.
+ *   order: The direction this page was scanned under, which `decodeCursor` will require back.
  *
  * Returns:
  *   A base64url string safe to hand back to clients as `nextCursor`/`prevCursor`.
  */
-export function encodeCursor(cursor: KeysetCursor): string {
+export function encodeCursor(cursor: KeysetCursor, order: SortOrder): string {
   const payload = {
     occurredAt: cursor.occurredAt.toISOString(),
     id: cursor.id,
-    order: cursor.order,
+    order,
   };
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 }
@@ -80,5 +90,5 @@ export function decodeCursor(raw: string, order: SortOrder): CursorDecodeResult 
     return { ok: false, error: 'ORDER_MISMATCH' };
   }
 
-  return { ok: true, cursor: { occurredAt, id: parsed.data.id, order: parsed.data.order } };
+  return { ok: true, cursor: { occurredAt, id: parsed.data.id } };
 }

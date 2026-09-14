@@ -39,7 +39,7 @@ export BSKY_POST=33333333-3333-4333-8333-333333333333
 The platform's own id for each is in the `platformPostId` field of every comment response, so you can
 always get from a row here back to the object on the platform.
 
-### Seven requests
+### Eight requests
 
 **1 — the capability registry.** Nine platforms, three of which support comments; the other six say
 why not. Every depth and text-limit check in the service reads this same table.
@@ -48,20 +48,28 @@ why not. Every depth and text-limit check in the service reads this same table.
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
 ```
 
-**2 — read a real thread.** Instagram comments that were ingested from the platform, newest first
-(D27), each with its `replyCount`:
+**2 — the workspace inbox, no identifier at all.** This is the request no route served before this
+feature: every comment across every connected account, newest first, in one page (FR-015). It is the
+first read a reviewer who holds nothing but an API key can make.
 
 ```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/posts/$IG_POST/comments"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments"
+```
+
+**3 — drill into one thread.** Same collection, filtered down to a post's top-level comments, newest
+first (D27), each with its `replyCount`:
+
+```bash
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?postId=$IG_POST&topLevelOnly=true"
 ```
 
 Take an `id` from `items[]` — call it `$COMMENT` — and read its replies (ascending, D27):
 
 ```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/$COMMENT/replies"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?parentCommentId=$COMMENT&order=asc"
 ```
 
-**3 — reply to it.** The write is asynchronous: `202`, not `201`, because the row exists but the
+**4 — reply to it.** The write is asynchronous: `202`, not `201`, because the row exists but the
 platform call has not happened yet (A11). Note the `Location` header.
 
 ```bash
@@ -71,7 +79,7 @@ curl -si -X POST "$BASE/v1/comments/$COMMENT/replies" \
   -d '{"text":"Reviewing the Blotato take-home 👋"}'
 ```
 
-**4 — poll the `Location`** until `status` goes `queued → processing → posted`. When it does,
+**5 — poll the `Location`** until `status` goes `queued → processing → posted`. When it does,
 `platformCommentId` is the real Instagram comment id — **open the Instagram post below and you will
 see this comment there.**
 
@@ -79,8 +87,8 @@ see this comment there.**
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/<id from Location>"
 ```
 
-**5 — the depth limit.** Instagram's `maxReplyDepth` is 1, so replying to a reply is refused up front
-rather than silently re-parented (D12). Use one of the `id`s from the replies list in step 2:
+**6 — the depth limit.** Instagram's `maxReplyDepth` is 1, so replying to a reply is refused up front
+rather than silently re-parented (D12). Use one of the `id`s from the replies list in step 3:
 
 ```bash
 curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/comments/$REPLY_ID/replies" \
@@ -92,27 +100,29 @@ curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/comments/$REPLY_ID/replies" \
 The identical request against a Bluesky reply (`maxReplyDepth: null`) is accepted and posts — same
 code path, different capability. That contrast is the point of the registry.
 
-**6 — refresh from the platform.** Enqueues a sync walk; poll the returned job id:
+**7 — refresh from the platform.** Enqueues a sync walk; poll the returned job id:
 
 ```bash
 curl -s -X POST "$BASE/v1/posts/$IG_POST/comments/sync" -H "blotato-api-key: $API_KEY"
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comment-sync-jobs/<jobId>"
 ```
 
-**7 — tenancy and auth.** No key is `401`; another workspace's post is `404`, never `403`, so a key
+**8 — tenancy and auth.** No key is `401`; another workspace's post is `404`, never `403`, so a key
 cannot use the status code to learn whether a resource exists (D20):
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' "$BASE/v1/posts/$IG_POST/comments"
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE/v1/comments?postId=$IG_POST"
 curl -s -o /dev/null -w '%{http_code}\n' -H "blotato-api-key: $API_KEY" \
-  "$BASE/v1/posts/00000000-0000-0000-0000-000000000000/comments"
+  "$BASE/v1/comments?postId=00000000-0000-0000-0000-000000000000"
 # 401
 # 404
 ```
 
-`pnpm smoke` runs exactly this sequence with assertions instead of eyeballs — see
+`pnpm smoke` runs steps 1-7 of this sequence with assertions instead of eyeballs — see
 [`scripts/smoke.ts`](./scripts/smoke.ts); it needs `SMOKE_BASE_URL`, `SMOKE_API_KEY`,
-`SMOKE_INSTAGRAM_POST_ID` and `SMOKE_BLUESKY_POST_ID`.
+`SMOKE_INSTAGRAM_POST_ID` and `SMOKE_BLUESKY_POST_ID`. Step 8 stays a manual check here: asserting it
+needs a second workspace's key, which the integration suite mints for itself
+(`tenancy.integration.test.ts`) and a script pointed at a deployment cannot.
 
 ### Where to check the results on the platform
 
@@ -127,12 +137,18 @@ Comments posted through the API appear under those posts within seconds of the s
 
 ### What was already verified there
 
-The whole SC-012 walkthrough has been run against that URL with those accounts, not fixtures:
+The whole SC-012 walkthrough has been run against that URL with those accounts, not fixtures.
+
+**This run predates D31**, which replaced the three nested reads with the filtered collection. Every
+write, sync and depth result below is unaffected — those addresses did not change — but the read step
+was made at the old address; its replacement is `GET /v1/comments?postId=…&topLevelOnly=true`, which
+the walkthrough above uses and the integration suite covers. The deployment has not been re-verified
+since.
 
 | step | what happened |
 | --- | --- |
 | `GET /v1/platforms` | nine platforms, three supporting comments |
-| `GET /v1/posts/:postId/comments` | the post's real Instagram comments, newest first, one with a reply |
+| `GET /v1/posts/:postId/comments` (now `GET /v1/comments?postId=…&topLevelOnly=true`) | the post's real Instagram comments, newest first, one with a reply |
 | `POST /v1/comments/:id/replies` | `202 queued` with a `Location` |
 | poll to `posted` | Instagram comment `18112975520094858` — posted on the platform |
 | reply to a reply (Instagram) | `422 REPLY_DEPTH_EXCEEDED`, `maxReplyDepth 1` (D12) |
@@ -179,10 +195,23 @@ curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
 ]}
 ```
 
-**2. Read a post's top-level comments:**
+**2. List the whole workspace inbox, no identifier at all** — the request no route served before
+this feature (FR-015):
 
 ```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/posts/$POST_ID/comments"
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments"
+```
+
+```json
+{"items":[],"nextCursor":null}
+```
+
+(No `sync` key here — it only appears when a post is named, see step 3.)
+
+**3. Read one post's top-level comments:**
+
+```bash
+curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?postId=$POST_ID&topLevelOnly=true"
 ```
 
 ```json
@@ -193,7 +222,7 @@ curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/posts/$POST_ID/comments"
 with history you'd see each comment's `replyCount`, `status`, and a `nextCursor` once there are more
 than `limit` rows.)
 
-**3. Post a top-level comment** (`202`, not `201` — the row exists, the platform call hasn't
+**4. Post a top-level comment** (`202`, not `201` — the row exists, the platform call hasn't
 happened yet; A11):
 
 ```bash
@@ -214,7 +243,7 @@ location: /v1/comments/01a097f5-3345-789b-8ef7-836a2980bcbe
  "text":"Thanks for reading!","status":"queued","error":null,"replyCount":0, ...}
 ```
 
-**4. Poll the `Location` header until the worker settles it:**
+**5. Poll the `Location` header until the worker settles it:**
 
 ```bash
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/01a097f5-3345-789b-8ef7-836a2980bcbe"
@@ -226,7 +255,7 @@ correctly gave up and the comment settled as `"status":"failed"` with
 `"error":{"code":"PLATFORM_REJECTED","message":"..."}` — the same conditional-`UPDATE` state machine
 either way (see [DESIGN.md](./DESIGN.md) "Never double-post").
 
-**5. Replay the same `Idempotency-Key` with a different body → `409`, same body → the original
+**6. Replay the same `Idempotency-Key` with a different body → `409`, same body → the original
 comment again, not a second one** (A12, FR-013):
 
 ```bash
@@ -237,7 +266,7 @@ curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/posts/$POST_ID/comments" \
 # 409
 ```
 
-**6. Reply past the depth limit on Instagram → `422 REPLY_DEPTH_EXCEEDED`** (D12; `maxReplyDepth` is
+**7. Reply past the depth limit on Instagram → `422 REPLY_DEPTH_EXCEEDED`** (D12; `maxReplyDepth` is
 1 for Instagram, so replying to a reply is rejected):
 
 ```bash
@@ -250,17 +279,17 @@ curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/comments/$IG_REPLY_ID/replies" \
 
 The same request against a Bluesky thread (`maxReplyDepth: null`) succeeds at any depth.
 
-**7. Cross-workspace access is `404`, never `403`** (D20, so a key can't distinguish "not yours"
+**8. Cross-workspace access is `404`, never `403`** (D20, so a key can't distinguish "not yours"
 from "doesn't exist"):
 
 ```bash
 curl -s -w '\n%{http_code}\n' -H "blotato-api-key: $API_KEY" \
-  "$BASE/v1/posts/00000000-0000-0000-0000-000000000000/comments"
-# {"...","code":"NOT_FOUND",...}
+  "$BASE/v1/comments?postId=00000000-0000-0000-0000-000000000000"
+# {"...","detail":"no post 00000000-0000-0000-0000-000000000000 in this workspace","code":"NOT_FOUND",...}
 # 404
 ```
 
-**8. Request a refresh** and poll the job:
+**9. Request a refresh** and poll the job:
 
 ```bash
 curl -s -X POST "$BASE/v1/posts/$POST_ID/comments/sync" -H "blotato-api-key: $API_KEY"
