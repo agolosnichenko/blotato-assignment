@@ -50,6 +50,13 @@
       "when": 1789334882682,
       "tag": "0006_silent_aaron_stack",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789418204118,
+      "tag": "0007_conscious_talon",
+      "breakpoints": true
     }
   ]
 }

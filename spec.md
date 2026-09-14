@@ -243,8 +243,12 @@ Constraints and indexes:
   (D31); this is what keeps its cost bound to the page rather than to the workspace's history.
 - `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` — a post's top-level page
   (`postId` + `topLevelOnly`).
-- `(parent_comment_id, occurred_at ASC, id ASC)` — a replies page (`parentCommentId`).
+- `(parent_comment_id, occurred_at ASC, id ASC) WHERE parent_comment_id IS NOT NULL` — a replies
+  page (`parentCommentId`).
 - `(social_account_id, occurred_at DESC, id DESC)` — one account's inbox (`accountId`).
+- `(social_account_id, platform_post_id)` — one post's rows for a complete walk's deletion inference.
+- `(root_comment_id) WHERE root_comment_id IS NOT NULL` — the foreign-key check when the purge
+  deletes a thread.
 - `(last_activity_at) WHERE parent_comment_id IS NULL` — retention purge.
 - `(status, last_attempt_started_at) WHERE status IN ('queued', 'processing')` — finding stuck rows.
 - List indexes serve both `order` values (D27): Postgres scans B-trees backwards. This holds only
@@ -257,10 +261,10 @@ Constraints and indexes:
 
 | Table | Purpose and columns |
 |-------|---------------------|
-| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`, `age_anchor_at` (§18). `UNIQUE (social_account_id, platform_post_id)` |
+| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`, `age_anchor_at` (§18). `UNIQUE (social_account_id, platform_post_id)`; `(next_sync_at) WHERE next_sync_at IS NOT NULL` for the scheduler; `(post_id) WHERE post_id IS NOT NULL` for a post's `sync` block and manual refresh |
 | `comment_sync_jobs` | API resource (D19): `id`, `workspace_id`, `target_id`, `trigger` (`manual` / `scheduled` / `post_published`), `status` (`queued` / `running` / `succeeded` / `failed`), `stats` (jsonb: fetched / inserted / updated / deleted), `error`, `created_at`, `started_at`, `finished_at`. At most one active job per target (partial unique index) |
-| `webhook_deliveries` | Raw deliveries: `id`, `provider` (`meta`), `payload` (jsonb), `received_at`, `processed_at`, `attempts`, `error`. Retention 7 days |
-| `outbox_events` | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` (jsonb), `created_at`, `published_at`, `attempts` |
+| `webhook_deliveries` | Raw deliveries: `id`, `provider` (`meta`), `payload` (jsonb), `received_at`, `processed_at`, `attempts`, `error`. Retention 7 days. `(received_at) WHERE processed_at IS NULL` for the sweeper |
+| `outbox_events` | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` (jsonb), `created_at`, `published_at`, `attempts`. `(created_at) WHERE published_at IS NULL` for the relay |
 | `contact_quota_usage` | `workspace_id`, `period` (`YYYY-MM`), `platform`, `contact_platform_id`, `comment_id`, `created_at`. PK `(workspace_id, period, platform, contact_platform_id)` |
 
 ## 6. REST API
@@ -978,6 +982,18 @@ before the code diverges from it, grouped below by what kind of change it is.
   which it must, since a leased target is no longer due. The lease is a floor, not a schedule: a walk
   that succeeds or deactivates overwrites it. One visible change: a walk that fails without
   deactivating used to be retried on the next tick and is now retried when the lease lapses.
+- **Polling selectors, two request-path reads and the thread-root reference are indexed (extends
+  §5.2, §5.3).** Every repeatable selector read its table in full — the scheduler
+  (`comment_sync_targets` by `next_sync_at`), the relay (unpublished `outbox_events`) and the
+  webhook-delivery sweeper (unprocessed `webhook_deliveries`) — and so did the listing's `sync` block
+  and a manual refresh, which resolve a target by `post_id`. A complete walk's deletion inference
+  scanned every comment of the account to find one post's. `comments.root_comment_id` is a foreign
+  key with no index, so each row the retention purge deleted made Postgres scan `comments` for rows
+  still referencing it: purge cost grew as deleted rows × table size. Each gets an index on its own
+  predicate (migration `0007`), partial where the predicate is. `(parent_comment_id, occurred_at,
+  id)` becomes partial on `parent_comment_id IS NOT NULL`, since no replies selection can match a
+  top-level row. The listing's filter-only combinations are unchanged: D31 makes a measurement the
+  trigger for those.
 - **A sync walk leaves unchanged rows unwritten (implements FR-017).** The shared upsert's
   `DO UPDATE` ran on every conflict, so a walk over a thread nothing had changed in rewrote every row
   — a fresh Bluesky post, walked every five minutes, left 288 dead row versions per comment per day.
