@@ -13,7 +13,7 @@
  */
 
 import { RedisContainer } from '@testcontainers/redis';
-import { eq } from 'drizzle-orm';
+import { eq, isNull } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -195,26 +195,67 @@ async function assertNotRelayedTwice(harness: Harness): Promise<void> {
   }
 }
 
+/**
+ * A backfill writes thousands of events at once; a pass that relays only one batch leaves the rest
+ * for later passes ten seconds apart (spec.md §18). One pass must drain everything it finds.
+ */
+async function assertDrainsEveryBatchInOnePass(harness: Harness): Promise<void> {
+  const backlog = 250;
+  await harness.database.drizzle.insert(outboxEvents).values(
+    Array.from({ length: backlog }, () => ({
+      workspaceId: generateId(),
+      type: 'comment.received',
+      aggregateId: generateId(),
+      payload: {},
+    })),
+  );
+  const { queue, connection } = buildQueue(harness.containers.redisUrl);
+  try {
+    // The shared Redis outlives each test, so earlier cases' jobs are cleared on both sides.
+    await queue.obliterate({ force: true });
+    const result = await relayOutboxBatch(harness.database, queue);
+
+    expect(result.relayed).toBe(backlog);
+    const unpublished = await harness.database.drizzle
+      .select({ id: outboxEvents.id })
+      .from(outboxEvents)
+      .where(isNull(outboxEvents.publishedAt));
+    expect(unpublished).toHaveLength(0);
+    expect(await queue.getWaitingCount()).toBe(backlog);
+  } finally {
+    await queue.obliterate({ force: true });
+    await queue.close();
+    connection.disconnect();
+  }
+}
+
 function registerRelayTests(getHarness: () => Harness): void {
   describe('relay', () => {
     it('does not relay an already-relayed row a second time, even if re-selected', async () => {
       await assertNotRelayedTwice(getHarness());
     });
+
+    it('drains a backlog larger than one batch in a single pass', async () => {
+      await assertDrainsEveryBatchInOnePass(getHarness());
+    });
   });
 }
 
 /**
- * A `Queue`-shaped double whose `add` rejects for one chosen job id and resolves for every other
- * — the minimal double needed for spec.md §18: no real BullMQ/Redis payload reliably
- * reproduces "a row BullMQ can never accept", so this stands in for that row directly instead.
+ * A `Queue`-shaped double that rejects one chosen job id and accepts every other — the minimal
+ * double needed for spec.md §18: no real BullMQ/Redis payload reliably reproduces "a row BullMQ
+ * can never accept", so this stands in for that row directly instead. `addBulk` rejects as a whole
+ * when the poisoned id is among its jobs, which is what forces the relay onto its row-by-row path.
  */
 function poisonedQueueDouble(poisonedEventId: string): Queue {
+  const reject = () =>
+    Promise.reject(new Error(`job rejected for poisoned event ${poisonedEventId}`));
   return {
     add(_name: string, _data: unknown, opts?: { jobId?: string }) {
-      if (opts?.jobId === poisonedEventId) {
-        return Promise.reject(new Error(`job rejected for poisoned event ${poisonedEventId}`));
-      }
-      return Promise.resolve();
+      return opts?.jobId === poisonedEventId ? reject() : Promise.resolve();
+    },
+    addBulk(jobs: readonly { opts?: { jobId?: string } }[]) {
+      return jobs.some((job) => job.opts?.jobId === poisonedEventId) ? reject() : Promise.resolve();
     },
   } as unknown as Queue;
 }

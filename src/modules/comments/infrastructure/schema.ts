@@ -135,14 +135,24 @@ export const comments = pgTable(
     index('comments_post_top_level_idx')
       .on(table.postId, table.occurredAt.desc().nullsFirst(), table.id.desc().nullsFirst())
       .where(sql`${table.parentCommentId} is null`),
-    // A replies page, both scan directions (FR-002, D27).
-    index('comments_replies_idx').on(table.parentCommentId, table.occurredAt.asc(), table.id.asc()),
+    // A replies page, both scan directions (FR-002, D27). Partial: no replies selection can match a
+    // top-level row, and without the predicate every top-level comment sits under the NULL key.
+    index('comments_replies_idx')
+      .on(table.parentCommentId, table.occurredAt.asc(), table.id.asc())
+      .where(sql`${table.parentCommentId} is not null`),
     // The account inbox (FR-008).
     index('comments_social_account_idx').on(
       table.socialAccountId,
       table.occurredAt.desc().nullsFirst(),
       table.id.desc().nullsFirst(),
     ),
+    // One post's rows, for a complete walk's deletion inference (FR-019).
+    index('comments_sync_post_idx').on(table.socialAccountId, table.platformPostId),
+    // The `root_comment_id` foreign key's own lookup: without it, every row the retention purge
+    // deletes makes Postgres scan the table for rows still naming it as their root.
+    index('comments_root_comment_idx')
+      .on(table.rootCommentId)
+      .where(sql`${table.rootCommentId} is not null`),
     // The retention purge selector (FR-029).
     index('comments_last_activity_idx')
       .on(table.lastActivityAt)
@@ -195,6 +205,14 @@ export const commentSyncTargets = pgTable(
       table.socialAccountId,
       table.platformPostId,
     ),
+    // The scheduler's due selection, which reads it in `next_sync_at` order (spec.md §18).
+    index('comment_sync_targets_due_idx')
+      .on(table.nextSyncAt)
+      .where(sql`${table.nextSyncAt} is not null`),
+    // A post's `sync` block on the listing, and a manual refresh.
+    index('comment_sync_targets_post_idx')
+      .on(table.postId)
+      .where(sql`${table.postId} is not null`),
   ],
 );
 
@@ -240,36 +258,54 @@ export const commentSyncJobs = pgTable(
 // webhook_deliveries — raw pushed payloads, stored before processing so nothing is lost
 // ---------------------------------------------------------------------------------------------
 
-export const webhookDeliveries = pgTable('webhook_deliveries', {
-  id: uuid('id').primaryKey().$defaultFn(generateId),
-  provider: text('provider').notNull(),
-  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
-  receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
-  processedAt: timestamp('processed_at', { withTimezone: true }),
-  attempts: integer('attempts').notNull().default(0),
-  error: text('error'),
-});
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    id: uuid('id').primaryKey().$defaultFn(generateId),
+    provider: text('provider').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+    error: text('error'),
+  },
+  (table) => [
+    // The delivery sweeper's selector — a healthy system has almost nothing in it.
+    index('webhook_deliveries_unprocessed_idx')
+      .on(table.receivedAt)
+      .where(sql`${table.processedAt} is null`),
+  ],
+);
 
 // ---------------------------------------------------------------------------------------------
 // outbox_events — written in the state-change transaction, relayed afterwards (D9)
 // ---------------------------------------------------------------------------------------------
 
-export const outboxEvents = pgTable('outbox_events', {
-  id: uuid('id').primaryKey().$defaultFn(generateId),
+export const outboxEvents = pgTable(
+  'outbox_events',
+  {
+    id: uuid('id').primaryKey().$defaultFn(generateId),
 
-  // External reference — no FK (D8, D29).
-  workspaceId: uuid('workspace_id').notNull(),
+    // External reference — no FK (D8, D29).
+    workspaceId: uuid('workspace_id').notNull(),
 
-  type: text('type').notNull(),
-  // The entity this event is about; may name a comment or another aggregate this module owns —
-  // no FK, since which table it points to depends on `type`.
-  aggregateId: uuid('aggregate_id').notNull(),
-  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    type: text('type').notNull(),
+    // The entity this event is about; may name a comment or another aggregate this module owns —
+    // no FK, since which table it points to depends on `type`.
+    aggregateId: uuid('aggregate_id').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
 
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  publishedAt: timestamp('published_at', { withTimezone: true }),
-  attempts: integer('attempts').notNull().default(0),
-});
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+  },
+  (table) => [
+    // The relay's oldest-first selection of what it still owes (D9).
+    index('outbox_events_unpublished_idx')
+      .on(table.createdAt)
+      .where(sql`${table.publishedAt} is null`),
+  ],
+);
 
 // ---------------------------------------------------------------------------------------------
 // contact_quota_usage — one row per person per month per platform (D16, A8)

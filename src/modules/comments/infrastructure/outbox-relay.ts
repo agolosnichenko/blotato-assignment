@@ -7,16 +7,21 @@
  * loses no data (FR-033, SC-011) — a row that fails to publish simply stays unpublished
  * and is retried on the next pass.
  *
- * spec.md §18: each row publishes and stamps inside its *own* transaction, not one
- * shared transaction for the whole batch. A row BullMQ can never accept — a payload it rejects,
- * a shape Redis refuses as part of a key — used to sit forever at the front of the oldest-100
- * selection and abort every pass behind it, since one `Promise.all` rejection rolled back the
- * single transaction the whole batch ran inside. Isolating each row means a poison row's failure
- * can no longer take its successors down with it; `outbox_events.attempts` is incremented so the
- * row is visible (and eventually actionable) instead of silently retried forever in the same spot.
+ * spec.md §18: a pass publishes the oldest batch in bulk — one locked `SELECT`, one `addBulk`, one
+ * stamping `UPDATE` — and keeps taking batches while they come back full, so a backfill's
+ * thousands of events leave in one pass rather than a hundred every ten seconds.
+ *
+ * The bulk path alone would bring back the failure the row-by-row path was built for: a row BullMQ
+ * can never accept — a payload it rejects, a shape Redis refuses as part of a key — sits forever at
+ * the front of the oldest-first selection, and a batch that includes it rolls back on every pass.
+ * So a failed batch is retried row by row, each row publishing and stamping inside its *own*
+ * transaction: a poison row's failure can no longer take its successors down with it, and
+ * `outbox_events.attempts` is incremented so the row is visible (and eventually actionable) instead
+ * of silently retried forever in the same spot. The pass then stops, so a poison row cannot make
+ * it spin.
  */
 
-import { eq, isNull, sql } from 'drizzle-orm';
+import { eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Queue } from 'bullmq';
 import type { Database } from '#src/shared/db.ts';
 import { outboxEvents } from '#src/modules/comments/infrastructure/schema.ts';
@@ -41,6 +46,56 @@ export interface OutboxRelayResult {
   readonly relayed: number;
 }
 
+type OutboxRow = typeof outboxEvents.$inferSelect;
+
+/** The domain event envelope (contracts/domain-events.md) one outbox row is published as. */
+function envelopeFor(row: OutboxRow) {
+  return {
+    name: row.type,
+    data: {
+      id: row.id,
+      type: row.type,
+      version: 1,
+      occurredAt: row.createdAt.toISOString(),
+      workspaceId: row.workspaceId,
+      data: row.payload,
+    },
+    opts: { jobId: row.id },
+  };
+}
+
+/**
+ * Publishes and stamps the oldest unpublished batch in one transaction, returning how many rows it
+ * published. Throws — rolling the whole batch back, stamps included — if the queue refuses any of
+ * it; the caller then retries that batch row by row.
+ */
+function publishBatch(db: Database, domainEventsQueue: Queue): Promise<number> {
+  return db.drizzle.transaction(async (tx) => {
+    const rows = await tx
+      .select()
+      .from(outboxEvents)
+      .where(isNull(outboxEvents.publishedAt))
+      .orderBy(outboxEvents.createdAt)
+      .limit(BATCH_SIZE)
+      .for('update', { skipLocked: true });
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    await domainEventsQueue.addBulk(rows.map((row) => envelopeFor(row)));
+    await tx
+      .update(outboxEvents)
+      .set({ publishedAt: sql`now()` })
+      .where(
+        inArray(
+          outboxEvents.id,
+          rows.map((row) => row.id),
+        ),
+      );
+    return rows.length;
+  });
+}
+
 /**
  * Publishes and stamps one row inside its own transaction, re-reading it under `FOR UPDATE SKIP
  * LOCKED` first — the lock now lives at the row level rather than on the batch `SELECT`, since
@@ -62,18 +117,8 @@ function publishRow(db: Database, domainEventsQueue: Queue, rowId: string): Prom
       return false;
     }
 
-    await domainEventsQueue.add(
-      row.type,
-      {
-        id: row.id,
-        type: row.type,
-        version: 1,
-        occurredAt: row.createdAt.toISOString(),
-        workspaceId: row.workspaceId,
-        data: row.payload,
-      },
-      { jobId: row.id },
-    );
+    const envelope = envelopeFor(row);
+    await domainEventsQueue.add(envelope.name, envelope.data, envelope.opts);
 
     await tx
       .update(outboxEvents)
@@ -116,39 +161,17 @@ function reportFailure(logger: RelayLogger, rowId: string, attempts: number, err
   logger.warn(details, 'outbox relay: event failed to publish, will retry on the next pass');
 }
 
-/**
- * Relays one batch of unpublished outbox rows.
- *
- * Single-runner assumption: each row's `publishRow` call takes its own `FOR UPDATE SKIP LOCKED`
- * lock, so a second concurrent runner is safe from a data-corruption standpoint — but SKIP LOCKED
- * means it would simply claim whatever this pass has not yet reached, doubling delivery beyond
- * what the at-least-once contract already allows. The caller — the `scheduler` queue processor in
- * `src/app/worker.ts` (plan.md §9.2) — MUST run this at concurrency 1.
- *
- * Safe to re-run after a crash: a row's publish and stamp commit together. If the process dies
- * after `domainEventsQueue.add` but before that row's transaction commits, the row is still
- * unpublished when it rolls back, so the next pass picks it up and republishes it — consumers
- * de-duplicate on the event id, which is also the BullMQ `jobId` (R-06, A15), and BullMQ itself is
- * a no-op when a job with that id already exists.
- *
- * A row that fails to publish no longer aborts the rest of the batch (I5): its `attempts` column
- * is incremented and the loop moves on. If every row in the batch failed, the whole call still
- * rejects — with an `AggregateError` collecting every row's failure — so a total outage (the case
- * `outbox.integration.test.ts`'s dropped-queue test exercises) is reported exactly as before: the
- * caller sees a failed pass and nothing in this batch is mistaken for relayed.
- *
- * Args:
- *   db: The database handle to select and stamp rows on.
- *   domainEventsQueue: The BullMQ queue to publish envelopes to.
- *
- * Returns:
- *   The number of rows relayed in this pass.
- */
-export async function relayOutboxBatch(
+interface RowByRowResult {
+  readonly relayed: number;
+  readonly failures: readonly unknown[];
+}
+
+/** The isolation path for a batch that failed in bulk: every row in its own transaction (I5). */
+async function relayRowByRow(
   db: Database,
   domainEventsQueue: Queue,
-  logger: RelayLogger = SILENT_RELAY_LOGGER,
-): Promise<OutboxRelayResult> {
+  logger: RelayLogger,
+): Promise<RowByRowResult> {
   const rows = await db.drizzle
     .select({ id: outboxEvents.id })
     .from(outboxEvents)
@@ -160,9 +183,8 @@ export async function relayOutboxBatch(
   const failures: unknown[] = [];
   for (const row of rows) {
     try {
-      // Each row's publish is independent and now runs in its own transaction (see the module
-      // docstring) — genuinely sequential only in the sense that a poison row must not be allowed
-      // to race its cleanup against its successors' publishes; not a candidate for Promise.all.
+      // Sequential on purpose: a poison row must not race its cleanup against its successors'
+      // publishes — not a candidate for Promise.all.
       // oxlint-disable-next-line no-await-in-loop
       const published = await publishRow(db, domainEventsQueue, row.id);
       if (published) {
@@ -175,10 +197,66 @@ export async function relayOutboxBatch(
       reportFailure(logger, row.id, attempts, error);
     }
   }
+  return { relayed, failures };
+}
 
-  if (relayed === 0 && failures.length > 0) {
-    throw new AggregateError(failures, 'outbox relay: every row in this batch failed to publish');
-  }
+/**
+ * Relays every unpublished outbox row it can reach in one pass, batch by batch.
+ *
+ * Single-runner assumption: every batch and every row takes its own `FOR UPDATE SKIP LOCKED` lock,
+ * so a second concurrent runner is safe from a data-corruption standpoint — but SKIP LOCKED means
+ * it would simply claim whatever this pass has not yet reached, doubling delivery beyond what the
+ * at-least-once contract already allows. The caller — the `scheduler` queue processor in
+ * `src/app/worker.ts` (plan.md §9.2) — MUST run this at concurrency 1.
+ *
+ * Safe to re-run after a crash: a batch's (or a row's) publish and stamp commit together. If the
+ * process dies after the queue accepted the jobs but before the transaction commits, the rows are
+ * still unpublished when it rolls back, so the next pass picks them up and republishes them —
+ * consumers de-duplicate on the event id, which is also the BullMQ `jobId` (R-06, A15), and BullMQ
+ * itself is a no-op when a job with that id already exists.
+ *
+ * A batch that fails in bulk is retried row by row (I5), where a failing row has its `attempts`
+ * incremented and the loop moves on; the pass ends there. If that pass relayed nothing and at least
+ * one row failed, the whole call still rejects — with an `AggregateError` collecting every row's
+ * failure — so a total outage (the case `outbox.integration.test.ts`'s dropped-queue test
+ * exercises) is reported exactly as before: the caller sees a failed pass and nothing is mistaken
+ * for relayed.
+ *
+ * Args:
+ *   db: The database handle to select and stamp rows on.
+ *   domainEventsQueue: The BullMQ queue to publish envelopes to.
+ *   logger: Where row-level failures are reported.
+ *
+ * Returns:
+ *   The number of rows relayed in this pass.
+ */
+export async function relayOutboxBatch(
+  db: Database,
+  domainEventsQueue: Queue,
+  logger: RelayLogger = SILENT_RELAY_LOGGER,
+): Promise<OutboxRelayResult> {
+  let relayed = 0;
+  let published: number;
+  do {
+    try {
+      // Each batch must commit before the next is selected, or the next would select it again.
+      // oxlint-disable-next-line no-await-in-loop
+      published = await publishBatch(db, domainEventsQueue);
+    } catch {
+      // The batch rolled back as a whole; the row-by-row pass below reports each row's own error.
+      // oxlint-disable-next-line no-await-in-loop
+      const fallback = await relayRowByRow(db, domainEventsQueue, logger);
+      relayed += fallback.relayed;
+      if (relayed === 0 && fallback.failures.length > 0) {
+        throw new AggregateError(
+          fallback.failures,
+          'outbox relay: every row in this batch failed to publish',
+        );
+      }
+      return { relayed };
+    }
+    relayed += published;
+  } while (published === BATCH_SIZE);
 
   return { relayed };
 }

@@ -83,7 +83,8 @@ async function findStuckSyncJobs(
  * A `running` row cannot simply be re-enqueued: `markJobRunning`'s `WHERE status = 'queued'` would
  * match nothing and the new job would exit immediately, leaving the row — and the partial unique
  * index built on it — exactly as stuck. Finalising it as `failed` is what releases the index, and
- * the next scheduler tick creates a fresh job because `next_sync_at` was never advanced.
+ * the first scheduler tick after the target's lease lapses creates a fresh job, because the
+ * abandoned walk never replaced that lease with a real `next_sync_at`.
  *
  * The `WHERE status = 'running'` predicate means a runner that is alive after all, and finishes
  * between this sweep's select and its update, keeps its own result: this update affects no row.

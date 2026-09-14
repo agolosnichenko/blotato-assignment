@@ -6,8 +6,8 @@
  * docstring for why that count, not just the row count, is the invariant).
  *
  * `upsert` does three things, in order, per call:
- *   1. For a post this service did not publish (`target.postId === null`), ensures a
- *      `comment_sync_target` exists (FR-018) — the only other entry point besides the
+ *   1. For a webhook delivery on a post this service did not publish (`target.postId === null`),
+ *      ensures a `comment_sync_target` exists (FR-018) — the only other entry point besides the
  *      `PostPublished` port, per `sync-target-repository.ts`'s module docstring.
  *   2. Resolves where the comment attaches: a top-level comment attaches at depth 0 with no
  *      root; a reply whose parent is already a local row reads its placement directly; a reply
@@ -17,9 +17,9 @@
  *   3. Completes a thin payload's `text` via `adapter.fetchComment` (A18) before the `INSERT ...
  *      ON CONFLICT DO UPDATE` ever runs, and the `DO UPDATE SET text = coalesce(...)` clause
  *      keeps that promise even if completion itself comes up empty — an absent field is never
- *      written over stored text. That same `DO UPDATE` never restores `text`/author fields on a
- *      row already `deleted` (FR-030, §18) — a redelivery or a sync walk racing a platform-side
- *      removal must leave a privacy deletion's nulling permanent, not partially undo it.
+ *      written over stored text. That same `DO UPDATE` never touches a row already `deleted`
+ *      (FR-030, §18) — a redelivery or a sync walk racing a platform-side removal must leave a
+ *      privacy deletion's nulling permanent, not partially undo it — nor a row nothing changed in.
  *
  * `is_own` (T095, FR-023, A2) is set from author identity, not from how a row entered the
  * system: `upsert` compares `authorPlatformId` against the connected account's own platform id
@@ -314,13 +314,6 @@ const ROW_RETURNING = {
   wasNew: sql<boolean>`(xmax = 0)`,
 } as const;
 
-/**
- * `INSERT ... ON CONFLICT (social_account_id, platform_comment_id) DO UPDATE` — the one upsert
- * target push and refresh share (FR-017). `xmax = 0` on the returned row is the standard Postgres
- * tell for "this statement inserted, not updated" (the row has never been touched by another
- * command), which is how {@link upsertRow} decides whether to run the new-comment side effects
- * without a separate existence check racing the insert itself.
- */
 /** The `INSERT` values for one row — a brand-new comment, should the conflict target miss. */
 function insertValuesFor(target: IngestTarget, ingestionSource: IngestionSource, input: RowInput) {
   return {
@@ -347,20 +340,40 @@ function insertValuesFor(target: IngestTarget, ingestionSource: IngestionSource,
   };
 }
 
+/**
+ * The `DO UPDATE` guard: a row is rewritten only when it is live and something it stores differs.
+ *
+ * FR-030: a `deleted` row's text and author fields were nulled for privacy, and that nulling must
+ * be permanent. Meta redelivers a webhook for up to 36h, and a sync walk can still read a comment's
+ * old content from the platform inside that same window (the delete event and the platform's own
+ * removal do not land atomically) — either path re-running this upsert on an already-`deleted` row
+ * must leave it exactly as the delete left it, not restore what it erased.
+ *
+ * spec.md §18: a walk re-reads every comment on every pass, so without the second half of this
+ * guard each pass rewrote every row — a dead row version per comment per walk. `excluded.text` is
+ * `null` for a thin payload, which is "unknown", never a change.
+ */
+const REWRITE_WHEN = sql`${comments.status} != 'deleted' and (
+  (excluded.text is not null and excluded.text is distinct from ${comments.text})
+  or excluded.author_username is distinct from ${comments.authorUsername}
+  or excluded.author_display_name is distinct from ${comments.authorDisplayName}
+  or excluded.platform_meta is distinct from ${comments.platformMeta}
+)`;
+
+/**
+ * `INSERT ... ON CONFLICT (social_account_id, platform_comment_id) DO UPDATE` — the one upsert
+ * target push and refresh share (FR-017). `xmax = 0` on the returned row is the standard Postgres
+ * tell for "this statement inserted, not updated" (the row has never been touched by another
+ * command), which is how {@link upsertRow} decides whether to run the new-comment side effects
+ * without a separate existence check racing the insert itself. A conflict the update guard skips
+ * returns no row at all, and it reads that row back as not new.
+ */
 async function insertOrUpdateRow(
   tx: OutboxTransaction,
   target: IngestTarget,
   ingestionSource: IngestionSource,
   input: RowInput,
 ): Promise<{ id: string; wasNew: boolean }> {
-  const insertedText = input.resolvedText ?? null;
-  // FR-030: a `deleted` row's text and author fields were nulled for privacy, and that nulling
-  // must be permanent. Meta redelivers a webhook for up to 36h, and a sync walk can still read a
-  // comment's old content from the platform inside that same window (the delete event and the
-  // platform's own removal do not land atomically) — either path re-running this upsert on an
-  // already-`deleted` row must leave it exactly as the delete left it, not restore what it erased.
-  const liveRow = sql`${comments.status} != 'deleted'`;
-
   const [row] = await tx
     .insert(comments)
     .values(insertValuesFor(target, ingestionSource, input))
@@ -368,22 +381,30 @@ async function insertOrUpdateRow(
       target: [comments.socialAccountId, comments.platformCommentId],
       targetWhere: sql`${comments.platformCommentId} is not null`,
       set: {
-        text: sql`CASE WHEN ${liveRow} THEN coalesce(${insertedText}, ${comments.text}) ELSE ${comments.text} END`,
-        authorUsername: sql`CASE WHEN ${liveRow} THEN ${input.authorUsername} ELSE ${comments.authorUsername} END`,
-        authorDisplayName: sql`CASE WHEN ${liveRow} THEN ${input.authorDisplayName} ELSE ${comments.authorDisplayName} END`,
-        // Not guarded by `liveRow` like the three fields above — FR-030 is about PII-bearing
-        // fields, and `platformMeta` carries none: for Bluesky it is only the record `cid`, a
-        // non-identifying pointer, so there is nothing here for a redelivery to revive.
-        platformMeta: input.platformMeta,
+        text: sql`coalesce(excluded.text, ${comments.text})`,
+        authorUsername: sql`excluded.author_username`,
+        authorDisplayName: sql`excluded.author_display_name`,
+        platformMeta: sql`excluded.platform_meta`,
         updatedAt: new Date(),
       },
+      setWhere: REWRITE_WHEN,
     })
     .returning(ROW_RETURNING);
 
-  if (row === undefined) {
-    throw new Error('ingest-comments: upsert returned no row');
+  if (row !== undefined) {
+    return row;
   }
-  return row;
+
+  // The conflict matched a row the guard left untouched, so `RETURNING` had nothing to return.
+  // A fresh statement sees that row even if a concurrent insert created it: `ON CONFLICT` waited
+  // for that insert to commit before evaluating the guard.
+  const existing = await findLocalRow(tx, target.socialAccountId, input.platformCommentId);
+  if (existing === null) {
+    throw new Error(
+      `ingest-comments: upsert of ${input.platformCommentId} conflicted but no row was found`,
+    );
+  }
+  return { id: existing.id, wasNew: false };
 }
 
 /**
@@ -500,12 +521,18 @@ async function runUpsert(tx: OutboxTransaction, input: UpsertInput): Promise<Ups
   return { commentId: id, wasNew };
 }
 
-/** FR-018: the first comment ever seen on a post this service did not publish tracks it. */
+/**
+ * FR-018: the first comment ever seen on a post this service did not publish tracks it.
+ *
+ * Only a webhook delivery can be that first sight: a sync walk runs *on* a target, so for a walk
+ * the insert-and-read-back here could never create anything and cost two statements per comment
+ * (spec.md §18).
+ */
 async function ensureSyncTargetIfExternal(
   deps: IngestCommentsDeps,
   input: UpsertInput,
 ): Promise<void> {
-  if (input.target.postId !== null) {
+  if (input.target.postId !== null || input.ingestionSource !== 'webhook') {
     return;
   }
   await deps.syncTargetRepository.ensureTarget({

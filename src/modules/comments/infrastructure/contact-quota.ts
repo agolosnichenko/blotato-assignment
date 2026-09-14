@@ -38,9 +38,8 @@
  * releasing a still-live reservation that a *different* comment for the same person depends on.
  */
 
-import { and, eq } from 'drizzle-orm';
+import { and, count, eq, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { sql } from 'drizzle-orm';
 import type { OutboxTransaction } from '#src/modules/comments/infrastructure/outbox.ts';
 import { contactQuotaUsage } from '#src/modules/comments/infrastructure/schema.ts';
 import type { Workspaces } from '#src/modules/platform-core/ports.ts';
@@ -87,13 +86,16 @@ async function countReservedThisPeriod(
   workspaceId: WorkspaceId,
   period: string,
 ): Promise<number> {
-  const rows = await tx
-    .select({ contactPlatformId: contactQuotaUsage.contactPlatformId })
+  // Counted in Postgres: the primary key's `(workspace_id, period)` prefix answers it, and a
+  // workspace near its limit would otherwise ship every contact it reached this month to the
+  // process on each reply, while holding the advisory lock.
+  const [row] = await tx
+    .select({ reserved: count() })
     .from(contactQuotaUsage)
     .where(
       and(eq(contactQuotaUsage.workspaceId, workspaceId), eq(contactQuotaUsage.period, period)),
     );
-  return rows.length;
+  return row?.reserved ?? 0;
 }
 
 /**

@@ -243,8 +243,12 @@ Constraints and indexes:
   (D31); this is what keeps its cost bound to the page rather than to the workspace's history.
 - `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` — a post's top-level page
   (`postId` + `topLevelOnly`).
-- `(parent_comment_id, occurred_at ASC, id ASC)` — a replies page (`parentCommentId`).
+- `(parent_comment_id, occurred_at ASC, id ASC) WHERE parent_comment_id IS NOT NULL` — a replies
+  page (`parentCommentId`).
 - `(social_account_id, occurred_at DESC, id DESC)` — one account's inbox (`accountId`).
+- `(social_account_id, platform_post_id)` — one post's rows for a complete walk's deletion inference.
+- `(root_comment_id) WHERE root_comment_id IS NOT NULL` — the foreign-key check when the purge
+  deletes a thread.
 - `(last_activity_at) WHERE parent_comment_id IS NULL` — retention purge.
 - `(status, last_attempt_started_at) WHERE status IN ('queued', 'processing')` — finding stuck rows.
 - List indexes serve both `order` values (D27): Postgres scans B-trees backwards. This holds only
@@ -257,10 +261,10 @@ Constraints and indexes:
 
 | Table | Purpose and columns |
 |-------|---------------------|
-| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`, `age_anchor_at` (§18). `UNIQUE (social_account_id, platform_post_id)` |
+| `comment_sync_targets` | Per-post sync schedule: `id`, `workspace_id`, `social_account_id`, `post_id` (null for external posts), `platform_post_id`, `last_synced_at`, `next_sync_at` (null = inactive, §7.3), `last_error`, `manual_cooldown_until`, `age_anchor_at` (§18). `UNIQUE (social_account_id, platform_post_id)`; `(next_sync_at) WHERE next_sync_at IS NOT NULL` for the scheduler; `(post_id) WHERE post_id IS NOT NULL` for a post's `sync` block and manual refresh |
 | `comment_sync_jobs` | API resource (D19): `id`, `workspace_id`, `target_id`, `trigger` (`manual` / `scheduled` / `post_published`), `status` (`queued` / `running` / `succeeded` / `failed`), `stats` (jsonb: fetched / inserted / updated / deleted), `error`, `created_at`, `started_at`, `finished_at`. At most one active job per target (partial unique index) |
-| `webhook_deliveries` | Raw deliveries: `id`, `provider` (`meta`), `payload` (jsonb), `received_at`, `processed_at`, `attempts`, `error`. Retention 7 days |
-| `outbox_events` | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` (jsonb), `created_at`, `published_at`, `attempts` |
+| `webhook_deliveries` | Raw deliveries: `id`, `provider` (`meta`), `payload` (jsonb), `received_at`, `processed_at`, `attempts`, `error`. Retention 7 days. `(received_at) WHERE processed_at IS NULL` for the sweeper |
+| `outbox_events` | `id`, `workspace_id`, `type`, `aggregate_id`, `payload` (jsonb), `created_at`, `published_at`, `attempts`. `(created_at) WHERE published_at IS NULL` for the relay |
 | `contact_quota_usage` | `workspace_id`, `period` (`YYYY-MM`), `platform`, `contact_platform_id`, `comment_id`, `created_at`. PK `(workspace_id, period, platform, contact_platform_id)` |
 
 ## 6. REST API
@@ -954,15 +958,49 @@ before the code diverges from it, grouped below by what kind of change it is.
   and logs the count, so an operator sees a number rather than a silent loss. Postgres keeps the
   authoritative record: `outbox_events` rows are marked published and retained under the normal
   purge, so a future consumer is backfilled from the table rather than from Redis.
-- **The outbox relay publishes one row per transaction (extends D9).** Relaying a whole batch inside
-  one transaction means a single row BullMQ will never accept rolls the batch back on every pass —
-  and it sits at the front of the oldest-100 selection, blocking every event behind it indefinitely,
-  so one poison event stops domain-event delivery for the whole service. Each row therefore publishes
-  and stamps in its own transaction under `FOR UPDATE SKIP LOCKED`; a failing row increments
-  `attempts` and is logged. The row is never deleted — the outbox is the only record of the event —
-  but past ten attempts the log level rises to `error`, which makes a stuck event an incident rather
-  than an invisible retry. A pass in which *every* row failed still rejects, so a total outage is
-  still reported as a failed pass.
+- **The outbox relay publishes in bulk and isolates a failing batch row by row (extends D9).**
+  Relaying a whole batch inside one transaction, with nothing else, means a single row BullMQ will
+  never accept rolls the batch back on every pass — and it sits at the front of the oldest-100
+  selection, blocking every event behind it indefinitely. Publishing one row per transaction fixes
+  that but costs five round trips an event and caps delivery at one batch per ten-second pass: a
+  backfill's few thousand `comment.received` events arrived minutes late. A pass therefore first
+  locks the oldest batch (`FOR UPDATE SKIP LOCKED`), publishes it with one `addBulk` and stamps it
+  with one `UPDATE`; only if that fails does it fall back to one row per transaction, where a failing
+  row increments `attempts` and is logged. The row is never deleted — the outbox is the only record
+  of the event — but past ten attempts the log level rises to `error`, which makes a stuck event an
+  incident rather than an invisible retry. A pass keeps taking batches while they come back full and
+  clean, and stops at the first short or failing one, so a poison row cannot make it spin. A pass in
+  which *every* row failed still rejects, so a total outage is still reported as a failed pass.
+- **The scheduler leases the targets it selects (amends §7.3).** The tick selected
+  `next_sync_at ≤ now()` with a `LIMIT` and no order, and `next_sync_at` moved only when a walk
+  finished — so a target whose job was still queued or running stayed due. With more such targets
+  than one batch, every tick could re-select the same ones, each losing to its own active job on the
+  partial unique index, and never reach the rest: those posts stopped syncing with nothing logged.
+  The tick now takes the oldest-due batch and moves each target's `next_sync_at` five minutes ahead
+  in the same statement (`UPDATE … WHERE id IN (SELECT … ORDER BY next_sync_at FOR UPDATE SKIP
+  LOCKED)`), inserts the jobs and enqueues them in bulk, and repeats until a batch comes back short —
+  which it must, since a leased target is no longer due. The lease is a floor, not a schedule: a walk
+  that succeeds or deactivates overwrites it. One visible change: a walk that fails without
+  deactivating used to be retried on the next tick and is now retried when the lease lapses.
+- **Polling selectors, two request-path reads and the thread-root reference are indexed (extends
+  §5.2, §5.3).** Every repeatable selector read its table in full — the scheduler
+  (`comment_sync_targets` by `next_sync_at`), the relay (unpublished `outbox_events`) and the
+  webhook-delivery sweeper (unprocessed `webhook_deliveries`) — and so did the listing's `sync` block
+  and a manual refresh, which resolve a target by `post_id`. A complete walk's deletion inference
+  scanned every comment of the account to find one post's. `comments.root_comment_id` is a foreign
+  key with no index, so each row the retention purge deleted made Postgres scan `comments` for rows
+  still referencing it: purge cost grew as deleted rows × table size. Each gets an index on its own
+  predicate (migration `0007`), partial where the predicate is. `(parent_comment_id, occurred_at,
+  id)` becomes partial on `parent_comment_id IS NOT NULL`, since no replies selection can match a
+  top-level row. The listing's filter-only combinations are unchanged: D31 makes a measurement the
+  trigger for those.
+- **A sync walk leaves unchanged rows unwritten (implements FR-017).** The shared upsert's
+  `DO UPDATE` ran on every conflict, so a walk over a thread nothing had changed in rewrote every row
+  — a fresh Bluesky post, walked every five minutes, left 288 dead row versions per comment per day.
+  The update now applies only to a row that is not `deleted` and whose text (when supplied), author
+  name or `platform_meta` actually differ; otherwise the row is read back untouched, so `updated_at`
+  means "last changed". Separately, `ensureTarget` runs only for webhook ingestion: a walk runs *on*
+  a target, so the insert-and-read-back it made per comment could never create anything.
 - **The stuck-work sweeper also recovers `processing` (extends §7.1 step 4).** Step 4 described the
   sweeper as re-enqueueing `queued` comments, which leaves one state with no way out: a worker that
   dies between the conditional `queued → processing` transition and settling the outcome leaves the
