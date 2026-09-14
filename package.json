@@ -7,11 +7,11 @@
     "#src/*": "./src/*"
   },
   "scripts": {
-    "dev:api": "tsx watch src/app/api.ts",
-    "dev:worker": "tsx watch src/app/worker.ts",
+    "dev:api": "tsx watch --env-file-if-exists=.env src/app/api.ts",
+    "dev:worker": "tsx watch --env-file-if-exists=.env src/app/worker.ts",
     "build": "tsdown",
-    "start:api": "node dist/api.mjs",
-    "start:worker": "node dist/worker.mjs",
+    "start:api": "node --env-file-if-exists=.env dist/api.mjs",
+    "start:worker": "node --env-file-if-exists=.env dist/worker.mjs",
     "lint": "oxlint",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
@@ -22,11 +22,11 @@
     "test:integration": "vitest run --project integration",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "seed:account": "tsx scripts/seed-account.ts",
-    "create-api-key": "tsx scripts/create-api-key.ts",
+    "seed:account": "tsx --env-file-if-exists=.env scripts/seed-account.ts",
+    "create-api-key": "tsx --env-file-if-exists=.env scripts/create-api-key.ts",
     "generate-openapi": "tsx scripts/generate-openapi.ts",
-    "smoke": "tsx scripts/smoke.ts",
-    "bench:listing": "tsx scripts/bench-listing.ts"
+    "smoke": "tsx --env-file-if-exists=.env scripts/smoke.ts",
+    "bench:listing": "tsx --env-file-if-exists=.env scripts/bench-listing.ts"
   },
   "dependencies": {
     "@atproto/api": "0.20.42",
