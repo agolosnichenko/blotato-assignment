@@ -44,7 +44,7 @@
 // adapter double, mirrors why `publish-comment.integration.test.ts` and `create-reply.integration.test.ts`
 // are the length they are.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -496,6 +496,92 @@ async function assertDeletedRowSurvivesReingest(harness: Harness): Promise<void>
   expect(row?.authorDisplayName).toBeNull();
 }
 
+/** The row version Postgres wrote last — it changes on every `UPDATE`, even a no-op one. */
+async function rowVersion(db: NodePgDatabase, platformCommentId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ xmin: sql<string>`xmin::text` })
+    .from(comments)
+    .where(eq(comments.platformCommentId, platformCommentId));
+  return row?.xmin ?? null;
+}
+
+/**
+ * spec.md §18 "A sync walk leaves unchanged rows unwritten": a walk re-reads every comment on every
+ * pass, so an upsert that rewrote a row it had nothing new for turned each walk into one dead row
+ * version per comment. The row version is asserted, not `updated_at`, because a rewrite with an
+ * identical timestamp would still be a write.
+ */
+async function assertUnchangedReingestWritesNothing(harness: Harness): Promise<void> {
+  const { db } = harness;
+  const account = seedAccount();
+  const t = target(account, `at://post-${generateId()}`);
+  const adapter = fetchCommentDouble({});
+  const ctx = accountContext(account);
+  const ingest = buildIngestComments(db);
+  const platformCommentId = `at://comment-${generateId()}`;
+  const comment = ingestedComment({ platformCommentId, text: 'seen on every walk' });
+
+  const first = await ingest.upsert({ target: t, comment, ingestionSource: 'sync', ctx, adapter });
+  const versionAfterInsert = await rowVersion(db, platformCommentId);
+  const again = await ingest.upsert({ target: t, comment, ingestionSource: 'sync', ctx, adapter });
+
+  expect(again).toEqual({ commentId: first.commentId, wasNew: false });
+  expect(await rowVersion(db, platformCommentId)).toBe(versionAfterInsert);
+}
+
+/** The counterpart: skipping unchanged rows must not skip a field that did change. */
+async function assertRenamedAuthorIsWritten(harness: Harness): Promise<void> {
+  const { db } = harness;
+  const account = seedAccount();
+  const t = target(account, `at://post-${generateId()}`);
+  const adapter = fetchCommentDouble({});
+  const ctx = accountContext(account);
+  const ingest = buildIngestComments(db);
+  const platformCommentId = `at://comment-${generateId()}`;
+  const comment = ingestedComment({ platformCommentId, text: 'same text' });
+
+  await ingest.upsert({ target: t, comment, ingestionSource: 'sync', ctx, adapter });
+  await ingest.upsert({
+    target: t,
+    comment: { ...comment, authorUsername: 'renamed', authorDisplayName: 'Renamed' },
+    ingestionSource: 'sync',
+    ctx,
+    adapter,
+  });
+
+  const row = await rowByPlatformCommentId(db, platformCommentId);
+  expect(row?.text).toBe('same text');
+  expect(row?.authorUsername).toBe('renamed');
+  expect(row?.authorDisplayName).toBe('Renamed');
+}
+
+/** A walk runs *on* a target, so only a webhook delivery can be the first sight of a post. */
+async function assertWalkCreatesNoTarget(harness: Harness): Promise<void> {
+  const { db } = harness;
+  const account = seedAccount();
+  const platformPostId = `at://post-${generateId()}`;
+  const ingest = buildIngestComments(db);
+
+  await ingest.upsert({
+    target: target(account, platformPostId, null),
+    comment: ingestedComment({ platformCommentId: `at://comment-${generateId()}`, text: 'x' }),
+    ingestionSource: 'sync',
+    ctx: accountContext(account),
+    adapter: fetchCommentDouble({}),
+  });
+
+  const rows = await db
+    .select()
+    .from(commentSyncTargets)
+    .where(
+      and(
+        eq(commentSyncTargets.socialAccountId, account.socialAccountId),
+        eq(commentSyncTargets.platformPostId, platformPostId),
+      ),
+    );
+  expect(rows).toHaveLength(0);
+}
+
 let harness: Harness;
 
 beforeAll(async () => {
@@ -515,6 +601,12 @@ describe('dedup across channels (FR-017, SC-003) — one row, one notification',
 
   it('redelivery over a 36-hour window changes neither the row count nor the event count', () =>
     assertRedeliveryIsIdempotent(harness));
+
+  it('re-ingesting a comment nothing changed in writes no new row version', () =>
+    assertUnchangedReingestWritesNothing(harness));
+
+  it('re-ingesting a comment whose author was renamed writes the new name', () =>
+    assertRenamedAuthorIsWritten(harness));
 });
 
 describe('ancestor resolution (FR-022, T077)', () => {
@@ -533,6 +625,9 @@ describe('a thin payload is completed, never blanked (A18, T081)', () => {
 describe('external posts become tracked through ingestion (FR-018)', () => {
   it('creates a sync target of its own for a comment on a post never published through the platform', () =>
     assertExternalPostCreatesTarget(harness));
+
+  it('a sync walk, which runs on an existing target, creates none', () =>
+    assertWalkCreatesNoTarget(harness));
 });
 
 describe('a deleted row survives re-ingestion (FR-030, §18)', () => {

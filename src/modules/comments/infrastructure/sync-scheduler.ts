@@ -5,8 +5,8 @@
  * `publish-worker.ts`'s split, just kept together here since the task names both at once):
  *
  * - {@link createSyncScheduler}: the repeatable job (`src/app/worker.ts` registers it on the
- *   `scheduler` queue, concurrency 1, every minute) that selects `next_sync_at <= now()` with
- *   `FOR UPDATE SKIP LOCKED` and turns each selected target into one `comment_sync_jobs` row
+ *   `scheduler` queue, concurrency 1, every minute) that leases `next_sync_at <= now()` targets
+ *   with `FOR UPDATE SKIP LOCKED` and turns each leased target into one `comment_sync_jobs` row
  *   (`trigger: scheduled`) plus one `comment-sync` queue job — racing the same partial unique
  *   index `request-sync.ts`'s manual path races, so a target a human just triggered manually is
  *   never double-enqueued by the next tick.
@@ -16,10 +16,10 @@
  *   which never throws), and writes the outcome back onto the job row — `queued`/`running` are
  *   this file's own bookkeeping; `SyncPost` itself knows nothing about job rows.
  *
- * **The `FOR UPDATE SKIP LOCKED` selection and each target's job insert commit in one
- * transaction** (mirroring `outbox-relay.ts`): holding the lock across the insert is what stops a
- * hypothetical second concurrent tick from selecting the same due target while this tick's insert
- * for it is still pending. The `scheduler` queue's own concurrency-1 rule (`src/app/worker.ts`)
+ * **The lease and each batch's job inserts commit in one transaction** (mirroring
+ * `outbox-relay.ts`): holding the row locks across the inserts is what stops a hypothetical second
+ * concurrent tick from selecting the same due target while this tick's insert for it is still
+ * pending. The `scheduler` queue's own concurrency-1 rule (`src/app/worker.ts`)
  * already rules that out in practice; the lock is defence in depth, not the only thing holding.
  */
 
@@ -30,7 +30,7 @@
 // worker (the task names both in one file); splitting them would duplicate the token bucket and
 // the `comment_sync_jobs` conflict-racing helpers both already share.
 
-import { and, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -66,8 +66,17 @@ import type { WorkspaceId } from '#src/shared/ids.ts';
 
 const SCHEDULE_BATCH_SIZE = 100;
 
+/**
+ * How far a selected target's `next_sync_at` moves ahead while its walk is pending (spec.md §18).
+ *
+ * The fastest configured band (Bluesky under 24h) — long enough that a target is not re-selected
+ * while its job is still queued, short enough that a walk failing without deactivating is retried
+ * no later than the busiest schedule would have walked it anyway.
+ */
+const SCHEDULE_LEASE_MS = 5 * 60_000;
+
 // ---------------------------------------------------------------------------------------------
-// Scheduler: select due targets, enqueue one job each
+// Scheduler: lease due targets, enqueue one job each
 // ---------------------------------------------------------------------------------------------
 
 export interface SyncSchedulerDeps {
@@ -84,15 +93,30 @@ interface DueTarget {
   readonly workspaceId: WorkspaceId;
 }
 
-async function selectDueTargets(tx: OutboxTransaction): Promise<DueTarget[]> {
-  return await tx
-    .select({ id: commentSyncTargets.id, workspaceId: commentSyncTargets.workspaceId })
+/**
+ * Selects the oldest-due batch and moves each target's `next_sync_at` a lease ahead, in one
+ * statement.
+ *
+ * The lease is what makes the selection progress: a target whose job is still queued or running
+ * stays due until its walk finishes, so a selection that left it due would pick the same in-flight
+ * targets on every tick once there were more of them than one batch, and starve everything behind
+ * them. A walk that finishes overwrites the lease with its real schedule (or `null` on
+ * deactivation), so the lease only ever matters for a walk that has not.
+ */
+async function leaseDueTargets(tx: OutboxTransaction, now: Date): Promise<DueTarget[]> {
+  const due = tx
+    .select({ id: commentSyncTargets.id })
     .from(commentSyncTargets)
-    .where(
-      and(isNotNull(commentSyncTargets.nextSyncAt), lte(commentSyncTargets.nextSyncAt, new Date())),
-    )
+    .where(and(isNotNull(commentSyncTargets.nextSyncAt), lte(commentSyncTargets.nextSyncAt, now)))
+    .orderBy(commentSyncTargets.nextSyncAt)
     .limit(SCHEDULE_BATCH_SIZE)
     .for('update', { skipLocked: true });
+
+  return await tx
+    .update(commentSyncTargets)
+    .set({ nextSyncAt: new Date(now.getTime() + SCHEDULE_LEASE_MS) })
+    .where(inArray(commentSyncTargets.id, due))
+    .returning({ id: commentSyncTargets.id, workspaceId: commentSyncTargets.workspaceId });
 }
 
 /** A job row that has been committed and still has to be handed to BullMQ. */
@@ -102,73 +126,89 @@ interface PendingJob {
 }
 
 /**
- * Inserts a `scheduled` job row for `target`, racing the partial unique index against a
- * concurrent manual request or a previous tick's still-active job. On a lost race this returns
- * `null` — the existing job will run to completion and advance `next_sync_at` on its own.
+ * Inserts one `scheduled` job row per target, racing the partial unique index against a
+ * concurrent manual request or a previous tick's still-active job. A target that loses the race
+ * gets no row back — its existing job will run to completion and set `next_sync_at` on its own.
  */
-async function insertScheduledJob(
+async function insertScheduledJobs(
   tx: OutboxTransaction,
-  target: DueTarget,
-): Promise<PendingJob | null> {
-  const [inserted] = await tx
+  targets: readonly DueTarget[],
+): Promise<PendingJob[]> {
+  const inserted = await tx
     .insert(commentSyncJobs)
-    .values({
-      workspaceId: target.workspaceId,
-      targetId: target.id,
-      trigger: 'scheduled',
-      status: 'queued',
-      stats: null,
-      error: null,
-    })
+    .values(
+      targets.map((target) => ({
+        workspaceId: target.workspaceId,
+        targetId: target.id,
+        trigger: 'scheduled',
+        status: 'queued',
+        stats: null,
+        error: null,
+      })),
+    )
     .onConflictDoNothing({
       target: [commentSyncJobs.targetId],
       where: sql`${commentSyncJobs.status} in ('queued', 'running')`,
     })
-    .returning({ id: commentSyncJobs.id });
+    .returning({ id: commentSyncJobs.id, targetId: commentSyncJobs.targetId });
 
-  return inserted === undefined ? null : { jobId: inserted.id, targetId: target.id };
+  return inserted.map((row) => ({ jobId: row.id, targetId: row.targetId }));
+}
+
+interface ScheduledBatch {
+  readonly leased: number;
+  readonly jobs: readonly PendingJob[];
+}
+
+async function scheduleBatch(db: NodePgDatabase): Promise<ScheduledBatch> {
+  return await db.transaction(async (tx) => {
+    const targets = await leaseDueTargets(tx, new Date());
+    if (targets.length === 0) {
+      return { leased: 0, jobs: [] };
+    }
+    return { leased: targets.length, jobs: await insertScheduledJobs(tx, targets) };
+  });
 }
 
 /**
  * Creates and returns the `comment-sync` scheduler (T088).
  *
  * `tick()` is the body of the repeatable `scheduler`-queue job `src/app/worker.ts` registers
- * (every minute, concurrency 1) — it selects every target whose `next_sync_at` is due and
- * enqueues one `comment-sync` job per target.
+ * (every minute, concurrency 1) — it leases every target whose `next_sync_at` is due, batch by
+ * batch, and enqueues one `comment-sync` job per target that has no active job already. It stops at
+ * the first short batch, which it must reach: every leased target has stopped being due.
  *
- * The rows are committed *before* anything is handed to BullMQ, the same order
+ * Each batch's rows are committed *before* anything is handed to BullMQ, the same order
  * `request-sync.ts` already uses. Adding inside the transaction let a worker (concurrency 10) pick
  * the job up while the row was still uncommitted: `markJobRunning`'s `WHERE status = 'queued'`
  * could not see it under READ COMMITTED, affected no row, and the job finished "successfully"
  * while the row committed as `queued` forever — and the partial unique index then blocked that
  * target from ever being scheduled again, silently.
  *
- * Committing first leaves a smaller window of its own — a crash between the commit and the `add`
- * below — which is why `createStuckSyncJobSweeper` exists rather than this ordering alone being
- * the fix.
+ * Committing first leaves a smaller window of its own — a crash between the commit and the
+ * `addBulk` below — which is why `createStuckSyncJobSweeper` exists rather than this ordering alone
+ * being the fix.
  */
 export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
   return {
     async tick(): Promise<void> {
-      const pending = await deps.database.transaction(async (tx) => {
-        const due = await selectDueTargets(tx);
-        const jobs: PendingJob[] = [];
-        for (const target of due) {
-          // Sequential because the inserts share one transaction with the `FOR UPDATE SKIP LOCKED`
-          // select above — see the module docstring for why that lock must span them.
+      let batch: ScheduledBatch;
+      do {
+        // Each batch must commit before the next is selected: the lease it writes is what keeps
+        // the next selection from returning the same targets.
+        // oxlint-disable-next-line no-await-in-loop
+        batch = await scheduleBatch(deps.database);
+        if (batch.jobs.length > 0) {
           // oxlint-disable-next-line no-await-in-loop
-          const job = await insertScheduledJob(tx, target);
-          if (job !== null) {
-            jobs.push(job);
-          }
+          await deps.syncQueue.addBulk(
+            batch.jobs.map((job) => ({
+              name: 'sync',
+              data: { targetId: job.targetId },
+              opts: { jobId: job.jobId },
+            })),
+          );
         }
-        return jobs;
-      });
-
-      for (const job of pending) {
-        // oxlint-disable-next-line no-await-in-loop -- BullMQ's `add` is one round trip per job
-        await deps.syncQueue.add('sync', { targetId: job.targetId }, { jobId: job.jobId });
-      }
+      } while (batch.leased === SCHEDULE_BATCH_SIZE);
     },
   };
 }

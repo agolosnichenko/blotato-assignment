@@ -397,8 +397,8 @@ sequenceDiagram
     participant W as worker role
     participant P as Platform
 
-    S->>DB: SELECT targets WHERE next_sync_at <= now() FOR UPDATE SKIP LOCKED
-    S->>Q: enqueue comment-sync per due target
+    S->>DB: lease oldest-due targets: next_sync_at = now() + 5 min (FOR UPDATE SKIP LOCKED)
+    S->>Q: enqueue comment-sync per leased target, batch by batch
     W->>Q: dequeue
     W->>P: walk all pages (listComments / getPostThread)
     alt complete walk succeeds
@@ -408,7 +408,7 @@ sequenceDiagram
     else PermanentError (post gone/unreachable)
         W->>DB: next_sync_at = null (deactivated), last_error set — infers no deletions
     else RetryableError
-        W->>DB: schedule untouched, next tick retries
+        W->>DB: lease left in place, retried once it lapses
     end
 ```
 
@@ -529,13 +529,15 @@ wrong the way any split-transaction "atomic" operation is wrong: a crash between
 commit and the comment insert's leaks a permanent allowance with no way back, because `release` is
 keyed by a comment id that was never written.
 
-**The outbox relay publishes one row per transaction (D9).** Relaying a batch in one transaction
-means a single row BullMQ will never accept rolls the batch back on every pass, sitting at the front
-of the oldest-100 selection and blocking every event behind it. Each row therefore publishes and
-stamps in its own transaction under `FOR UPDATE SKIP LOCKED`; a failing row increments `attempts`
-and is logged. The row is never deleted — the outbox is the only record of the event — but past ten
-attempts the log level rises to `error`, which makes a stuck event an incident rather than an
-invisible retry.
+**The outbox relay publishes in bulk and isolates a failing batch row by row (D9).** A pass locks
+the oldest batch, publishes it with one `addBulk` and stamps it with one `UPDATE`, and keeps going
+while batches come back full — so a backfill's thousands of events leave in one pass. Bulk alone
+would let a single row BullMQ never accepts roll its batch back on every pass, sitting at the front
+of the oldest-first selection and blocking every event behind it. A failed batch is therefore
+retried with each row in its own transaction under `FOR UPDATE SKIP LOCKED`; a failing row
+increments `attempts` and is logged, and the pass stops. The row is never deleted — the outbox is
+the only record of the event — but past ten attempts the log level rises to `error`, which makes a
+stuck event an incident rather than an invisible retry.
 
 ## 8. Assumptions
 

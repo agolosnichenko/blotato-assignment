@@ -954,15 +954,37 @@ before the code diverges from it, grouped below by what kind of change it is.
   and logs the count, so an operator sees a number rather than a silent loss. Postgres keeps the
   authoritative record: `outbox_events` rows are marked published and retained under the normal
   purge, so a future consumer is backfilled from the table rather than from Redis.
-- **The outbox relay publishes one row per transaction (extends D9).** Relaying a whole batch inside
-  one transaction means a single row BullMQ will never accept rolls the batch back on every pass —
-  and it sits at the front of the oldest-100 selection, blocking every event behind it indefinitely,
-  so one poison event stops domain-event delivery for the whole service. Each row therefore publishes
-  and stamps in its own transaction under `FOR UPDATE SKIP LOCKED`; a failing row increments
-  `attempts` and is logged. The row is never deleted — the outbox is the only record of the event —
-  but past ten attempts the log level rises to `error`, which makes a stuck event an incident rather
-  than an invisible retry. A pass in which *every* row failed still rejects, so a total outage is
-  still reported as a failed pass.
+- **The outbox relay publishes in bulk and isolates a failing batch row by row (extends D9).**
+  Relaying a whole batch inside one transaction, with nothing else, means a single row BullMQ will
+  never accept rolls the batch back on every pass — and it sits at the front of the oldest-100
+  selection, blocking every event behind it indefinitely. Publishing one row per transaction fixes
+  that but costs five round trips an event and caps delivery at one batch per ten-second pass: a
+  backfill's few thousand `comment.received` events arrived minutes late. A pass therefore first
+  locks the oldest batch (`FOR UPDATE SKIP LOCKED`), publishes it with one `addBulk` and stamps it
+  with one `UPDATE`; only if that fails does it fall back to one row per transaction, where a failing
+  row increments `attempts` and is logged. The row is never deleted — the outbox is the only record
+  of the event — but past ten attempts the log level rises to `error`, which makes a stuck event an
+  incident rather than an invisible retry. A pass keeps taking batches while they come back full and
+  clean, and stops at the first short or failing one, so a poison row cannot make it spin. A pass in
+  which *every* row failed still rejects, so a total outage is still reported as a failed pass.
+- **The scheduler leases the targets it selects (amends §7.3).** The tick selected
+  `next_sync_at ≤ now()` with a `LIMIT` and no order, and `next_sync_at` moved only when a walk
+  finished — so a target whose job was still queued or running stayed due. With more such targets
+  than one batch, every tick could re-select the same ones, each losing to its own active job on the
+  partial unique index, and never reach the rest: those posts stopped syncing with nothing logged.
+  The tick now takes the oldest-due batch and moves each target's `next_sync_at` five minutes ahead
+  in the same statement (`UPDATE … WHERE id IN (SELECT … ORDER BY next_sync_at FOR UPDATE SKIP
+  LOCKED)`), inserts the jobs and enqueues them in bulk, and repeats until a batch comes back short —
+  which it must, since a leased target is no longer due. The lease is a floor, not a schedule: a walk
+  that succeeds or deactivates overwrites it. One visible change: a walk that fails without
+  deactivating used to be retried on the next tick and is now retried when the lease lapses.
+- **A sync walk leaves unchanged rows unwritten (implements FR-017).** The shared upsert's
+  `DO UPDATE` ran on every conflict, so a walk over a thread nothing had changed in rewrote every row
+  — a fresh Bluesky post, walked every five minutes, left 288 dead row versions per comment per day.
+  The update now applies only to a row that is not `deleted` and whose text (when supplied), author
+  name or `platform_meta` actually differ; otherwise the row is read back untouched, so `updated_at`
+  means "last changed". Separately, `ensureTarget` runs only for webhook ingestion: a walk runs *on*
+  a target, so the insert-and-read-back it made per comment could never create anything.
 - **The stuck-work sweeper also recovers `processing` (extends §7.1 step 4).** Step 4 described the
   sweeper as re-enqueueing `queued` comments, which leaves one state with no way out: a worker that
   dies between the conditional `queued → processing` transition and settling the outcome leaves the
