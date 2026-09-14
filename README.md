@@ -1,76 +1,90 @@
 # Blotato Comments Service
 
 A comment system for a multi-platform social media scheduling API: read the conversation under a
-published post, reply to a comment or start a new top-level thread, and keep that data in sync with
-Instagram, Facebook and Bluesky. Built as a take-home for Blotato — the full reasoning behind every
-decision below lives in [`spec.md`](./spec.md) (source of truth) and [`DESIGN.md`](./DESIGN.md)
-(the write-up for a reader who doesn't want the whole spec).
+published post, reply to a comment or start a new thread, and keep that data in sync with Instagram,
+Facebook and Bluesky. Take-home for Blotato ([`task.md`](./task.md)).
 
 One repository, one Docker image, two runtime roles: `api` (Fastify — REST, webhook intake, Swagger
-UI) and `worker` (BullMQ — publishing, sync, webhook processing, the outbox relay, retention). See
-[DESIGN.md §1–§2](./DESIGN.md) for why the roles are not split into separate services.
+UI) and `worker` (BullMQ — publishing, sync, outbox relay, retention).
 
-## For the reviewer — start here
+- [`DESIGN.md`](./DESIGN.md) — the design write-up: architecture, schema, API, flows, decisions and
+  trade-offs. **Start here if you want the reasoning.**
+- [`spec.md`](./spec.md) — the working specification every decision (`D#`), assumption (`A#`) and
+  spike (`S#`) is numbered in, and the changelog of everything that changed during implementation.
 
-Nothing to install and nothing to seed: the service is deployed, and its demo workspace holds three
-**real** connected accounts — an Instagram business account, a Facebook Page and a Bluesky account —
-each with a real published post registered as a sync target. Comments you create through the API
-appear on those accounts, and you can open them in a browser to check.
+## For the reviewer
 
-**https://api-production-6ef5.up.railway.app** — Swagger UI at
-[`/docs`](https://api-production-6ef5.up.railway.app/docs), the OpenAPI document at
-[`/openapi.json`](https://api-production-6ef5.up.railway.app/openapi.json), health at
-[`/healthz`](https://api-production-6ef5.up.railway.app/healthz) and `/readyz` (the latter pings
-Postgres and Redis and reports each).
+The service is deployed with three **real** connected accounts — an Instagram business account, a
+Facebook Page and a Bluesky account — each with a real published post. Comments you create through
+the API appear on those accounts; you can open them in a browser and check.
 
-The demo API key is sent separately by email — never committed to this repository (D25). It is
-scoped to the demo workspace, rate-limited, and revocable.
+**https://api-production-6ef5.up.railway.app** — [`/docs`](https://api-production-6ef5.up.railway.app/docs)
+(Swagger UI), [`/openapi.json`](https://api-production-6ef5.up.railway.app/openapi.json),
+[`/readyz`](https://api-production-6ef5.up.railway.app/readyz) (pings Postgres and Redis).
+
+The demo API key is in the email — never committed (D25). It is scoped to the demo workspace,
+rate-limited and revocable.
 
 ```bash
 export BASE=https://api-production-6ef5.up.railway.app
 export API_KEY=blt_...   # from the email
 
-# the demo workspace's three posts, by the service's own id
 export IG_POST=33333333-3333-4333-8333-333333333331
 export FB_POST=33333333-3333-4333-8333-333333333332
 export BSKY_POST=33333333-3333-4333-8333-333333333333
 ```
 
-The platform's own id for each is in the `platformPostId` field of every comment response, so you can
-always get from a row here back to the object on the platform.
+`pnpm smoke` runs steps 1–7 below with assertions instead of eyeballs
+([`scripts/smoke.ts`](./scripts/smoke.ts); needs `SMOKE_BASE_URL`, `SMOKE_API_KEY`,
+`SMOKE_INSTAGRAM_POST_ID`, `SMOKE_BLUESKY_POST_ID`).
 
-### Eight requests
+### 1. The capability registry
 
-**1 — the capability registry.** Nine platforms, three of which support comments; the other six say
-why not. Every depth and text-limit check in the service reads this same table.
+Nine platforms, three of which support comments. Every depth and text-limit check in the service
+reads this table — no use case contains a `switch (platform)`.
 
 ```bash
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
 ```
 
-**2 — the workspace inbox, no identifier at all.** This is the request no route served before this
-feature: every comment across every connected account, newest first, in one page (FR-015). It is the
-first read a reviewer who holds nothing but an API key can make.
+```json
+{"items":[
+  {"platform":"instagram","supportsComments":true,"maxReplyDepth":1,"textLimit":2200,"textUnit":"characters","ingestion":"webhook+sync"},
+  {"platform":"facebook","supportsComments":true,"maxReplyDepth":1,"textLimit":8000,"textUnit":"characters","ingestion":"webhook+sync"},
+  {"platform":"bluesky","supportsComments":true,"maxReplyDepth":null,"textLimit":300,"textUnit":"graphemes","ingestion":"sync"},
+  {"platform":"threads","supportsComments":false,"unsupportedReason":"platform API access not in place"}
+]}
+```
+
+(`x`, `linkedin`, `youtube`, `tiktok`, `pinterest` follow with the same `unsupportedReason`.)
+
+### 2. The workspace inbox — no identifier at all
+
+Every comment across every connected account, newest first. This is the read the three nested routes
+could not serve, and the reason they were replaced by one filtered collection (D31).
 
 ```bash
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments"
 ```
 
-**3 — drill into one thread.** Same collection, filtered down to a post's top-level comments, newest
-first (D27), each with its `replyCount`:
+### 3. Drill into one thread
+
+Same collection, filtered to a post's top level, each item carrying its `replyCount`:
 
 ```bash
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?postId=$IG_POST&topLevelOnly=true"
 ```
 
-Take an `id` from `items[]` — call it `$COMMENT` — and read its replies (ascending, D27):
+Take an `id` from `items[]` — call it `$COMMENT` — and read its replies oldest-first:
 
 ```bash
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?parentCommentId=$COMMENT&order=asc"
 ```
 
-**4 — reply to it.** The write is asynchronous: `202`, not `201`, because the row exists but the
-platform call has not happened yet (A11). Note the `Location` header.
+### 4. Reply to it
+
+`202`, not `201`: the row exists, the platform call has not happened yet (A11). Note the `Location`
+header.
 
 ```bash
 curl -si -X POST "$BASE/v1/comments/$COMMENT/replies" \
@@ -79,36 +93,54 @@ curl -si -X POST "$BASE/v1/comments/$COMMENT/replies" \
   -d '{"text":"Reviewing the Blotato take-home 👋"}'
 ```
 
-**5 — poll the `Location`** until `status` goes `queued → processing → posted`. When it does,
-`platformCommentId` is the real Instagram comment id — **open the Instagram post below and you will
-see this comment there.**
+```
+HTTP/1.1 202 Accepted
+ratelimit-remaining: 4
+location: /v1/comments/01a097f5-3345-789b-8ef7-836a2980bcbe
+
+{"id":"01a097f5-...","platform":"instagram","parentCommentId":"...","platformCommentId":null,
+ "depth":1,"isOwn":true,"status":"queued","error":null,"replyCount":0, ...}
+```
+
+Replaying that `Idempotency-Key` with a different body is `409 IDEMPOTENCY_KEY_REUSED`; with the
+same body it returns the original comment, not a second one (A12).
+
+### 5. Poll the `Location`
+
+Until `status` goes `queued → processing → posted`. When it does, `platformCommentId` is the real
+Instagram comment id — **open the Instagram post below and you will see the comment there.**
 
 ```bash
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/<id from Location>"
 ```
 
-**6 — the depth limit.** Instagram's `maxReplyDepth` is 1, so replying to a reply is refused up front
-rather than silently re-parented (D12). Use one of the `id`s from the replies list in step 3:
+### 6. The depth limit
+
+Instagram's `maxReplyDepth` is 1, so replying to a reply is refused up front rather than silently
+re-parented (D12). Use a reply `id` from step 3:
 
 ```bash
 curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/comments/$REPLY_ID/replies" \
   -H "blotato-api-key: $API_KEY" -H "Content-Type: application/json" \
   -d '{"text":"one level too deep"}'
-# 422 REPLY_DEPTH_EXCEEDED
+# {"code":"REPLY_DEPTH_EXCEEDED","detail":"reply would exceed maxReplyDepth 1 for thread ..."}
+# 422
 ```
 
 The identical request against a Bluesky reply (`maxReplyDepth: null`) is accepted and posts — same
-code path, different capability. That contrast is the point of the registry.
+code path, different capability row. That contrast is the point of the registry.
 
-**7 — refresh from the platform.** Enqueues a sync walk; poll the returned job id:
+### 7. Refresh from the platform
 
 ```bash
 curl -s -X POST "$BASE/v1/posts/$IG_POST/comments/sync" -H "blotato-api-key: $API_KEY"
 curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comment-sync-jobs/<jobId>"
 ```
 
-**8 — tenancy and auth.** No key is `401`; another workspace's post is `404`, never `403`, so a key
-cannot use the status code to learn whether a resource exists (D20):
+### 8. Tenancy and auth
+
+No key is `401`; another workspace's post is `404`, never `403`, so a key cannot use the status code
+to learn whether a resource exists (D20):
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' "$BASE/v1/comments?postId=$IG_POST"
@@ -118,13 +150,10 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "blotato-api-key: $API_KEY" \
 # 404
 ```
 
-`pnpm smoke` runs steps 1-7 of this sequence with assertions instead of eyeballs — see
-[`scripts/smoke.ts`](./scripts/smoke.ts); it needs `SMOKE_BASE_URL`, `SMOKE_API_KEY`,
-`SMOKE_INSTAGRAM_POST_ID` and `SMOKE_BLUESKY_POST_ID`. Step 8 stays a manual check here: asserting it
-needs a second workspace's key, which the integration suite mints for itself
-(`tenancy.integration.test.ts`) and a script pointed at a deployment cannot.
+Step 8 stays a manual check: asserting it needs a second workspace's key, which the integration
+suite mints for itself (`tenancy.integration.test.ts`) and a script pointed at a deployment cannot.
 
-### Where to check the results on the platform
+### Where to check the results
 
 | account | profile | the post the demo runs against |
 | --- | --- | --- |
@@ -132,203 +161,43 @@ needs a second workspace's key, which the integration suite mints for itself
 | Bluesky | [@blotato-demo.bsky.social](https://bsky.app/profile/blotato-demo.bsky.social) | [the demo post](https://bsky.app/profile/blotato-demo.bsky.social/post/3mvfgblffyv2p) |
 | Facebook | [Blotato-demo](https://www.facebook.com/1423986634121660) | [the demo post](https://www.facebook.com/1423986634121660/posts/122093382351485339) |
 
-Comments posted through the API appear under those posts within seconds of the status turning
-`posted`. They are visible to anyone — no login needed for Instagram or Bluesky.
+Comments appear under those posts within seconds of the status turning `posted`, and are visible
+without a login on Instagram and Bluesky.
 
-### What was already verified there
+### Already run against that deployment
 
-The whole SC-012 walkthrough has been run against that URL with those accounts, not fixtures.
+All three comment-capable platforms run live — real ingestion and real publishing, through the same
+use cases and the same adapter port:
 
-**This run predates D31**, which replaced the three nested reads with the filtered collection. Every
-write, sync and depth result below is unaffected — those addresses did not change — but the read step
-was made at the old address; its replacement is `GET /v1/comments?postId=…&topLevelOnly=true`, which
-the walkthrough above uses and the integration suite covers. The deployment has not been re-verified
-since.
-
-| step | what happened |
+| | result |
 | --- | --- |
-| `GET /v1/platforms` | nine platforms, three supporting comments |
-| `GET /v1/posts/:postId/comments` (now `GET /v1/comments?postId=…&topLevelOnly=true`) | the post's real Instagram comments, newest first, one with a reply |
-| `POST /v1/comments/:id/replies` | `202 queued` with a `Location` |
-| poll to `posted` | Instagram comment `18112975520094858` — posted on the platform |
-| reply to a reply (Instagram) | `422 REPLY_DEPTH_EXCEEDED`, `maxReplyDepth 1` (D12) |
-| reply to a reply (Bluesky) | `202` → `posted`, `at://…/3mvfhkkaki72x` |
-| `POST …/comments/sync` | Instagram `fetched: 3, inserted: 3`; Facebook `fetched: 3, inserted: 3`; Bluesky `succeeded` |
-| Facebook end to end | ingested two visitor comments and its own, published reply `122093382351485339_936214829041858`, and refused the second level with `422` |
-
-Also verified there: `/readyz` reports Postgres and Redis reachable, a request without a key is
-`401`, and another workspace's post is `404` rather than `403` (D20).
-
-All three comment-capable platforms run live: Instagram, Facebook and Bluesky each ingest real
-comments and publish real ones, through the same use cases and the same adapter port.
-
-## Curl walkthrough (local run, with response bodies)
-
-The section above is the fastest path and needs nothing but the key. This one shows the actual
-response bodies, and is what a local run looks like when no real account is connected.
-
-Every response below is real output from a local run of this exact code (PostgreSQL 18.6 + Redis
-8.10.1 via `docker compose`, `pnpm dev:api` + `pnpm dev:worker`), not a hand-written example.
-
-```bash
-export API_KEY=blt_...            # from `pnpm create-api-key`, or the demo key
-export BASE=http://localhost:3000 # or the deployment URL
-```
-
-**1. List what the registry supports** — nine platforms, six of them explicitly unsupported:
-
-```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/platforms"
-```
-
-```json
-{"items":[
-  {"platform":"instagram","supportsComments":true,"canCreateTopLevel":true,"canReply":true,"maxReplyDepth":1,"textLimit":2200,"textUnit":"characters","ingestion":"webhook+sync"},
-  {"platform":"facebook","supportsComments":true,"canCreateTopLevel":true,"canReply":true,"maxReplyDepth":1,"textLimit":8000,"textUnit":"characters","ingestion":"webhook+sync"},
-  {"platform":"bluesky","supportsComments":true,"canCreateTopLevel":true,"canReply":true,"maxReplyDepth":null,"textLimit":300,"textUnit":"graphemes","ingestion":"sync"},
-  {"platform":"threads","supportsComments":false,"unsupportedReason":"platform API access not in place"},
-  {"platform":"x","supportsComments":false,"unsupportedReason":"platform API access not in place"},
-  {"platform":"linkedin","supportsComments":false,"unsupportedReason":"platform API access not in place"},
-  {"platform":"youtube","supportsComments":false,"unsupportedReason":"platform API access not in place"},
-  {"platform":"tiktok","supportsComments":false,"unsupportedReason":"platform API access not in place"},
-  {"platform":"pinterest","supportsComments":false,"unsupportedReason":"platform API access not in place"}
-]}
-```
-
-**2. List the whole workspace inbox, no identifier at all** — the request no route served before
-this feature (FR-015):
-
-```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments"
-```
-
-```json
-{"items":[],"nextCursor":null}
-```
-
-(No `sync` key here — it only appears when a post is named, see step 3.)
-
-**3. Read one post's top-level comments:**
-
-```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments?postId=$POST_ID&topLevelOnly=true"
-```
-
-```json
-{"items":[],"nextCursor":null,"sync":{"lastSyncedAt":null,"activeJobId":null}}
-```
-
-(An empty array on a freshly-seeded post is correct — nothing has been ingested yet. Against a post
-with history you'd see each comment's `replyCount`, `status`, and a `nextCursor` once there are more
-than `limit` rows.)
-
-**4. Post a top-level comment** (`202`, not `201` — the row exists, the platform call hasn't
-happened yet; A11):
-
-```bash
-curl -s -i -X POST "$BASE/v1/posts/$POST_ID/comments" \
-  -H "blotato-api-key: $API_KEY" -H "Content-Type: application/json" \
-  -H "Idempotency-Key: walkthrough-1" \
-  -d '{"text":"Thanks for reading!"}'
-```
-
-```
-HTTP/1.1 202 Accepted
-ratelimit-limit: 5
-ratelimit-remaining: 4
-location: /v1/comments/01a097f5-3345-789b-8ef7-836a2980bcbe
-
-{"id":"01a097f5-...","accountId":"...","platform":"bluesky","postId":"...",
- "parentCommentId":null,"platformCommentId":null,"depth":0,"isOwn":true,
- "text":"Thanks for reading!","status":"queued","error":null,"replyCount":0, ...}
-```
-
-**5. Poll the `Location` header until the worker settles it:**
-
-```bash
-curl -s -H "blotato-api-key: $API_KEY" "$BASE/v1/comments/01a097f5-3345-789b-8ef7-836a2980bcbe"
-```
-
-Against a real connected account this becomes `"status":"posted"` with a `platformCommentId`. In
-this local run the account's credentials were dummy values (no real Bluesky session), so the worker
-correctly gave up and the comment settled as `"status":"failed"` with
-`"error":{"code":"PLATFORM_REJECTED","message":"..."}` — the same conditional-`UPDATE` state machine
-either way (see [DESIGN.md](./DESIGN.md) "Never double-post").
-
-**6. Replay the same `Idempotency-Key` with a different body → `409`, same body → the original
-comment again, not a second one** (A12, FR-013):
-
-```bash
-curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/posts/$POST_ID/comments" \
-  -H "blotato-api-key: $API_KEY" -H "Content-Type: application/json" \
-  -H "Idempotency-Key: walkthrough-1" -d '{"text":"different text"}'
-# {"...","code":"IDEMPOTENCY_KEY_REUSED",...}
-# 409
-```
-
-**7. Reply past the depth limit on Instagram → `422 REPLY_DEPTH_EXCEEDED`** (D12; `maxReplyDepth` is
-1 for Instagram, so replying to a reply is rejected):
-
-```bash
-curl -s -w '\n%{http_code}\n' -X POST "$BASE/v1/comments/$IG_REPLY_ID/replies" \
-  -H "blotato-api-key: $API_KEY" -H "Content-Type: application/json" \
-  -d '{"text":"one level too deep"}'
-# {"...","code":"REPLY_DEPTH_EXCEEDED","detail":"reply would exceed maxReplyDepth 1 for thread ...",...}
-# 422
-```
-
-The same request against a Bluesky thread (`maxReplyDepth: null`) succeeds at any depth.
-
-**8. Cross-workspace access is `404`, never `403`** (D20, so a key can't distinguish "not yours"
-from "doesn't exist"):
-
-```bash
-curl -s -w '\n%{http_code}\n' -H "blotato-api-key: $API_KEY" \
-  "$BASE/v1/comments?postId=00000000-0000-0000-0000-000000000000"
-# {"...","detail":"no post 00000000-0000-0000-0000-000000000000 in this workspace","code":"NOT_FOUND",...}
-# 404
-```
-
-**9. Request a refresh** and poll the job:
-
-```bash
-curl -s -X POST "$BASE/v1/posts/$POST_ID/comments/sync" -H "blotato-api-key: $API_KEY"
-curl -s "$BASE/v1/comment-sync-jobs/$JOB_ID" -H "blotato-api-key: $API_KEY"
-```
-
-`404 NOT_FOUND` with `"post ... has no refresh target yet"` is the correct answer for a post that
-was never registered as a refresh target (via the `PostPublished` port, or by seeding) — not a bug.
-
-### `$POST_ID`, `$IG_REPLY_ID`, `$JOB_ID` — where they come from
-
-`pnpm seed:account` (task T039) is the one-command path for the workspace, an API key, one
-connected account per comment-capable platform (Instagram, Facebook, Bluesky), and one published
-post per account registered as a refresh target. It prints the `$POST_ID`s and the minted
-`$API_KEY`. It does not insert any comments, though — to get a `$IG_REPLY_ID` to reply to without
-running a worker against real Instagram credentials, seed two rows directly in `comments`
-(`depth: 0` and `depth: 1`, `status: 'posted'`, `source: 'sync'`) against one of the seeded posts,
-to represent an already-ingested thread. This is exactly how the walkthrough above was produced.
+| sync | Instagram `fetched 3, inserted 3`; Facebook `fetched 3, inserted 3`; Bluesky succeeded |
+| publish | Instagram comment `18112975520094858`; Facebook `122093382351485339_936214829041858`; Bluesky `at://…/3mvfhkkaki72x` |
+| depth limit | `422 REPLY_DEPTH_EXCEEDED` on Instagram, `202 → posted` for the same shape on Bluesky (D12) |
+| auth / tenancy | no key `401`, another workspace's post `404` (D20); `/readyz` reports Postgres and Redis reachable |
 
 ## Run it locally
 
 ```bash
 pnpm install
-docker compose up -d              # PostgreSQL 18.6 + Redis 8.10.1
+docker compose up -d               # PostgreSQL 18.6 + Redis 8.10.1
 cp .env.example .env               # then fill in the secrets below
-pnpm db:migrate                    # applies drizzle/ migrations
-pnpm create-api-key --workspace-id <uuid>   # after seeding a workspace (see above)
+pnpm db:migrate
+pnpm seed:account                  # workspace, API key, one account + post per platform
 pnpm dev:api                       # http://localhost:3000/docs
-pnpm dev:worker                    # in a second terminal — publishing, sync, purge
+pnpm dev:worker                    # second terminal — publishing, sync, purge
 ```
 
-`.env.example` documents every variable; the ones with no safe default (`CREDENTIALS_ENCRYPTION_KEY`
-— 32 bytes base64, `openssl rand -base64 32`; `META_APP_SECRET`, `META_APP_SECRET_INSTAGRAM`,
-`META_WEBHOOK_VERIFY_TOKEN`) need a value before the process starts — config validation fails fast
-and names exactly which one is missing. For a local run that never talks to a real Meta App, any
-non-empty string for the Meta secrets is enough — they're only exercised by the
-webhook path and by the Meta adapter's own HMAC helper.
+`pnpm seed:account` prints the post ids and the minted API key. It seeds no comments, so a local
+`GET /v1/comments` is legitimately empty until a sync walk runs or you post one.
 
-Gates before any commit (also what CI runs):
+`.env.example` documents every variable. Those with no safe default fail config validation at
+startup, naming the missing one: `CREDENTIALS_ENCRYPTION_KEY` (32 bytes base64,
+`openssl rand -base64 32`), `META_APP_SECRET`, `META_APP_SECRET_INSTAGRAM`,
+`META_WEBHOOK_VERIFY_TOKEN`. For a local run that never talks to a real Meta App, any non-empty
+string works for the Meta secrets.
+
+Gates before a commit, and what CI runs:
 
 ```bash
 pnpm lint && pnpm format:check && pnpm typecheck
@@ -336,7 +205,7 @@ pnpm test:unit
 pnpm test:integration   # needs a Docker daemon (testcontainers)
 ```
 
-On Colima or another non-default Docker context:
+On Colima or another non-default Docker context, testcontainers needs the socket named explicitly:
 
 ```bash
 export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
@@ -352,8 +221,8 @@ src/
                   pagination (keyset cursor codec), ids (UUIDv7)
   modules/
     platform-core/  ports to the rest of the platform (workspaces, api keys, accounts, posts,
-                    credentials) + a read-only local projection of their data — this module is the
-                    entire service boundary, in one place
+                    credentials) + a read-only projection of their data — the service boundary,
+                    in one place
     comments/
       domain/       status state machine, reply-depth and text-limit rules — no database import
       application/  use cases: list/create/reply/sync/ingest/publish/reconcile/purge
@@ -361,79 +230,40 @@ src/
                        BullMQ queues and workers
       http/         routes, Zod request/response schemas, error mapping
   platforms/
-    registry.ts     capability registry — all 9 publishing platforms (one source of truth for
-                    `GET /v1/platforms` and every depth/text-limit check)
+    registry.ts     capability registry — all 9 platforms, one source of truth for
+                    `GET /v1/platforms` and every depth/text-limit check
     types.ts        CommentPlatformAdapter port, normalized types, the four typed adapter errors
     meta/           Graph API client (host/token by auth_variant), Instagram + Facebook adapters
     bluesky/        AT Protocol adapter
-scripts/          create-api-key, seed-account, generate-openapi, the Meta spikes, and `smoke`
-                  (T108) — the SC-012 walkthrough run against a deployment, with its assertions in
-                  smoke-checks.ts so they are unit-tested without a server
+scripts/          create-api-key, seed-account, generate-openapi, the Meta spikes, smoke
 drizzle/          SQL migrations (generated, committed, reviewed)
-specs/            the spec-kit artifacts this was planned from (plan, data model, contracts, tasks)
+specs/            the planning artifacts this was built from (plan, data model, contracts, tasks)
 ```
-
-See [DESIGN.md](./DESIGN.md) for the architecture diagram, the ER diagram, the sequence diagrams for
-reply/webhook/sync, and the full decision log.
 
 ## How I used AI tools
 
-Claude Code ran most of this project end to end, under my review at every step — not as a one-shot
-generation, but as a process with its own checkpoints:
+Claude Code ran most of this project, under my review at each step.
 
-- **Requirements and spec.** I gave it `task.md` (the original brief) and had it interview me —
-  asking about scope, platform choice, ingestion strategy, retention — to produce `spec.md`, the
-  decision log this whole repository is built from. It also researched Blotato's public docs and
-  Meta's Graph API / webhook documentation to ground the design in what those APIs actually allow
-  (§2 of `spec.md` cites the specific pages). A few of its first-pass assumptions didn't survive
-  review — I pushed back on ordering defaults, the auth header name, and the Instagram login-variant
-  handling, and those disagreements are recorded as decisions (D27, A16, D28) rather than silently
-  overwritten.
-- **Planning.** `plan.md`, `data-model.md`, `research.md` and `tasks.md` came from a spec-kit-style
-  planning pass: decisions from `spec.md` resolved into concrete files, tables, and a dependency-
-  ordered task list, with anything not already decided written down with its rejected alternatives
-  rather than picked silently.
-- **Implementation.** A controller agent worked through `tasks.md` one wave at a time, dispatching
-  implementer subagents per task (or per small group of related tasks) against a shared set of
-  constraints, with tests written before the implementation they cover and a review pass after each
-  wave. I read the controller's summaries and spot-checked the diffs rather than reviewing every
-  line myself — the things I did catch personally are below.
-- **What the review passes actually caught** — concrete, not a list of virtues:
-  - `secureCompare` (the API-key comparison helper) hashes before comparing so the comparison itself
-    is length-independent, but a reviewer pointed out the *hashing* step isn't — safe for fixed-
-    length digests, not a general constant-time primitive — and the residual limitation is now
-    stated in the code rather than left implicit.
-  - Log redaction stopped one level too shallow: a comment page logged as a nested field, or a
-    BullMQ job's `job.data.comment.text`, leaked comment text past the redactor. Caught by review,
-    fixed by widening the redaction depth and adding a test that logs exactly that shape.
-  - An error-catalogue test imported its "expected HTTP status per code" table from the same module
-    it was testing — so a transposed status code in the implementation would have been copied
-    into the test and passed. Fixed by re-deriving the expected table independently from the
-    contract document instead of importing it.
-  - `ContactQuota.reserve` originally opened its own database transaction. The spec requires the
-    quota reservation, the comment insert, and the outbox write to commit together (so a crash
-    between them can't leak a permanent allowance); a reservation with its own transaction could
-    commit and then lose the comment insert, with no way back since `release` is keyed by a comment
-    id that was never written. Fixed to join the caller's transaction instead of opening its own.
-  - A schema migration for `comment_sync_targets.age_anchor_at` was drafted with a `now()` default
-    for rows inserted without one. That default would have silently placed an untracked post in the
-    most aggressive polling band (as if it had just been published) instead of failing the insert —
-    a wrong guess that looks like success. Rejected in review; the column stays `NOT NULL` with no
-    default, and the three places that insert a row were fixed to supply a real anchor instead.
-  - One interface — the `ApiKeys` port — got its exact shape changed twice mid-implementation while
-    two different tasks (the port definition and the auth hook that calls it) were in flight at the
-    same time, settling on a discriminated `Found<T>` result used consistently across all six ports.
-    The agent implementing the auth hook re-read the port file from disk before adapting to a
-    paraphrased description of it, which is what caught that an earlier message had described an
-    intermediate, not-yet-final state.
-  - Before spike S2 ran, the Instagram read path was left **throwing** rather than stubbed to
-    return nothing — a stub returning an empty page would make a sync walk conclude the post has no
-    comments and mark an entire real thread `deleted`. The same instinct survives into the built
-    version: a comment whose nested reply edge is truncated throws instead of reporting a complete
-    walk, because an incomplete walk infers no deletions (FR-019). Refusing to answer is safe;
-    answering "nothing" is not.
-- **What I did myself.** I made the calls an agent shouldn't: which platforms to support, the
-  service-boundary shape (no foreign key across services, ports only), what stays out of scope, and
-  every point in `spec.md §18` where an amendment changes stated behavior — each of those went
-  through me, not just the agent, because they're product and architecture decisions, not
-  implementation detail.
+- **Spec.** I gave it `task.md` and had it interview me — scope, platforms, ingestion, retention —
+  to produce `spec.md`, plus research into Blotato's public docs and Meta's Graph API and webhook
+  documentation (cited in §2). Where I disagreed with its first pass — ordering defaults, the auth
+  header name, the Instagram login variants — the disagreement is recorded as a decision (D27, A16,
+  D28) rather than silently overwritten.
+- **Planning and implementation.** Decisions resolved into `plan.md`, `data-model.md` and a
+  dependency-ordered `tasks.md`; then a controller agent worked through it one wave at a time,
+  dispatching implementer subagents, tests before implementation, a review pass after each wave. I
+  read the summaries and spot-checked diffs rather than every line.
+- **What review caught** — the four worth naming:
+  - `ContactQuota.reserve` opened its own transaction. A crash between it and the comment insert
+    would leak a permanent quota allowance with no way back, since `release` is keyed by a comment
+    id that was never written. Fixed to join the caller's transaction.
+  - A migration gave `comment_sync_targets.age_anchor_at` a `now()` default, which would silently
+    put an untracked post in the most aggressive polling band instead of failing the insert.
+    Rejected; the column stays `NOT NULL` with no default.
+  - Log redaction stopped one level too shallow — a nested comment page, or `job.data.comment.text`,
+    leaked comment text past the redactor.
+  - An error-catalogue test imported its expected status table from the module under test, so a
+    transposed status code would have been copied into the test and passed.
+- **What I decided myself.** Which platforms to support, the service-boundary shape (no foreign key
+  across services, ports only), what stays out of scope, and every amendment in `spec.md` §18 that
+  changes stated behaviour — product and architecture calls, not implementation detail.

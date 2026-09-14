@@ -1,14 +1,11 @@
 # Blotato Take Home — Comment System: Specification
 
-> Status: **FINAL** (2026-09-11). The contested assumptions (A3, A4, A9, A11, A16, A17) were reviewed
-> with the author; decisions D27–D28 were added as a result. A later review of the system shape
-> replaced the "modular monolith" framing with an explicit service boundary: D29 and A10a, with
-> §4.1, §5.1, §5.2, D8 and D26 updated to match. A later review of the read surface collapsed the
-> three nested reads into one filtered collection: D31 (§18), with §5.2, §6.1, §12, D11, D13, D27,
-> A3 and A10a updated to match.
-> This is the working specification. The deliverable documents (README, DESIGN.md, OpenAPI) are also
-> in English (D18).
-> All decisions are in section 3, all assumptions in section 16, risks and spikes in section 17.
+> The working specification, and the source of truth for every numbered decision. Decisions are in
+> §3 (D1–D31), assumptions in §16 (A1–A23), spikes and their results in §17. §18 records every change
+> made to a decision or assumption after this document was first written — each entry states what
+> changed and why, and is written before the code diverges.
+>
+> The reader-facing write-up is `DESIGN.md`; this document is deliberately more granular.
 
 ## 1. Original task
 
@@ -22,8 +19,9 @@ See `task.md`. Design and partially implement a comment system for a social medi
 Deliverables: database schema, API design, TypeScript code, explanation of major design decisions,
 list of assumptions, description of AI tool usage. The answer is a link to a GitHub repository.
 
-The author's goal is to get hired by the founder. What matters is explicit trade-offs,
-production-grade reliability and a working deployed service — not matching Blotato's implementation.
+The brief states explicitly that reasoning is what's evaluated, not parity with Blotato's own
+implementation. This specification therefore optimizes for explicit trade-offs, production-grade
+reliability and a service that actually runs.
 
 ## 2. References
 
@@ -113,6 +111,8 @@ Sources: <https://developers.facebook.com/docs/instagram-platform/webhooks>,
 | D27 | List ordering | The listing accepts `order=asc\|desc` and the cursor encodes the direction; a cursor replayed under the other direction is a `400`. The per-route defaults (`desc` for top-level and inbox, `asc` for replies) are superseded by D31 (§18): one collection has one default, `desc`, and a reply thread asks for `order=asc` | The client picks the scenario (inbox or reading a conversation); B-tree indexes are readable in both directions, so no extra indexes are needed |
 | D28 | Instagram login | The IG adapter supports both variants: Facebook Login for Business (Page token, `graph.facebook.com`) and Instagram Login (Instagram user token, `graph.instagram.com`). The variant is stored in `social_accounts.auth_variant`; differences are isolated in the Graph client, and use cases do not depend on the variant | Instagram Login is how most modern creators connect without an FB Page; Facebook Login covers businesses with a linked Page |
 | D29 | Data ownership | The service owns its schema. References to other services' entities (`workspace_id`, `social_account_id`, `post_id`) are plain `uuid` columns with no foreign key; only links inside the service (`parent_comment_id`, `root_comment_id`) keep foreign keys. Referential integrity comes from port validation on write and platform events on delete | A foreign key across a service boundary forces a shared database and blocks independent schema changes; the read contract (§6.2) needs no data from other services, so the boundary costs nothing |
+| D30 | Account disconnection | "Disconnected" is a behaviour, not a write to `social_accounts`. On `AuthError` this service records `auth_failed` in its own `account_health` table and emits `account.auth_failed`; the `Accounts` port returns an **effective** status (`active` only if the projection says `active` and no local record exists). Cleared by a successful platform call, not by a projection read. Full rationale in §18 | Writing another service's table would make this service its second writer — the one boundary violation D8/D29 exist to avoid |
+| D31 | Read shape | The three nested reads (`GET /posts/:id/comments`, `/comments/:id/replies`, `/accounts/:id/comments`) are **replaced** by one filtered collection `GET /v1/comments`; filters intersect, writes keep their addresses. Full rationale, and what it does not touch, in §18 | The moderation view the product is for — every comment across every account — had no address at all; hierarchy belongs in a filter, not in a path |
 
 ## 4. Architecture
 
@@ -248,13 +248,10 @@ Constraints and indexes:
 - `(last_activity_at) WHERE parent_comment_id IS NULL` — retention purge.
 - `(status, last_attempt_started_at) WHERE status IN ('queued', 'processing')` — finding stuck rows.
 - List indexes serve both `order` values (D27): Postgres scans B-trees backwards. This holds only
-  while each index and the listing's `ORDER BY` agree on NULL placement, so both are left at
-  Postgres's own default for the direction (`NULLS FIRST` for `DESC`, `NULLS LAST` for `ASC`) and
-  neither names one. A pathkey includes NULL placement and the planner does not use a column's
-  `NOT NULL` to match one, so naming `NULLS LAST` on a `DESC` index costs `order=asc` that index
-  entirely — its backward scan yields `ASC NULLS FIRST` — and the read degrades to a full `Sort` of
-  the selection. `benchmark.integration.test.ts` asserts the whole selection × direction matrix
-  through `EXPLAIN`, which is the only automatic guard on this.
+  while each index and the listing's `ORDER BY` agree on NULL placement, so neither names one and
+  both stay at Postgres's default for the direction. `benchmark.integration.test.ts` asserts the
+  whole selection × direction matrix through `EXPLAIN` — see §18 for why that matrix, and not one
+  case per index, is the guard.
 
 ### 5.3. Module-internal tables
 
@@ -289,12 +286,10 @@ Base path `/v1`. Auth: `blotato-api-key: <api key>` header (A16). JSON, `camelCa
 
 Every endpoint above requires the API key except the two health probes and the two webhook
 operations, which authenticate by their own means (`hub.verify_token`, HMAC over the raw body). The
-published document declares the key scheme globally (A16) and clears it on the exempt operations the
-document actually contains — the two health probes. The webhook operations and `GET /openapi.json`
-are registered `hide: true`, and the `/docs` assets are served by the Swagger UI plugin, so none of
-those is an operation the document can annotate at all. The exempt list still has one source — the
-array the authentication hook itself enforces, each entry carrying whether it is published — so what
-is described and what is enforced cannot drift.
+published document declares the key scheme globally (A16) and clears it on the exempt operations it
+contains — the health probes; the webhook operations and `GET /openapi.json` are `hide: true` and
+`/docs` is plugin-served, so the document cannot annotate them. The exempt list has one source, the
+array the authentication hook enforces, so what is described and what is enforced cannot drift.
 
 ### 6.2. `Comment` representation
 
@@ -556,22 +551,21 @@ Redis for BullMQ: `maxmemory-policy noeviction`, persistence enabled (AOF).
   account linked to an FB Page; webhooks configured at `https://<domain>/webhooks/meta`.
 - Bluesky: a dedicated test account with an app password.
 - Seed (D26): workspace + demo API key + 3 social accounts + several published posts as sync targets.
-- README walkthrough: `GET /v1/comments` with no identifier at all (D31 — the reviewer holds only a
-  key) → `GET /v1/platforms` → `GET /v1/comments?postId=:id&topLevelOnly=true` → `POST .../replies` →
-  poll `GET /v1/comments/:id` until `posted` → reply to a reply on IG (422) and on Bluesky (202) →
-  `POST .../comments/sync`.
+- README walkthrough, in order: `GET /v1/platforms` → `GET /v1/comments` with no identifier at all
+  (D31 — the reviewer holds only a key) → `GET /v1/comments?postId=:id&topLevelOnly=true` →
+  `POST .../replies` → poll `GET /v1/comments/:id` until `posted` → reply to a reply on IG (422) and
+  on Bluesky (202) → `POST .../comments/sync` → auth and tenancy (401 / 404). `pnpm smoke` runs
+  steps 1–7 with assertions.
 
 ## 13. Deliverables
 
-- `README.md`: what it is, link to the deployment and `/docs`, walkthrough, local run (docker
-  compose), layout, "How I used AI tools" section.
-- `DESIGN.md`: context and scope, architecture (mermaid) including the service boundary — what the
-  service owns, what it reads through ports, and why it is not split further (§4.1),
-  database schema (ER diagram), API, flows
-  (reply / webhook / sync sequence diagrams), platforms and registry, key decisions with trade-offs and
-  alternatives, assumptions, Meta deployment constraints, differences from the current
-  `/v2/comments`, evolution path (Jetstream, partitioning, remaining platforms, private replies).
-- `openapi.json` generated from Zod schemas (CI checks that the committed version is up to date).
+- `README.md`: what it is, the deployment and `/docs`, the walkthrough, local run, layout, and the
+  "How I used AI tools" section the brief asks for.
+- `DESIGN.md`: context and scope, architecture (mermaid) including the service boundary, data model
+  (ER diagram), API, the three flows (reply / webhook / sync sequence diagrams), platforms and
+  registry, key decisions with trade-offs and rejected alternatives, assumptions, implementation
+  status and its gaps, differences from the current `/v2/comments`, evolution path.
+- `openapi.json` generated from Zod schemas (CI checks the committed version is up to date).
 - Code, migrations, tests, CI.
 
 ## 14. Out of scope
@@ -661,441 +655,356 @@ Infrastructure:
 - **A23.** Local run via docker compose is supported for development and CI, but the reviewer uses the
   deployment (D22).
 
-## 17. Risks and spikes (run before implementing the corresponding parts)
+## 17. Risks and spikes
 
-- **S1. FB Page `feed` webhooks in development mode.** Check whether comment events from a user with a
-  role on the app are delivered. If not, the webhook path is demoed only with test events from the
-  dashboard, and real data arrives through sync (D23).
-  - **Result (2026-09-13).** Page token valid, `expires_at=never`, all scopes present; the Page is
-    subscribed to `feed` (`subscribed_apps` reports our app and only ours). A tunnelled receiver
-    answered the `hub.challenge` handshake and the callback URL verified.
-    - **A dashboard `Test` send for `feed` was delivered** — payload recorded, `object: "page"`,
-      `entry[].changes[].field: "feed"`, with the synthetic `Test Page` author and `post_id`
-      `44444444_444444444`. So the Meta → endpoint path works end to end.
-    - **A real comment was not delivered.** Two comments on a real Page post — one by the app's own
-      admin (an app-role account), one by an account with no role — produced no delivery in the
-      following minutes, with the receiver verified live before and after by a direct `POST`
-      through the same tunnel. The negative is therefore about Meta, not about the tract.
-    - **Consequence (confirms D23).** The webhook path is demonstrated with dashboard test events;
-      real IG/FB comment data arrives through the sync job. The intake, its signature check and its
-      normalizer are built and tested against the recorded test payload, whose envelope
-      (`object`/`entry[]/changes[]/field`/`value`) is the same envelope a real delivery carries.
-- **S2. Reading IG comments in Standard Access for both login variants.** The Meta forum has reports of
-  empty `data` for `/comments` in Standard Access via Instagram Login. Test both variants and use
-  whichever works for the live demo. If neither works, IG is covered by fixture-based tests, the live
-  demo relies on FB and Bluesky, and the limitation is described in DESIGN.md.
-  - **Result (2026-09-13), `facebook_login` half:** `GET /{media-id}/comments` on
-    `graph.facebook.com` returned HTTP 200 with 2 top-level comments against a Standard Access app.
-    Raw body committed as `src/platforms/meta/__fixtures__/s2-facebook-login-comments.json`.
-    Three observations the implementation depends on:
-    1. **Replies are nested, not listed.** A reply to a comment does not appear as an element of
-       `data`; it appears under that comment's `replies.data`. The adapter flattens the page, the
-       edge does not.
-    2. **`from` is present and carries `{id, username}` only** — no `name`. `author_display_name`
-       is therefore null for Instagram, and FR-030's deletion path must tolerate nulling a field
-       that was already null.
-    3. **No `paging` key** when the result fits one page. Cursor handling for Instagram is
-       unexercised by this fixture — a known gap, not a resolved one.
-  - **`instagram_login` half: not attempted.** That variant requires a second Meta App (the two
-    login variants cannot coexist in one app) and its own OAuth flow. Not attempted is deliberately
-    recorded as distinct from "returned nothing": the latter is a claim about Meta's behaviour under
-    Standard Access, and this spike has not established it.
-- **S6 (unplanned, 2026-09-13). Facebook Page comments: an access-model dead end that was not one.**
-  Running the walkthrough against the deployment, the Facebook sync failed with `(#10) This endpoint
-  requires the 'pages_read_user_content' permission or the 'Page Public Content Access' feature`, and
-  publishing failed with `(#200) You do not have sufficient permissions`. Meta's login dialog
-  answered `Invalid Scopes: pages_read_user_content` when that permission was requested.
-  - **First conclusion, recorded here and wrong: "no longer grantable without App Review."** It is
-    kept rather than edited away because the reasoning error is the useful part. `Invalid Scopes`
-    was read as a statement about *authorization* — Meta refusing to grant — when it is a statement
-    about *existence*: under the use-case model a permission is only requestable once it has been
-    added to one of the app's use cases, and separately enabled on the Facebook Login for Business
-    configuration the dialog resolves. Unadded, it reports as invalid, which is indistinguishable
-    from denied by message alone. Three dialog attempts were spent before the difference was noticed.
-  - **What the token actually showed.** `debug_token` on the Page token: type `PAGE`, never expiring,
-    granular `pages_read_engagement`, `pages_show_list`, `pages_manage_metadata`, each targeted at
-    the Page — a correct token missing exactly two permissions. Reading the post object succeeded
-    while every comment read failed, which located the gap on the comments edge rather than on the
-    token, the object id, or the host.
-  - **The fix (2026-09-13), no App Review and no Business Verification.** `pages_read_user_content`
-    and `pages_manage_engagement` are optional permissions of the *Manage everything on your Page*
-    use case, and Standard Access covers them for a Page the app admin owns. Two dashboard edits in
-    order — add them to the use case, then enable them on the Login for Business configuration —
-    then a fresh token from the Graph API Explorer, exchanged for a long-lived user token and a
-    never-expiring Page token.
-  - **Result.** `GET /{post-id}/comments` returns the Page post's comments with
-    `paging.cursors.after` and no `paging.next` — the terminal-page shape the adapter has to read as
-    "walk complete", exercised for real for the first time. `POST /{post-id}/comments` publishes.
-    Through the deployment: sync `fetched: 3, inserted: 3`, a published reply
-    (`122093382351485339_936214829041858`), and `422 REPLY_DEPTH_EXCEEDED` on the second level.
-  - **One shape difference worth keeping.** Facebook's `from` carries `{id, name}` and no username;
-    Instagram's carries `{id, username}` and no name (S2). Two platforms from one vendor disagree on
-    the author field, so `author_username` is null for Facebook and `author_display_name` is null for
-    Instagram — both normalizations are load-bearing, neither is defensive.
-  - **No code changed.** The adapter, the sync walk and the error typing were correct throughout; the
-    failure had surfaced as a typed platform rejection carrying the platform's own message, which is
-    what §6.3 asks of it. What was wrong was a document, and D23's remaining consequence is narrower
-    than it looked: Standard Access blocks *webhook delivery* (S1), not Page reads.
-- **S3. Railway Redis.** Confirm that `maxmemory-policy noeviction` can be set and persistence enabled;
-  otherwise run Redis from a Docker image with a volume.
-  - **Result (2026-09-13), half negative.** Against the deployed managed Redis,
-    `CONFIG GET maxmemory-policy appendonly` returned `noeviction` and `appendonly no`. The
-    eviction half holds by default, as Railway's own guide says; the persistence half does not, and
-    the `redis()` helper exposes no way to pass server flags, so it cannot be turned on from
-    configuration. Its start command, read back from the live graph, is
-    `redis-server --requirepass $REDIS_PASSWORD --save 60 1 --dir $RAILWAY_VOLUME_MOUNT_PATH` — so
-    that database is not unpersisted, it is RDB-snapshotted at most once a minute. The gap is
-    therefore bounded rather than total: a crash loses up to a minute of queue state, which the
-    sweepers would have to rediscover and which `domain-events` has no second copy of. The pre-committed fallback therefore applies: Redis runs from `redis:8.10.1-alpine`
-    — the image `docker-compose.yml` already uses — started with the same flags and a volume at
-    `/data`, with `REDIS_URL` set by hand to the service's private address. This changes deployment
-    configuration only, as the Complexity Tracking table anticipated; no application code moves.
-  - **One piece of that is not declarative, and the gap is recorded rather than hidden.** Railway's
-    IaC types let a database carry only image, output, default mount path and region — not a start
-    command. Declaring the instance as a plain service *can* carry one, but Railway classifies a
-    redis image as a database anyway, so every later plan wanted to delete and recreate the running
-    instance. It is therefore declared as a database, which keeps plans clean and leaves the start
-    command untouched, and the flags live on the resource rather than in the file. An apply into a
-    fresh environment produces a Redis with the image's defaults — no AOF — so the durability claim
-    here holds only after someone sets that start command and confirms it with
-    `CONFIG GET appendonly maxmemory-policy`. `.railway/railway.ts` carries the same warning beside
-    the declaration.
-  - **Confirmed on the deployment (2026-09-13).** `CONFIG GET appendonly maxmemory-policy` against
-    the `cache` instance returns `noeviction` and `yes`, and `/readyz` reports Redis reachable from
-    `api` — which is itself evidence the services moved to the new instance, since the address they
-    now hold carries no password and the managed database would have refused the connection.
-  - **Why the AOF half is not optional here.** Postgres is the source of truth, and the sweepers
-    re-enqueue work whose job was lost — so a Redis restart is survivable in the sense that no
-    comment is lost. What it is not is *invisible*: every in-flight job would have to be rediscovered
-    by a sweeper on its own schedule, and `domain-events`, which has no consumer in this deployment
-    (D9) and is trimmed on a timer rather than drained, would be emptied outright. `noeviction`
-    without persistence protects the queue from a full memory buffer and not from a restart.
-- **S4. Bluesky limits.** Check current rate limits for `createRecord` and `getPostThread` and tune the
-  polling intervals.
-  - **Result (2026-09-13),** from the published limits (docs.bsky.app/docs/advanced-guides/rate-limits).
-    - **Writes are per DID, by points.** A record CREATE costs 3 points against **5,000 points per
-      hour and 35,000 per day** — 1,666 creates an hour, 11,666 a day. The publish worker's
-      placeholder refill of 0.5/s allowed 1,800 an hour and so **exceeded the hourly ceiling**;
-      lowered to 0.25/s (900 an hour, 54% of it). The daily ceiling is left unguarded on purpose: a
-      bucket sized for it would throttle an ordinary day's bursts, and crossing it degrades to a
-      `429` that arrives as `RetryableError` with `Retry-After`, honoured by `PublishOutcome`.
-    - **Reads are per IP, not per account:** ~3,000 requests per 5 minutes against the public
-      appview. This is the limit `getPostThread` falls under, and the per-account token bucket does
-      **not** protect it — every sync target in the deployment draws on one shared budget. At the
-      §7.3 `<24h` interval of 5 minutes, one request per target per window, the budget covers on the
-      order of 3,000 concurrently-fresh Bluesky posts. Well beyond this deployment; recorded because
-      the mitigation if it were ever approached is to lengthen that interval, not to add another
-      per-account bucket, which would not bind on a per-IP limit.
-    - `BLUESKY_THREAD_DEPTH` stays at 10: thread depth costs no additional requests, since
-      `getPostThread` returns the whole requested depth in one call.
-- **S5. Webhook signing secret for Instagram Login.** Check which secret (Meta App Secret or Instagram
-  App Secret) signs webhooks for the `instagram_login` variant. The verifier must support both secrets
-  from config.
-  - **Partial result (2026-09-13).** On a captured `page` delivery, `X-Hub-Signature-256` matched
-    `HMAC-SHA256(META_APP_SECRET, <raw body bytes>)` exactly — confirming both the secret and that
-    the digest is over the unparsed body, not a re-serialization of it.
-  - **The `instagram_login` half stays open.** That variant needs a second Meta App (the two login
-    variants cannot coexist in one), which was not created. What is unresolved is a *configuration
-    value*, not the shape of the code: this spike's own requirement — "the verifier must support
-    both secrets from config" — means the verifier takes the secret per variant from configuration
-    either way. The webhook path is therefore built, with the `instagram_login` secret left as a
-    deployment-time setting and this gap recorded rather than guessed.
-  - **Deployment setting (2026-09-13).** The deployed environment has one Meta App, serving
-    `facebook_login`, so `META_APP_SECRET_INSTAGRAM` is set to that same app's secret — the value
-    the verifier needs for any delivery this deployment can actually receive. It is a separate
-    variable rather than a fallback to `META_APP_SECRET` because a second app, when one exists,
-    brings its own secret; collapsing them in config would make that a code change instead of a
-    variable change. The equality is a fact about this environment, not about Meta.
+Each spike gates the part of the implementation it answers: nothing is built on unverified platform
+behaviour. All six ran on 2026-09-13.
 
-## 18. Open questions
+**S1. FB Page `feed` webhooks in development mode.** Are comment events from a user with a role on
+the app delivered?
 
-None outstanding. Any change to decisions in sections 3 and 16 is recorded here before
-implementation.
+- Setup verified: Page token valid (`expires_at=never`, all scopes), Page subscribed to `feed`
+  (`subscribed_apps` reports our app and only ours), tunnelled receiver answered the `hub.challenge`
+  handshake.
+- **A dashboard `Test` send was delivered** — payload recorded, `object: "page"`,
+  `entry[].changes[].field: "feed"`. The Meta → endpoint path works end to end.
+- **A real comment was not.** Two comments on a real Page post — one by the app's own admin, one by
+  an account with no role — produced no delivery, with the receiver verified live before and after
+  by a direct `POST` through the same tunnel. The negative is about Meta, not the transport.
+- **Consequence (confirms D23):** the webhook path is demonstrated with dashboard test events; real
+  IG/FB data arrives through sync. Intake, signature check and normalizer are built and tested
+  against the recorded payload, whose envelope is the one a real delivery carries.
 
-### Recorded changes
+**S2. Reading IG comments in Standard Access, both login variants.** The Meta forum reports empty
+`data` for `/comments` under Instagram Login.
 
-- **A complete walk excludes rows written in the last five minutes (narrows FR-019).** FR-019 lets
-  only a complete walk infer deletions from absence, and "complete" was read as "the walk finished".
-  It is not enough: a comment inserted *while* the walk was running — a reply this service just
-  published, a webhook delivery, or a comment the platform had not yet indexed — is absent from the
-  page through no fault of the platform, and absence is what marks it `deleted`. The revive guard
-  then makes that deletion permanent, so the race costs data rather than a retry. `inferDeletions`
-  now excludes rows whose last write falls inside a five-minute grace window before the walk
-  started. The cost is the honest direction: a genuinely deleted comment that was also edited in
-  that window survives until the next walk, which is a delay. The alternative cost was an
-  irreversible false deletion.
+- **`facebook_login`: works.** `GET /{media-id}/comments` on `graph.facebook.com` returned HTTP 200
+  with 2 top-level comments against a Standard Access app. Raw body committed as
+  `src/platforms/meta/__fixtures__/s2-facebook-login-comments.json`. Three observations the adapter
+  depends on: replies are **nested** under a comment's `replies.data`, not listed in `data`; `from`
+  carries `{id, username}` and no `name`, so `author_display_name` is null for Instagram; there is
+  **no `paging` key** when the result fits one page, so IG cursor handling is unexercised by this
+  fixture — a known gap, not a resolved one.
+- **`instagram_login`: not attempted.** It requires a second Meta App (the two variants cannot
+  coexist in one) and its own OAuth flow. Recorded as distinct from "returned nothing": the latter
+  would be a claim about Meta's behaviour, and this spike has not established it.
+
+**S3. Railway Redis.** Can `maxmemory-policy noeviction` and persistence both be set?
+
+- **Half negative.** The managed instance returned `noeviction` and `appendonly no`, and the
+  `redis()` helper exposes no way to pass server flags. Its start command is `redis-server
+  --requirepass … --save 60 1 --dir …`, so that database is RDB-snapshotted once a minute rather
+  than unpersisted — the gap is bounded, not total: a crash loses up to a minute of queue state.
+- **Fallback applied** (pre-committed, deployment configuration only, no code moved): Redis runs
+  from `redis:8.10.1-alpine` — the image `docker-compose.yml` already uses — with a volume at
+  `/data`. Confirmed on the deployment: `CONFIG GET appendonly maxmemory-policy` returns `yes` and
+  `noeviction`, and `/readyz` reports Redis reachable.
+- **One non-declarative gap, recorded rather than hidden.** Railway's IaC types let a database carry
+  image, output, mount path and region — not a start command; declaring it as a plain service
+  instead makes Railway reclassify it and every later plan wants to recreate the running instance.
+  The flags therefore live on the resource, not in the file, and an apply into a *fresh* environment
+  produces image defaults with no AOF. `.railway/railway.ts` carries the same warning.
+- **Why AOF matters here.** Postgres is the source of truth and the sweepers re-enqueue lost work, so
+  a Redis restart loses no comment — but every in-flight job waits for a sweeper, and
+  `domain-events`, which has no consumer (D9), would be emptied outright. `noeviction` protects the
+  queue from a full memory buffer, not from a restart.
+
+**S4. Bluesky rate limits**, to tune the polling intervals.
+
+- **Writes are per DID, by points.** A record CREATE costs 3 points against 5,000/hour and
+  35,000/day — 1,666 creates an hour. The publish worker's placeholder refill of 0.5/s allowed 1,800
+  an hour and so **exceeded the hourly ceiling**; lowered to 0.25/s (900/hour, 54% of budget). The
+  daily ceiling is left unguarded deliberately: a bucket sized for it would throttle an ordinary
+  day's bursts, and crossing it degrades to a `429` that arrives as `RetryableError` with
+  `Retry-After`.
+- **Reads are per IP, not per account** — ~3,000 requests per 5 minutes against the public appview.
+  The per-account token bucket does **not** protect this: every sync target draws on one shared
+  budget. At the §7.3 `<24h` interval that covers ~3,000 concurrently-fresh posts, well beyond this
+  deployment. Recorded because the mitigation would be a longer interval, not another per-account
+  bucket, which cannot bind on a per-IP limit.
+- `BLUESKY_THREAD_DEPTH` stays at 10: depth costs no extra requests, since `getPostThread` returns
+  the whole requested depth in one call.
+
+**S5. Which secret signs webhooks for the `instagram_login` variant?**
+
+- **Confirmed for `page`:** on a captured delivery, `X-Hub-Signature-256` matched
+  `HMAC-SHA256(META_APP_SECRET, <raw body bytes>)` exactly — establishing both the secret and that
+  the digest is over the unparsed body, not a re-serialization.
+- **The `instagram_login` half stays open**, needing a second Meta App. What is unresolved is a
+  *configuration value*, not a code shape: the verifier takes the secret per variant from config
+  either way, so the webhook path is built. `META_APP_SECRET_INSTAGRAM` is set to the one app's
+  secret in this deployment — a separate variable rather than a fallback, so that a second app, when
+  it exists, is a variable change and not a code change.
+
+**S6 (unplanned). Facebook Page comments: an access-model dead end that was not one.**
+
+- **Symptom.** Sync failed with `(#10) This endpoint requires the 'pages_read_user_content'
+  permission`, publishing with `(#200) You do not have sufficient permissions`, and Meta's login
+  dialog answered `Invalid Scopes: pages_read_user_content`.
+- **First conclusion, wrong, kept because the error is the useful part:** "no longer grantable
+  without App Review." `Invalid Scopes` was read as a statement about *authorization* — Meta
+  refusing — when it is a statement about *existence*. Under the use-case model a permission is only
+  requestable once it has been added to one of the app's use cases *and* enabled on the Facebook
+  Login for Business configuration; unadded, it reports as invalid, which is indistinguishable from
+  denied by message alone. Three dialog attempts were spent before the difference was noticed.
+- **What located the gap.** `debug_token` showed a correct Page token — type `PAGE`, never expiring,
+  granular `pages_read_engagement`, `pages_show_list`, `pages_manage_metadata` — missing exactly two
+  permissions. Reading the post object succeeded while every comment read failed, placing the gap on
+  the comments edge rather than on the token, object id or host.
+- **The fix: two dashboard edits, no App Review and no Business Verification.**
+  `pages_read_user_content` and `pages_manage_engagement` are optional permissions of the *Manage
+  everything on your Page* use case, covered by Standard Access for a Page the app admin owns. Add
+  them to the use case, enable them on the Login for Business configuration, then mint a fresh token.
+- **Result.** `GET /{post-id}/comments` returns the Page post's comments with `paging.cursors.after`
+  and no `paging.next` — the terminal-page shape the adapter must read as "walk complete", exercised
+  for real for the first time. Through the deployment: sync `fetched: 3, inserted: 3`, a published
+  reply (`122093382351485339_936214829041858`), `422 REPLY_DEPTH_EXCEEDED` on the second level.
+- **No code changed**, and D23's remaining consequence is narrower than it looked: Standard Access
+  blocks *webhook delivery* (S1), not Page reads. The failure had surfaced as a typed platform
+  rejection carrying the platform's own message, which is what §6.3 asks of it. What was wrong was a
+  document.
+- **One shape difference worth keeping.** Facebook's `from` carries `{id, name}` and no username;
+  Instagram's `{id, username}` and no name (S2). Two platforms from one vendor disagree on the author
+  field, so `author_username` is null for Facebook and `author_display_name` null for Instagram —
+  both normalizations are load-bearing, neither is defensive.
+
+## 18. Recorded changes
+
+No open questions outstanding. Every change to a decision (§3) or assumption (§16) is recorded here
+before the code diverges from it, grouped below by what kind of change it is.
+
+### Decisions added after the first draft
+
+- **D30 — account disconnection is a behaviour, not a write (amends §7.1 step 6 and A19).**
+  "The account is marked `disconnected`" must not become `UPDATE social_accounts SET status`: that
+  table is a read-only projection of the accounts service (D8, D29), and writing it would make this
+  service its second writer — the one boundary the design exists to demonstrate. Instead this service
+  owns `account_health` (§5.3): on `AuthError` the worker records `auth_failed`, emits outbox
+  `account.auth_failed`, and stops the account's jobs. The `Accounts` port returns an **effective**
+  status — `active` only when the projection says `active` *and* no local record exists — so §6.3's
+  `ACCOUNT_DISCONNECTED` and A19 behave exactly as specified while the boundary holds.
 - **D30's clear trigger is a successful platform call, not a projection read (clarifies D30).** D30
-  says a projection row flipping back to `active` clears the local `auth_failed` record, and read
-  literally that cannot be implemented: this service never writes `social_accounts.status`, so the
-  column reads `active` throughout an auth failure — "projection active plus a local record" is the
-  *normal* broken state, indistinguishable from a recovery. The implementable trigger is evidence,
-  not status: a **successful** platform call for that account proves the credential works again.
-  `AccountHealth.clear` is therefore called from a successful sync walk. Sync keeps running for an
-  account marked `auth_failed` — the calls are read-only and cost nothing when they fail — which is
-  what makes the clear reachable at all; the publish path needs no clear of its own, since it
-  resumes as soon as the effective status flips back.
-- **`domain-events` is trimmed on a schedule in this deployment (extends D9).** The outbox relay
-  publishes domain events to a BullMQ queue for consumers in other services — and in this
-  deployment there are none, so nothing ever moves a job out of `wait`. Bounded `removeOnComplete`
-  does not help a job that never completes, and D24 mandates Redis run `noeviction`, so the queue
-  grows until Redis refuses writes and takes the publish and sync paths down with it. Three options
-  were available: stop publishing (which would delete the D9 contract this service exists to
-  demonstrate), let it grow (a scheduled outage), or expire events nobody collected. The last is
-  what a real broker does. A scheduled job drops `domain-events` jobs older than
-  `DOMAIN_EVENTS_TTL_HOURS` (default 24) and logs how many, so an operator sees the count rather
-  than a silent loss. Postgres keeps the authoritative record either way: `outbox_events` rows are
-  marked published and retained under the normal purge, so a future consumer can be backfilled from
-  the table rather than from Redis — which is the D9 property that matters.
-- **An undecryptable credential is an `AuthError` (extends D26/D30).** `AccountCredentials`
-  decrypts the stored token on every read, and a ciphertext that will not decrypt — a botched key
-  rotation, a corrupted row — raised a bare crypto error. Nothing typed it, so nothing handled it:
-  the webhook worker retried such a delivery under backoff **forever**, and the publish path had no
-  case for it either. Typed as `AuthError`, it flows into machinery that already exists: D30 records
-  `auth_failed` in this service's own `account_health`, emits `account.auth_failed`, and stops the
-  account's jobs. That is also the honest classification — the credential is unusable and only a
-  reconnection fixes it, which is exactly what `AuthError` means everywhere else. Found by an
-  integration test hanging for its full 60-second budget rather than failing; the hang, not the
-  failure, was the symptom worth chasing.
-- **`Accounts.listByPlatformAccount` (extends the `Accounts` port, §4.2/D8).** A webhook delivery
-  identifies its account only by the platform's own id — a Page id or an IG user id — while every
-  existing lookup is keyed by our internal `social_account_id`. The webhook worker therefore cannot
-  resolve a delivery at all with the port as specified, and the one forbidden alternative is a
-  direct `SELECT` against the `social_accounts` projection from inside `comments` (D8, D29,
-  Principle II). Added: `listByPlatformAccount(platform, platformAccountId)`.
-  It returns a **list**, not a `Found<T>`, because the projection carries no uniqueness on
-  `(platform, platform_account_id)` and none can be assumed: two workspaces may legitimately connect
-  the same Page, and a delivery concerns both. A single-record lookup would silently serve one
-  workspace and drop the other's comments — a tenancy-shaped data loss no test keyed to one
-  workspace would catch. An empty list is the "unknown account" case §7.2 step 2 marks processed
-  with a warning. Each matching account is ingested separately; the dedup key
-  `UNIQUE (social_account_id, platform_comment_id)` keeps the rows apart, so fan-out needs no
-  further guard.
-- **A17's two-variant equivalence test runs against one live fixture (narrows T097).** A17 asserts
-  the two D28 login variants normalize identically, and the test was specified as one parameterized
-  body over a fixture per variant. S2 produced the `facebook_login` fixture; the `instagram_login`
-  one does not exist, because that variant needs a second Meta App and its own OAuth flow (§17).
-  The test therefore runs both arms over the **same** recorded body, differing only in host and
-  credential — which still proves the property A17 is about (the adapter does not branch on variant,
-  Principle IV) while making no claim about what `graph.instagram.com` actually returns. The
-  alternative — hand-writing the second fixture — would assert a response shape nobody observed, the
-  exact failure mode the spike gate exists to prevent. When the `instagram_login` fixture is
-  recorded, it replaces the duplicated body with no change to the test body.
-- **D30 (amends §7.1 step 6 and A19).** "The account is marked `disconnected`" is kept as a
-  *behaviour*, not as a write to `social_accounts`. That table is a read-only projection of the
-  accounts service (D8, D29, Constitution Principle II), and writing its `status` column would make
-  this service a second writer of another service's data — the one boundary the design exists to
-  demonstrate. Instead this service owns `account_health` (§5.3): on `AuthError` the worker records
-  `auth_failed` there, emits outbox `account.auth_failed` for the accounts service, and stops the
-  account's jobs. The `Accounts` port returns an **effective** status — `active` only when the
-  projection says `active` *and* no local `auth_failed` record exists — so §6.3
-  `ACCOUNT_DISCONNECTED` and A19 behave exactly as specified, while the boundary holds. Clearing the
-  record remains the accounts service's job (reconnection), and a projection row that flips back to
-  `active` clears it.
-- **`INTERNAL_ERROR` (extends §6.3).** FR-032 requires every failure to be
-  `application/problem+json` carrying a machine-readable `code`, but the §6.3 catalogue lists only
-  the failures a client can cause: it has no entry for an unhandled exception. The global error
-  handler therefore needs a code the catalogue does not provide, and the alternatives were both
-  worse — a `500` body with no `code` breaks FR-032 for the one case a client cannot anticipate, and
-  reusing an existing code would misreport a bug as a client error. Added: `500` `INTERNAL_ERROR`,
-  "An unhandled failure in the service; `detail` carries no internal text." It is a synchronous code
-  and never appears as a comment's `error.code`. This extends the catalogue rather than revising any
-  decision, so no D-number changes.
-- **`comment_sync_targets.age_anchor_at` (extends §5.3 and §7.3).** §7.3 schedules a refresh by
-  **post age**, but the table as specified carries no timestamp to measure that age from, and the
-  alternatives both fail: reading `posts.published_at` through the `Posts` port would be one
-  cross-boundary call per due target on every scheduler tick (an N+1 across a service boundary, every
-  minute), and for a post never published through the platform there is no projection row to read at
-  all — while §7.3 requires exactly those posts to be tracked. Added: `age_anchor_at timestamptz not
-  null` — the instant the age bands are measured from. For a post registered through the
-  `PostPublished` port it is that post's `published_at`; for an external post first seen through an
-  ingested comment it is that comment's `occurred_at`, which establishes only that the post existed by
-  then. The column is named for what it is used for rather than `published_at`, because for an
-  external post it is a lower bound and not a publication time, and a name that implied otherwise
-  would invite a reader to treat it as one. This adds a column; it revises no decision, so no
-  D-number changes.
-- **The stuck-work sweeper also recovers `processing` (extends §7.1 step 4).** Step 4 describes the
-  sweeper as re-enqueueing `queued` comments older than a minute with no active job, which leaves one
-  state with no way out: a worker that dies between the conditional `queued → processing` transition
-  and settling the outcome leaves the row in `processing` forever. BullMQ's stalled-job retry does not
-  recover it, because the retry's own `markProcessing` finds the row no longer `queued`, affects no row
-  and correctly stops. Nothing double-publishes — the conditional updates still hold — but the comment
-  never reaches a terminal state and the customer's reply is neither posted nor failed.
-  The sweeper therefore also selects `status = 'processing'` rows whose `last_attempt_started_at` is
-  older than a threshold comfortably beyond the longest plausible platform call, and returns them to
-  `queued` for another attempt. That attempt is safe for the same reason a retry after an unknown
-  outcome is safe: `attempt_count` has already been incremented, and reconciliation through
-  `findPublishedComment` still gates any second send. The threshold is deliberately generous, because
-  returning a row that is genuinely still being published costs a reconciliation read, while leaving it
-  stuck costs the reply. The index `(status, last_attempt_started_at) WHERE status IN ('queued',
-  'processing')` already covers this selector — it was specified for both states from the start, which
-  is itself evidence the omission was in the prose rather than the design. This extends a step; it
-  revises no decision, so no D-number changes.
-- **`CommentPage` carries deleted ids separately from comments (extends §8.3 and the adapter
-  contract).** §8.3 says a Bluesky `notFoundPost` marker is an explicit tombstone that may mark that
-  comment deleted on its own. Returning it inside `CommentPage.comments` as an ordinary
-  `NormalizedComment` made that unachievable in practice: a consumer iterating the page upserts it as
-  `posted`, and — worse — recording it as *seen* suppresses the absence-based deletion the complete
-  walk would otherwise have detected, so the tombstone actively prevents the fallback it was meant to
-  pre-empt. `CommentPage` therefore gains a separate field for the platform comment ids a page reports
-  as deleted; adapters put tombstones only there, and the refresh walk routes them through the same
-  delete branch a webhook delete uses, without adding them to the seen set. The signal has to live
-  outside `NormalizedComment` because otherwise every future consumer of `listComments` must remember
-  it exists — which is exactly the mistake that occurred. This changes a contract shape; it revises no
-  decision, so no D-number changes.
-- **The outbox relay publishes one row per transaction (extends D9).** Relaying the whole batch
-  inside a single transaction means one row BullMQ will never accept — a payload it rejects, a shape
-  Redis refuses as part of a key — rolls the batch back on every pass. The row sits at the front of
-  the oldest-100 selection and blocks every event behind it indefinitely, so a single poison event
-  stops domain-event delivery for the whole service. Each row therefore publishes and stamps in its
-  own transaction, re-read under `FOR UPDATE SKIP LOCKED`; a failing row increments
-  `outbox_events.attempts`, is logged, and the loop continues. The row is never deleted: the outbox
-  is the only record of the event, so dropping it would lose the event permanently — past ten
-  attempts the log level rises to `error` instead, which is what makes a stuck event an incident
-  rather than an invisible retry. A pass in which *every* row failed still rejects, so a total
-  outage is still reported as a failed pass. This extends a decision's implementation; D9 itself is
-  unchanged.
-- **The age-band group is a registry property, not a per-platform branch (extends §7.3, D28).** §7.3
-  gives refresh cadences per post age, and the two supported platform families need different
-  ladders. Branching on `platform` inside the scheduler would put platform knowledge back into a use
-  case, which Principle IV forbids. Each registry entry therefore carries a `syncIntervalGroup`
-  naming *which* configured band table applies; the minutes themselves stay in `SyncIntervalsConfig`
-  so a deployment can retune them without a code change. Adding a platform adds a registry entry, not
-  a branch. This extends a section; it revises no decision, so no D-number changes.
-- **A refresh-request test asserts the job row, not only the HTTP response (narrows §7.3's
-  acceptance).** A case that checks only the response shape of `POST /refresh` passes whether or not
-  a `comment_sync_jobs` row was actually created and whether or not the target's cooldown moved —
-  the two things the endpoint exists to do. Refresh-request tests therefore assert the committed row
-  and the cooldown alongside the response. This narrows how the behaviour is verified; it revises no
-  decision, so no D-number changes.
-- **A reconciliation guard survives between publish attempts (extends D14, §7.1 step 6).** D14
-  requires `findPublishedComment` to gate any second send after an unknown outcome, and the
-  implementation held that fact only in the failing attempt's own stack. A worker killed between the
-  platform accepting the write and this service committing `posted` therefore left a row the
-  stuck-work sweeper returned to `queued` with nothing recorded about the send that may have gone
-  out, and the next attempt published a second copy. `comments.needs_reconcile` records it instead:
-  set in its own committed transaction immediately before the adapter call, carried forward by
-  `markQueuedForRetry` when an attempt ends without learning the outcome, set unconditionally by the
-  sweeper when it recovers a `processing` row, and cleared only by a settled outcome or by a
-  completed search that found nothing. The cost is one extra `UPDATE` per publish attempt — the same
-  price §18's sweeper entry already accepts for a reconciliation read. This adds a column and
-  strengthens an existing gate; D14 itself is unchanged.
-- **A 5xx answer to a write is an unknown outcome, not a retryable one (corrects §4.3).** §4.3 lists
-  `RetryableError` as covering "429 / 5xx", which is right for a read and wrong for a write: a 5xx
-  means the request reached the platform, so the comment may already exist behind it, and
-  `RetryableError` is retried without reconciliation. That is the double post D14 exists to prevent.
-  The classifiers therefore take the operation kind: `>= 500` maps to `OutcomeUnknownError` on a
-  write and stays `RetryableError` on a read. A 429 stays retryable in both directions, because a
-  rate-limit rejection was never executed. This corrects a sentence in §4.3; D14 itself is unchanged.
-- **An abandoned `comment_sync_jobs` row is swept (extends §7.3).** The partial unique index on
-  `(target_id) WHERE status IN ('queued','running')` is what keeps one target from being walked
-  twice at once, and its cost is that a row nobody will ever finish holds that target forever: every
-  scheduler tick's `onConflictDoNothing` skips it without a word, `POST /refresh` keeps reporting the
-  dead job as active, and the post stops syncing with nothing logged. Three things produce such a
-  row — the scheduler committing a row and dying before `syncQueue.add`, a runner killed between
-  `markJobRunning` and `finalizeJob`, and losing Redis, which §4.1 explicitly permits. A sweeper
-  therefore re-enqueues `queued` rows past a threshold and finalises abandoned `running` rows as
-  `failed`, releasing the index so the next tick can schedule the target again. The scheduler also
-  moves its `syncQueue.add` after the transaction commits, which narrows the first case but cannot
-  close it — hence the sweeper rather than the ordering alone. This extends a section; it revises no
-  decision, so no D-number changes.
-- **The usage signal is reported sideways and acted on by the workers (implements §8.2).** §8.2
-  requires parsing `X-Business-Use-Case-Usage` / `X-App-Usage` and, under high usage, delaying that
-  account's jobs. Only the parsing existed: `GraphResponse.usage` had no reader anywhere in the
-  service, so the throttling half was absent while looking implemented. Routing the reading up
-  through the adapter port was rejected — `usage` is a Meta fact, and `CommentPage` /
-  `PublishedComment` are the platform-agnostic types every use case depends on, so carrying it
-  there would put one platform's vocabulary into all of them. The Graph client instead reports it
-  through an injected sink (`GraphClientOptions.onUsage`), which the two workers wire to a
-  short-lived per-account key in Redis. Before starting work for an account, each worker reads that
-  key and, past `META_USAGE_THROTTLE_PERCENT`, calls `moveToDelayed` for
-  `META_USAGE_THROTTLE_DELAY_MS` — the same treatment an empty token bucket already gets, spending
-  no retry attempt. Redis is the right home: the reading is advisory and per-account, and losing it
-  costs one un-throttled call, which is what §4.1 permits Redis to hold. "Nothing known" is
-  deliberately not "throttled", so an empty cache never stalls the deployment. This implements a
-  section; it revises no decision, so no D-number changes.
-- **D31. Reads are one filtered collection; writes stay addressed (narrows D11, D13, D27, A3, A10a
+  first said a projection row flipping back to `active` clears the record, which cannot be
+  implemented: this service never writes `social_accounts.status`, so that column reads `active`
+  throughout an auth failure — "projection active plus a local record" is the *normal* broken state,
+  indistinguishable from recovery. The implementable trigger is evidence: a **successful** platform
+  call proves the credential works again, so `AccountHealth.clear` is called from a successful sync
+  walk. Sync keeps running for an account marked `auth_failed` — the calls are read-only and cost
+  nothing when they fail — which is what makes the clear reachable at all.
+- **D31 — reads are one filtered collection; writes stay addressed (narrows D11, D13, D27, A3, A10a
   and §6.1).** The moderation view the product is for — "every new comment across every account in
   the workspace" — was reachable from no address: the three reads §6.1 used to carry are each keyed
   to an identifier the caller must already hold, and the only inbox was per account. Time, not post
-  hierarchy, is the primary access path for comments, so hierarchy belongs in a filter rather than
-  in the address. `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
-  `GET /v1/accounts/:accountId/comments` are therefore **replaced** by one collection,
-  `GET /v1/comments`, whose filters (`postId`, `parentCommentId`, `accountId`, `platform`,
-  `topLevelOnly`, `isOwn`, `since`, `until`) intersect: no filter overrides another, and a
-  combination no comment can satisfy is a valid request answered with an empty page, not a `400`.
-  The removal is outright — no alias, no redirect, no deprecation period — because two read paths
-  for one read is exactly the drift the change exists to end.
-  - **What this does not touch.** Writes keep their addresses (`POST /v1/posts/:postId/comments`,
-    `POST /v1/comments/:commentId/replies`, `POST /v1/posts/:postId/comments/sync`): a command names
-    its target, a query describes a set. D19's refresh therefore stays addressed to a post, and the
-    `202` contract, idempotency, reply-depth enforcement (D12) and quota reservation (D16) are
-    untouched. So is the `Comment` representation (§6.2), the error catalogue (§6.3), tenancy (D20 —
-    a foreign identifier in any filter is `404`, never `403` and never an empty success) and the
-    keyset half of D27 (opaque cursor over `(occurred_at, id)`, direction encoded in it, a cursor
-    replayed under the other direction is `400`).
-  - **Two visible behaviour changes, stated rather than buried.** (1) One collection has one default
-    direction, `desc`; the replies read, which defaulted to `asc` at its own address, now asks for
-    `order=asc` explicitly. A default that depended on which filter was present would silently flip
-    direction when an unrelated filter was added — and since the cursor carries its direction, the
-    caller's next page would then fail as a mismatch. (2) `sync: { lastSyncedAt, activeJobId }` is
-    reported iff the selection names a post, whichever other filters accompany it, and is **absent**
-    rather than `null` otherwise: refresh freshness is a property of a post, and a selection spanning
-    many posts has no single answer to give.
-  - **`topLevelOnly` is this service's own filter, not a borrowed one.** It preserves the "a post's
-    page is its top level" reading the removed route gave for free, and it is the predicate that
-    keeps `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` reachable from the
-    collection — which is how the three preserved reads keep the plans they have today.
-  - **The task-level requirement is preserved, not dropped.** `task.md`'s "retrieve comments for a
-    published post" is `GET /v1/comments?postId=…&topLevelOnly=true` — the same rows, the same
-    `replyCount`, the same `sync` block, reached by a filter instead of a path. The shape also
-    coincides with Blotato's own documented flat `GET /comments` (§2.1), which is a corroboration
-    and not the argument: the argument is the missing cross-account inbox. Discoverability is
-    explicitly **not** the justification — account and post identifiers legitimately originate
+  hierarchy, is the primary access path for comments, so hierarchy belongs in a filter.
+  `GET /v1/posts/:postId/comments`, `GET /v1/comments/:commentId/replies` and
+  `GET /v1/accounts/:accountId/comments` are **replaced** by `GET /v1/comments`, whose filters
+  (`postId`, `parentCommentId`, `accountId`, `platform`, `topLevelOnly`, `isOwn`, `since`, `until`)
+  intersect: no filter overrides another, and a combination no comment can satisfy is a valid request
+  answered with an empty page. The removal is outright — no alias, no redirect, no deprecation —
+  because two read paths for one read is the drift the change exists to end.
+  - **Untouched:** writes keep their addresses (a command names its target, a query describes a set),
+    so D19's refresh stays post-addressed, and the `202` contract, idempotency, reply-depth (D12) and
+    quota reservation (D16) are unchanged. So are the `Comment` representation (§6.2), the error
+    catalogue (§6.3), tenancy (D20 — a foreign identifier in any filter is `404`, never `403` and
+    never an empty success) and the keyset half of D27.
+  - **Two visible behaviour changes.** (1) One collection has one default direction, `desc`; the
+    replies read, which defaulted to `asc` at its own address, now asks for `order=asc` explicitly —
+    a default that depended on which filter was present would silently flip direction when an
+    unrelated filter was added, and since the cursor carries its direction, the caller's next page
+    would then fail as a mismatch. (2) `sync: { lastSyncedAt, activeJobId }` is reported iff the
+    selection names a post, and is **absent** rather than `null` otherwise: refresh freshness is a
+    property of a post, and a selection spanning many posts has no single answer.
+  - **`topLevelOnly` is this service's own filter.** It preserves the "a post's page is its top
+    level" reading the removed route gave for free, and it is the predicate that keeps
+    `(post_id, occurred_at DESC, id DESC) WHERE parent_comment_id IS NULL` reachable from the
+    collection.
+  - **The task-level requirement is preserved.** `task.md`'s "retrieve comments for a published post"
+    is `GET /v1/comments?postId=…&topLevelOnly=true` — the same rows, `replyCount` and `sync` block,
+    reached by a filter instead of a path. That this coincides with Blotato's own flat `GET /comments`
+    (§2.1) is corroboration, not the argument; the argument is the missing cross-account inbox.
+    Discoverability is explicitly **not** the justification — account and post identifiers originate
     outside this service (D8), and this feature adds no listing of either.
   - **Cost.** The workspace-wide listing is the one read not bounded by an identifier, so it gets one
-    additive index, `(workspace_id, occurred_at DESC, id DESC)` (§5.2), and one measurable claim: at
-    equal page size its p95 on a ten-times-larger history stays within 1.5× — measured on demand by a
-    script and recorded in DESIGN.md, deliberately not a CI gate, because timing on a shared runner
-    is too noisy to gate on and a flaky gate gets disabled. Filter combinations with no leading index
-    (a post's whole thread, `platform`-only, `isOwn`-only) degrade to an ordered walk of that index
-    with a residual filter; an index per combination is a power set, and the trigger to add one is a
-    measurement rather than an intuition.
-  - **Scope of the revision.** In feature 001's requirement set this revises FR-001 (a post's
-    top-level comments), FR-003 (per-list default ordering), FR-006 (post-scoped refresh reporting)
-    and FR-008 (the per-account inbox) — each becomes a selection over the collection rather than its
-    own address. FR-002's "replies are a separately paged list" survives as the `parentCommentId`
-    filter, and FR-005's visibility rule (A4) is unchanged: a deleted comment is listed only while it
-    still has replies beneath it.
+    additive index, `(workspace_id, occurred_at DESC, id DESC)`, and one measurable claim: at equal
+    page size its p95 on a ten-times-larger history stays within 1.5×. Measured on demand by a script
+    rather than gated in CI, because timing on a shared runner is too noisy to gate on and a flaky
+    gate gets disabled. Filter combinations with no leading index degrade to an ordered walk with a
+    residual filter; an index per combination is a power set, and the trigger to add one is a
+    measurement, not an intuition.
+  - **Scope.** In feature 001 this revises FR-001, FR-003, FR-006 and FR-008 — each becomes a
+    selection over the collection rather than its own address. FR-002's "replies are a separately
+    paged list" survives as the `parentCommentId` filter; FR-005's visibility rule (A4) is unchanged.
   - **Not part of this decision: the docs page.** A16 already requires OpenAPI to describe the key as
-    an `apiKey` header scheme so Swagger UI can authorize. The document does not, so every "Try it
-    out" answers `401`. Publishing the scheme globally and clearing it on the exempt operations the
-    document contains — from the *same* array the authentication hook enforces, each entry carrying
-    whether the route is published, so the described and the enforced lists cannot drift — implements
-    A16 rather than changing it, and so carries no decision of its own. Which exempt routes are
-    published is a property of how they are registered, not a decision: the webhook operations and
-    `/openapi.json` are `hide: true`, and `/docs` is plugin-served.
-- **An unrecognized query parameter on `GET /v1/comments` is a `400` (clarifies D31, §6.3).** D31
-  states that filters intersect and that an unsatisfiable *combination* is an empty `200`. It said
-  nothing about a parameter name the schema does not define, and a Zod object strips one by default —
-  so `?post_id=…` in snake_case, or `?platform[]=…` in the bracket-array convention, answered `200`
-  with the whole workspace's history. The filter the client asked for was never applied, and no field
-  of the response says so; on a read where every parameter narrows the result, that is
-  indistinguishable from a wrong answer. The query schema is strict: an unrecognized name is
-  `400 VALIDATION_ERROR`. A combination of *recognized* filters still produces an empty page, so this
-  narrows nothing D31 promised. It revises no decision — it answers a question D31 left open.
+    an `apiKey` header scheme so Swagger UI can authorize; the document did not, so every "Try it
+    out" answered `401`. Publishing the scheme globally and clearing it on the exempt operations the
+    document contains — from the *same* array the authentication hook enforces — implements A16
+    rather than changing it.
+
+### Corrections: stated behaviour that was wrong
+
+- **A 5xx answer to a write is an unknown outcome, not a retryable one (corrects §4.3).** §4.3 listed
+  `RetryableError` as covering "429 / 5xx" — right for a read, wrong for a write: a 5xx means the
+  request reached the platform, so the comment may already exist behind it, and `RetryableError` is
+  retried without reconciliation. That is the double post D14 exists to prevent. Classifiers now take
+  the operation kind: `>= 500` maps to `OutcomeUnknownError` on a write, stays `RetryableError` on a
+  read. A 429 stays retryable in both directions — a rate-limit rejection was never executed. D14
+  itself is unchanged.
+- **A complete walk excludes rows written in the last five minutes (narrows FR-019).** "Complete" was
+  read as "the walk finished", which is not enough: a comment inserted *while* the walk ran — a reply
+  this service just published, a webhook delivery, a comment the platform had not yet indexed — is
+  absent from the page through no fault of the platform, and absence is what marks it `deleted`. The
+  revive guard then makes that deletion permanent, so the race costs data rather than a retry.
+  `inferDeletions` now excludes rows whose last write falls inside a five-minute grace window before
+  the walk started. The cost falls the safe way: a genuinely deleted comment also edited in that
+  window survives until the next walk — a delay, against an irreversible false deletion.
 - **Both `order` values are indexed only while neither the index nor the `ORDER BY` names a NULL
   placement (implements D27, §5.2).** D27's "B-tree indexes are readable in both directions" is true
   of the index and false of a query that disagrees with it about where nulls sort: a Postgres pathkey
   includes NULL placement, and the planner does not use a column's `NOT NULL` to match one. Naming
   `NULLS LAST` on the ordering clause cost `order=asc` its index on all three `DESC` listing indexes,
-  and cost a `parentCommentId` selection — whose default is `desc` — `comments_replies_idx`; each
-  planned a full `Sort` of the selection. Both sides now stay at Postgres's default for the direction
-  (migration `0005`), and `benchmark.integration.test.ts` asserts the whole selection × direction
-  matrix. This is an implementation fact about D27, not a change to it.
-- **`comments.occurred_at` is `timestamptz(3)` (implements D27, data-model.md §2).** The keyset cursor
-  encodes `toISOString()`, which is millisecond-precision, while the column accepted microseconds.
-  A stored value the cursor cannot express makes paging lossy in both directions — `desc` skips the
-  rest of that millisecond, `asc` repeats the cursor row — and it is invisible from TypeScript, since
-  the driver parses timestamps into a millisecond-precision `Date`. Every writer passes a JS `Date`,
-  so nothing stored microseconds; pinning the column (migration `0006`) makes that the database's
+  and cost a `parentCommentId` selection its own — each planning a full `Sort`. Both sides now stay
+  at Postgres's default for the direction (migration `0005`), and `benchmark.integration.test.ts`
+  asserts the whole selection × direction matrix. An implementation fact about D27, not a change to
+  it.
+- **`comments.occurred_at` is `timestamptz(3)` (implements D27).** The keyset cursor encodes
+  `toISOString()`, which is millisecond-precision, while the column accepted microseconds. A stored
+  value the cursor cannot express makes paging lossy in both directions — `desc` skips the rest of
+  that millisecond, `asc` repeats the cursor row — and it is invisible from TypeScript, since the
+  driver parses timestamps into a millisecond-precision `Date`. Every writer passes a JS `Date`, so
+  nothing stored microseconds; pinning the column (migration `0006`) makes that the database's
   guarantee rather than a convention each new writer must know.
+- **An unrecognized query parameter on `GET /v1/comments` is a `400` (clarifies D31, §6.3).** D31
+  said filters intersect and an unsatisfiable *combination* is an empty `200`, but said nothing about
+  a parameter name the schema does not define — and a Zod object strips one by default, so
+  `?post_id=…` in snake_case, or `?platform[]=…`, answered `200` with the whole workspace's history.
+  The filter was never applied and no field of the response says so; on a read where every parameter
+  narrows the result, that is indistinguishable from a wrong answer. The query schema is strict. A
+  combination of *recognized* filters still produces an empty page, so this narrows nothing D31
+  promised.
+
+### Additions the implementation required
+
+- **`comment_sync_targets.age_anchor_at` (extends §5.3 and §7.3).** §7.3 schedules a refresh by post
+  age, but the table carried no timestamp to measure age from, and both alternatives fail: reading
+  `posts.published_at` through the `Posts` port is one cross-boundary call per due target on every
+  scheduler tick, and for a post never published through the platform there is no projection row at
+  all — while §7.3 requires exactly those posts to be tracked. Added as `not null`: for a post
+  registered through the `PostPublished` port it is that post's `published_at`; for an external post
+  first seen through an ingested comment it is that comment's `occurred_at`, a lower bound. Named for
+  its use rather than `published_at`, because a name implying publication time would invite a reader
+  to treat a lower bound as one.
+- **`comments.needs_reconcile` (extends D14, §7.1 step 6).** D14 requires `findPublishedComment` to
+  gate any second send after an unknown outcome, and the implementation held that fact only in the
+  failing attempt's own stack. A worker killed between the platform accepting the write and this
+  service committing `posted` therefore left a row the sweeper returned to `queued` with nothing
+  recorded about the send that may have gone out, and the next attempt published a second copy. The
+  column records it instead: set in its own committed transaction immediately before the adapter
+  call, carried forward when an attempt ends without learning the outcome, set unconditionally by the
+  sweeper, and cleared only by a settled outcome or a completed search that found nothing. Cost: one
+  extra `UPDATE` per publish attempt. D14 itself is unchanged.
+- **`Accounts.listByPlatformAccount` (extends the `Accounts` port, D8).** A webhook delivery
+  identifies its account only by the platform's own id — a Page id or IG user id — while every
+  existing lookup is keyed by our internal `social_account_id`, so the webhook worker cannot resolve
+  a delivery at all with the port as specified; the one forbidden alternative is a direct `SELECT`
+  against the projection from inside `comments` (D8, D29). It returns a **list**, not a `Found<T>`,
+  because the projection carries no uniqueness on `(platform, platform_account_id)` and none can be
+  assumed: two workspaces may legitimately connect the same Page, and a delivery concerns both. A
+  single-record lookup would silently serve one and drop the other's comments — a tenancy-shaped data
+  loss no test keyed to one workspace would catch. An empty list is the "unknown account" case §7.2
+  marks processed with a warning; the dedup key keeps fan-out rows apart.
+- **`CommentPage` carries deleted ids separately from comments (extends §8.3 and the adapter
+  contract).** §8.3 says a Bluesky `notFoundPost` marker is an explicit tombstone. Returning it
+  inside `CommentPage.comments` as an ordinary `NormalizedComment` made that unachievable: a consumer
+  iterating the page upserts it as `posted` and — worse — recording it as *seen* suppresses the
+  absence-based deletion the complete walk would otherwise detect, so the tombstone actively prevents
+  the fallback it was meant to pre-empt. `CommentPage` therefore gains a separate field; adapters put
+  tombstones only there, and the walk routes them through the same delete branch a webhook delete
+  uses, without adding them to the seen set. The signal has to live outside `NormalizedComment`
+  because otherwise every future consumer of `listComments` must remember it exists — which is
+  exactly the mistake that occurred.
+- **`INTERNAL_ERROR` (extends §6.3).** FR-032 requires every failure to be `application/problem+json`
+  carrying a machine-readable `code`, but §6.3 listed only failures a client can cause — no entry for
+  an unhandled exception. Both alternatives were worse: a `500` with no `code` breaks FR-032 for the
+  one case a client cannot anticipate, and reusing an existing code would misreport a bug as a client
+  error. Added as a synchronous code that never appears as a comment's `error.code`; `detail` carries
+  no internal text.
+- **An undecryptable credential is an `AuthError` (extends D26/D30).** `AccountCredentials` decrypts
+  on every read, and a ciphertext that will not decrypt — a botched key rotation, a corrupted row —
+  raised a bare crypto error. Nothing typed it, so nothing handled it: the webhook worker retried
+  such a delivery under backoff **forever**, and the publish path had no case for it. Typed as
+  `AuthError` it flows into machinery that already exists (D30), and that is also the honest
+  classification — the credential is unusable and only a reconnection fixes it. Found by an
+  integration test hanging for its full 60-second budget rather than failing; the hang, not the
+  failure, was the symptom worth chasing.
+- **The age-band group is a registry property, not a per-platform branch (extends §7.3, D28).**
+  Branching on `platform` inside the scheduler would put platform knowledge back into a use case.
+  Each registry entry instead carries a `syncIntervalGroup` naming which configured band table
+  applies; the minutes stay in `SyncIntervalsConfig` so a deployment can retune without a code
+  change. Adding a platform adds a registry entry, not a branch.
+
+### Operational behaviour under this deployment
+
+- **`domain-events` is trimmed on a schedule (extends D9).** The relay publishes to a BullMQ queue
+  for consumers in other services — and here there are none, so nothing moves a job out of `wait`.
+  Bounded `removeOnComplete` does not help a job that never completes, and D24 mandates `noeviction`,
+  so the queue grows until Redis refuses writes and takes the publish and sync paths down with it.
+  Of the three options — stop publishing (deleting the D9 contract this service exists to
+  demonstrate), let it grow (a scheduled outage), or expire what nobody collected — the last is what
+  a real broker does. A scheduled job drops jobs older than `DOMAIN_EVENTS_TTL_HOURS` (default 24)
+  and logs the count, so an operator sees a number rather than a silent loss. Postgres keeps the
+  authoritative record: `outbox_events` rows are marked published and retained under the normal
+  purge, so a future consumer is backfilled from the table rather than from Redis.
+- **The outbox relay publishes one row per transaction (extends D9).** Relaying a whole batch inside
+  one transaction means a single row BullMQ will never accept rolls the batch back on every pass —
+  and it sits at the front of the oldest-100 selection, blocking every event behind it indefinitely,
+  so one poison event stops domain-event delivery for the whole service. Each row therefore publishes
+  and stamps in its own transaction under `FOR UPDATE SKIP LOCKED`; a failing row increments
+  `attempts` and is logged. The row is never deleted — the outbox is the only record of the event —
+  but past ten attempts the log level rises to `error`, which makes a stuck event an incident rather
+  than an invisible retry. A pass in which *every* row failed still rejects, so a total outage is
+  still reported as a failed pass.
+- **The stuck-work sweeper also recovers `processing` (extends §7.1 step 4).** Step 4 described the
+  sweeper as re-enqueueing `queued` comments, which leaves one state with no way out: a worker that
+  dies between the conditional `queued → processing` transition and settling the outcome leaves the
+  row in `processing` forever. BullMQ's stalled-job retry does not recover it, because its own
+  `markProcessing` finds the row no longer `queued` and correctly stops. Nothing double-publishes,
+  but the comment never reaches a terminal state and the customer's reply is neither posted nor
+  failed. The sweeper therefore also returns `processing` rows whose `last_attempt_started_at` is
+  older than a threshold comfortably beyond the longest plausible platform call. That retry is safe
+  for the same reason any post-unknown retry is: reconciliation still gates a second send. The
+  threshold is deliberately generous — returning a row genuinely still publishing costs a
+  reconciliation read, while leaving it stuck costs the reply. The index
+  `(status, last_attempt_started_at) WHERE status IN ('queued', 'processing')` already covered both
+  states, which is itself evidence the omission was in the prose rather than the design.
+- **An abandoned `comment_sync_jobs` row is swept (extends §7.3).** The partial unique index on
+  `(target_id) WHERE status IN ('queued','running')` keeps one target from being walked twice at
+  once, and its cost is that a row nobody will finish holds that target forever: every scheduler
+  tick's `onConflictDoNothing` skips it silently, `POST /refresh` keeps reporting the dead job as
+  active, and the post stops syncing with nothing logged. Three things produce such a row — the
+  scheduler committing and dying before `syncQueue.add`, a runner killed between `markJobRunning` and
+  `finalizeJob`, and losing Redis, which §4.1 explicitly permits. A sweeper re-enqueues `queued` rows
+  past a threshold and finalises abandoned `running` rows as `failed`. The scheduler also moves its
+  `syncQueue.add` after commit, which narrows the first case but cannot close it.
+- **The Meta usage signal is reported sideways and acted on by the workers (implements §8.2).** §8.2
+  requires parsing `X-Business-Use-Case-Usage` / `X-App-Usage` and delaying an account's jobs under
+  high usage. Only the parsing existed: `GraphResponse.usage` had no reader, so the throttling half
+  was absent while looking implemented. Routing it up through the adapter port was rejected — `usage`
+  is a Meta fact, and `CommentPage` / `PublishedComment` are the platform-agnostic types every use
+  case depends on. The Graph client reports it through an injected sink
+  (`GraphClientOptions.onUsage`), which the workers wire to a short-lived per-account Redis key; past
+  `META_USAGE_THROTTLE_PERCENT` a worker calls `moveToDelayed`, the same treatment an empty token
+  bucket gets, spending no retry attempt. "Nothing known" is deliberately not "throttled", so an
+  empty cache never stalls the deployment.
+
+### Test narrowings
+
+- **A17's two-variant equivalence test runs against one live fixture (narrows T097).** A17 asserts
+  the two D28 login variants normalize identically, specified as one parameterized body over a
+  fixture per variant. S2 produced the `facebook_login` fixture; the `instagram_login` one does not
+  exist. The test therefore runs both arms over the **same** recorded body, differing only in host
+  and credential — which still proves the property A17 is about (the adapter does not branch on
+  variant) while making no claim about what `graph.instagram.com` returns. Hand-writing the second
+  fixture would assert a response shape nobody observed, the exact failure the spike gate prevents.
+- **A refresh-request test asserts the job row, not only the HTTP response (narrows §7.3).** A case
+  checking only the response shape passes whether or not a `comment_sync_jobs` row was created and
+  whether or not the target's cooldown moved — the two things the endpoint exists to do.
